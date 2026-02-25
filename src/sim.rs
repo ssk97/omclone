@@ -51,7 +51,7 @@ pub enum Instr {
     PivotClockwise, PivotCounterClockwise,
     Forward, Back,
     Repeat, Reset,
-    Noop, Empty,
+    Noop, Halt, Empty,
 }
 impl Instr {
     pub fn to_byte(&self) -> u8 {
@@ -70,6 +70,7 @@ impl Instr {
             Repeat                  => b'C',
             Reset                   => b'X',
             Noop                    => b'O',
+            Halt                   => b'B',
             Empty                   => b' ',
         }
     }
@@ -89,6 +90,7 @@ impl Instr {
             b'C' => Some(Repeat),
             b'X' => Some(Reset),
             b'O' => Some(Noop),
+            b'B' => Some(Halt),
             b' ' => Some(Empty),
             _ => None,
         }
@@ -109,6 +111,7 @@ impl Instr {
             Repeat                  => 'C',
             Reset                   => 'X',
             Noop                    => 'O',
+            Halt                    => 'B',
             Empty                   => ' ',
         }
     }
@@ -128,6 +131,7 @@ impl Instr {
              //'C' =>  Some(Repeat                ),
              //'X' =>  Some(Reset                 ),
              //'O' =>  Some(Noop                  ),
+             'B' =>  Some(Halt                  ),
              ' ' =>  Some(Empty                 ),
              _ => None
         }
@@ -142,15 +146,21 @@ pub struct Tape {
 impl Tape {
     pub fn get(&self, timestep: usize, loop_len: usize) -> Instr {
         use Instr::Empty;
-        if timestep >= self.first && loop_len > 0{
+        if timestep >= self.first{
             let after_first = timestep - self.first;
-            *self
-                .instructions
-                .get(after_first % loop_len)
-                .unwrap_or(&Empty)
-        } else {
-            Empty
+            if self.instructions.contains(&Instr::Halt){
+                return *self
+                    .instructions
+                    .get(after_first)
+                    .unwrap_or(&Empty)
+            } else if loop_len > 0{
+                return *self
+                    .instructions
+                    .get(after_first % loop_len)
+                    .unwrap_or(&Empty)
+            }
         }
+        return Empty
     }
     pub fn to_string(&self) -> String{
         let mut output = " ".repeat(self.first);
@@ -364,13 +374,14 @@ pub struct Arm {
     pub arm_type: ArmType,
     pub instruction_tape: Tape,
     pub grabbing: bool,
+    pub halted: bool,
     pub atoms_grabbed: [AtomKey; 6],
 }
 
 impl Arm {
     pub fn new(pos: Pos, rot: Rot, len: i32, arm_type: ArmType, instruction_tape: Tape) -> Self {
         Arm { pos, rot, len, arm_type, instruction_tape,
-            grabbing: false,
+            grabbing: false, halted: false,
             atoms_grabbed: [AtomKey::null(); 6],
         }
     }
@@ -795,7 +806,7 @@ impl World {
         let timestep = timestep as usize;
         let instruction = tape.get(timestep, self.repeat_length);
         const STILL: ArmMovement = Move(HeldStill);
-        let action = match instruction {
+        let action = if arm.halted {STILL} else {match instruction {
             Extend => {
                 if arm_type == Piston && arm.len < 3 {
                     LengthAdjust(1)
@@ -855,8 +866,9 @@ impl World {
             Repeat | Reset | Noop => {
                 panic!("Unprocessed instruction!");
             }
-            Empty => (STILL),
-        };
+            Halt => {arm.halted = true; STILL}
+            Empty => STILL,
+        }};
         let rotation_store = arm.rot;
         for atom in arm.atoms_grabbed {
             if !atom.is_null() {
@@ -1582,7 +1594,7 @@ impl World {
                         }
                     }
                     PivotCounterClockwise | PivotClockwise | Empty => {}
-                    Reset | Repeat | Noop => {bail!("Instruction {:?} not basic move!",instr);}
+                    Reset | Repeat | Noop | Halt => {bail!("Instruction {:?} not basic move!",instr);}
                 }
                 Ok(())
             };
@@ -1684,6 +1696,10 @@ impl World {
                     curr += reset_vec.len();
                     repeat_ending = curr;
                 }
+                Halt => {
+                    instructions.push(Halt);
+                    curr += 1;
+                }
                 Noop => {
                     instructions.push(Empty);
                     curr += 1;
@@ -1737,8 +1753,8 @@ impl World {
             };
             let instr_len = World::normalize_instructions(a, &world.track_maps)?;
             world.instruction_count += a.instruction_tape.instructions.iter()
-                .filter(|&&a| a != Instr::Empty).count() as i32;
-            if world.repeat_length < instr_len {
+                .filter(|&&a| a != Instr::Empty && a != Instr::Halt).count() as i32;
+            if world.repeat_length < instr_len && a.instruction_tape.instructions.iter().all(|x| *x != Instr::Halt){
                 world.repeat_length = instr_len;
             }
             if a.arm_type == VanBerlo {
