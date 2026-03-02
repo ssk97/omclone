@@ -397,8 +397,8 @@ impl RenderDataBase {
         //Draw the Hex grid
         if camera.scale_base > 0.01{
             let (inv_scale_x, inv_scale_y)= (1./scale.0,1./scale.1);
-            let xc = (-world_offset[0]/2.-0.25).fract();
-            let yc = ((-world_offset[1]/2.)/Y_FACTOR+0.10).fract();
+            let xc = (-world_offset[0]/2.-0.26).fract();
+            let yc = ((-world_offset[1]/2.)/Y_FACTOR+0.09).fract();
             let xdf = inv_scale_x/2.;
             let ydf = inv_scale_y/(2.*Y_FACTOR);
             

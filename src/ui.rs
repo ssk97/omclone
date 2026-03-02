@@ -631,6 +631,8 @@ impl EventHandler for MyMiniquadApp {
                                             }
                                         });
                                     }
+                                    let marker2 = " ".repeat(curr_timestep+3)+"^";
+                                    ui.add(egui::Label::new(egui::RichText::new(marker2).monospace()));
                                 });
                             });
                             if let Some(target) = target_time {

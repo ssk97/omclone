@@ -1,6 +1,9 @@
 /target
 /.vscode
 /test
+/html
+/display_html
+*.puzzle
 *.solution
 
 #This contains potentially private information - a default is provided.
