@@ -1,11 +1,11 @@
 #![allow(unused_parens)]
 use bitflags::bitflags;
-#[cfg(feature = "color_eyre")]
+#[cfg(feature = "color-eyre")]
 use color_eyre::{
     eyre::{bail, ensure},
     Result,
 };
-#[cfg(not(feature = "color_eyre"))]
+#[cfg(not(feature = "color-eyre"))]
 use simple_eyre::{
     eyre::{bail, ensure},
     Result,
@@ -253,14 +253,27 @@ impl AtomType {
             _ => false,
         }
     }
-    pub fn promotable_metal(&self) -> Option<AtomType> {
+    pub fn metal_id(&self) -> Option<u8>{
         use AtomType::*;
         match &self {
-            Lead => Some(Tin),
-            Tin => Some(Iron),
-            Iron => Some(Copper),
-            Copper => Some(Silver),
-            Silver => Some(Gold),
+            Lead => Some(1),
+            Tin => Some(2),
+            Iron => Some(3),
+            Copper => Some(4),
+            Silver => Some(5),
+            Gold => Some(6),
+            _ => None,
+        }
+    }
+    pub fn id_to_metal(metal: u8) -> Option<AtomType> {
+        use AtomType::*;
+        match metal {
+            1 => Some(Lead),
+            2 => Some(Tin),
+            3 => Some(Iron),
+            4 => Some(Copper),
+            5 => Some(Silver),
+            6 => Some(Gold),
             _ => None,
         }
     }
@@ -270,7 +283,7 @@ pub struct Atom {
     pub pos: Pos,
     pub atom_type: AtomType,
     pub connections: [Bonds; 6],
-    pub is_berlo: bool,
+    pub immutable_wheel: bool,
 }
 impl Atom {
     pub fn new(pos: Pos, atom_type: AtomType) -> Atom {
@@ -278,7 +291,7 @@ impl Atom {
             pos,
             atom_type,
             connections: [Bonds::NO_BOND; 6],
-            is_berlo: false,
+            immutable_wheel: false,
         }
     }
     pub fn rotate_connections(&mut self, r: Rot) {
@@ -313,6 +326,7 @@ pub enum GlyphType {
     Dispersion, Purification, Duplication, Unification,
     Bonding, Unbonding, TriplexBond, MultiBond,
     Disposal, Equilibrium,
+    Rejection, Division, Proliferation,
     Track(Vec<Pos>), Conduit(Vec<Pos>, ConduitId),
     Input(AtomPattern, InOutId), Output(AtomPattern, i32, InOutId),
     OutputRepeating(AtomPattern, i32, InOutId),
@@ -321,7 +335,7 @@ pub enum GlyphType {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ArmType {
     PlainArm, DoubleArm, TripleArm, HexArm,
-    Piston, VanBerlo,
+    Piston, VanBerlo, Ravari
 }
 #[derive(Debug, Clone)]
 pub struct Glyph {
@@ -388,12 +402,10 @@ impl Arm {
     pub fn angles_between_arm(arm_type: ArmType) -> Rot {
         use ArmType::*;
         match arm_type {
-            PlainArm => 6,
+            PlainArm | Piston => 6,
             DoubleArm => 3,
             TripleArm => 2,
-            HexArm => 1,
-            Piston => 6,
-            VanBerlo => 1,
+            HexArm | VanBerlo | Ravari => 1,
         }
     }
     fn do_motion(&mut self, action: ArmMovement) {
@@ -467,7 +479,7 @@ impl WorldAtoms {
     fn get_nonberlo_type(&self, loc: Pos) -> Option<AtomType> {
         let &key = self.locs.get(&loc)?;
         let atom = self.atom_map.get(key).expect("Inconsistent atoms (nonberlo type check)");
-        if atom.is_berlo {return None};
+        if atom.immutable_wheel {return None};
         Some(self.atom_map.get(key)?.atom_type)
     }
     fn get_consumable_type(&self, motion: &WorldStepInfo, loc: Pos) -> Option<AtomType> {
@@ -846,7 +858,7 @@ impl World {
                         let null_key = AtomKey::null();
                         let mut current = self.atoms.locs.get(&grab_pos).unwrap_or(&null_key);
                         if current != &null_key{
-                            if self.atoms.atom_map[*current].is_berlo{
+                            if self.atoms.atom_map[*current].immutable_wheel{
                                 current = &null_key;
                             }
                         }
@@ -911,6 +923,12 @@ impl World {
             let pos_unif2 = glyph.reposition(Pos::new(-1, 1));
             let pos_unif3 = glyph.reposition(Pos::new(0, -1));
             let pos_unif4 = glyph.reposition(Pos::new(1, -1));
+
+            let pos_div = glyph.reposition(Pos::new(-1, 0));
+
+            let pos_proQS = glyph.reposition(Pos::new(1, 1));
+            let pos_proM = glyph.reposition(Pos::new(-1, 1));
+            let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
             fn add_all(area_set: &mut FxHashSet<Pos>,input: impl IntoIterator<Item=Pos>) -> SimResult<()>{
                 for p in input{
                     area_set.insert(p);
@@ -927,7 +945,7 @@ impl World {
                 Animismus => {
                     add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_ani])
                 }
-                Projection => {
+                Projection | Bonding | Unbonding | Rejection | Duplication=> {
                     add_all(&mut self.area_touched,[pos, pos_bi])
                 }
                 Dispersion => {
@@ -936,23 +954,17 @@ impl World {
                 Unification => {
                     add_all(&mut self.area_touched,[pos, pos_tri,pos_unif2,pos_unif3,pos_unif4])
                 }
-                Purification => {
+                Purification | TriplexBond => {
                     add_all(&mut self.area_touched,[pos, pos_bi, pos_tri])
-                }
-                Duplication => {
-                    add_all(&mut self.area_touched,[pos, pos_bi])
-                }
-                Bonding => {
-                    add_all(&mut self.area_touched,[pos, pos_bi])
                 }
                 MultiBond => {
                     add_all(&mut self.area_touched,[pos, pos_bi,pos_multi2,pos_multi3])
                 }
-                TriplexBond => {
-                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri])
+                Division => {
+                    add_all(&mut self.area_touched,[pos, pos_bi,pos_div])
                 }
-                Unbonding => {
-                    add_all(&mut self.area_touched,[pos, pos_bi])
+                Proliferation => {
+                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_proQS, pos_proM, pos_proO])
                 }
                 Input(meta_pattern,_) 
                 | Output(meta_pattern, _,_)
@@ -1046,7 +1058,7 @@ impl World {
             let rot = pos_to_rot(loc2 - loc1).unwrap() as usize;
             if let (Some(&key1), Some(&key2)) = (atoms.locs.get(loc1), atoms.locs.get(loc2)) {
                 let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
-                if (atom1.is_berlo || atom2.is_berlo) {return;}
+                if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
                 let bond1 = atom1.connections[rot];
                 assert_eq!(atom2.connections[(rot + 3) % 6], bond1, "Inconsistent bonds");
                 if bond1 == Bonds::NO_BOND {
@@ -1059,7 +1071,7 @@ impl World {
             let rot = pos_to_rot(loc2 - loc1).unwrap() as usize;
             if let (Some(&key1), Some(&key2)) = (atoms.locs.get(loc1), atoms.locs.get(loc2)) {
                 let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
-                if (atom1.is_berlo || atom2.is_berlo) {return;}
+                if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
                 if (atom1.atom_type != AtomType::Fire || atom2.atom_type != AtomType::Fire) {return;}
                 let bond1 = atom1.connections[rot];
                 assert_eq!(atom2.connections[(rot + 3) % 6], bond1, "Inconsistent bonds");
@@ -1092,6 +1104,11 @@ impl World {
             let pos_unif3 = glyph.reposition(Pos::new(0, -1));
             let pos_unif4 = glyph.reposition(Pos::new(1, -1));
 
+            let pos_div = glyph.reposition(Pos::new(-1, 0));
+
+            let pos_proQS = glyph.reposition(Pos::new(1, 1));
+            let pos_proM = glyph.reposition(Pos::new(-1, 1));
+            let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
             fn pop_check_make(atoms:&mut WorldAtoms, motion:&mut WorldStepInfo, atom: Atom) -> SimResult<()>{
                 let a = motion.spawning_atoms.pop_front().unwrap();
                 assert!(a == atom);
@@ -1105,7 +1122,7 @@ impl World {
             match &mut glyph.glyph_type{
                 Calcification => {
                     if let Some(atom) = atoms.get_atom_mut(pos) {
-                        if atom.atom_type.is_element() && !atom.is_berlo{
+                        if atom.atom_type.is_element() && !atom.immutable_wheel{
                             atom.atom_type = AtomType::Salt;
                         }
                     }
@@ -1133,9 +1150,19 @@ impl World {
                     let qs = atoms.get_consumable_type(motion, pos);
                     let metal = atoms.get_type(pos_bi);
                     if let (Some(Quicksilver), Some(metal)) = (qs, metal){
-                        if let Some(newtype) = metal.promotable_metal(){
+                        if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x + 1)){
                             atoms.destroy_atom_at(pos);
                             atoms.get_atom_mut(pos_bi).unwrap().atom_type = newtype;
+                        }
+                    }
+                }
+                Rejection => {
+                    let metal = atoms.get_type(pos);
+                    let open = atoms.check_empty(motion, pos_bi);
+                    if let (true, Some(metal)) = (open, metal){
+                        if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x - 1)){
+                            atoms.get_atom_mut(pos).unwrap().atom_type = newtype;
+                            atoms.create_atom(Atom::new(pos_bi, Quicksilver))?;
                         }
                     }
                 }
@@ -1192,7 +1219,7 @@ impl World {
                         let o = atoms.check_empty(motion, pos_tri);
                         match (a1,a2,o){
                             (Some(a1),Some(a2),true) if a1 == a2 => {
-                                let next = a1.promotable_metal();
+                                let next = a1.metal_id().and_then(|x:u8| AtomType::id_to_metal(x + 1));
                                 if let Some(newtype) = next {
                                     atoms.destroy_atom_at(pos);
                                     atoms.destroy_atom_at(pos_bi);
@@ -1207,6 +1234,26 @@ impl World {
                         motion.active_glyphs.pop_front();
                     }
                 }
+                Division => {
+                    if first_half{
+                        let a = atoms.get_consumable_type(motion, pos);
+                        let o1 = atoms.check_empty(motion, pos_bi);
+                        let o2 = atoms.check_empty(motion, pos_div);
+                        if let (Some(a),true,true) = (a,o1,o2) {
+                            let next1 = a.metal_id().and_then(|x:u8| AtomType::id_to_metal(x/2));
+                            let next2 = a.metal_id().and_then(|x:u8| AtomType::id_to_metal((x+1)/2));
+                            if let (Some(next1), Some(next2)) = (next1, next2) {
+                                atoms.destroy_atom_at(pos);
+                                motion.spawning_atoms.push_back(Atom::new(pos_bi, next1));
+                                motion.spawning_atoms.push_back(Atom::new(pos_div, next2));
+                                motion.active_glyphs.push_back(id);
+                            }
+                        }
+                    } else if motion.active_glyphs.front() == Some(&id){
+                        pop_make(&mut self.atoms, motion)?;
+                        motion.active_glyphs.pop_front();
+                    }
+                }
                 Duplication => {
                     let source = atoms.get_type(pos);
                     let salt = atoms.get_nonberlo_type(pos_bi);
@@ -1214,6 +1261,21 @@ impl World {
                         if elem.is_element() {
                             atoms.get_atom_mut(pos_bi).unwrap().atom_type = elem;
                         }
+                    }
+                }
+                Proliferation => {
+                    if first_half{
+                        let m = atoms.get_type(pos_proM);
+                        let qs = atoms.get_consumable_type(motion, pos_proQS);
+                        let o = atoms.check_empty(motion, pos_proO);
+                        if let (Some(m),Some(Quicksilver),true) = (m,qs,o) {
+                            atoms.destroy_atom_at(pos_proQS);
+                            motion.spawning_atoms.push_back(Atom::new(pos_proO, m));
+                            motion.active_glyphs.push_back(id);
+                        }
+                    } else if motion.active_glyphs.front() == Some(&id){
+                        pop_make(&mut self.atoms, motion)?;
+                        motion.active_glyphs.pop_front();
                     }
                 }
                 Bonding => {
@@ -1732,9 +1794,10 @@ impl World {
             use GlyphType::*;
             world.cost += match &g.glyph_type {
                 Calcification | Bonding | Unbonding => 10,
-                Animismus | Projection | Dispersion | Purification => 20,
-                Duplication | Unification | TriplexBond => 20,
+                Animismus | Projection | Dispersion | Purification | Duplication |
+                    Unification | TriplexBond | Rejection | Division => 20,
                 MultiBond => 30,
+                Proliferation => 40,
                 Disposal | Equilibrium | Output(_, _,_)| OutputRepeating(_, _,_) | Input(_,_) | Conduit(_,_) => 0,
                 Track(v) => (v.len() as i32) * 5,
             };
@@ -1748,7 +1811,7 @@ impl World {
             use ArmType::*;
             world.cost += match a.arm_type {
                 PlainArm => 20,
-                DoubleArm | TripleArm | HexArm | VanBerlo => 30,
+                DoubleArm | TripleArm | HexArm | VanBerlo | Ravari => 30,
                 Piston => 40,
             };
             let instr_len = World::normalize_instructions(a, &world.track_maps)?;
@@ -1757,15 +1820,19 @@ impl World {
             if world.repeat_length < instr_len && a.instruction_tape.instructions.iter().all(|x| *x != Instr::Halt){
                 world.repeat_length = instr_len;
             }
-            if a.arm_type == VanBerlo {
+            if a.arm_type == VanBerlo || a.arm_type == Ravari {
                 use AtomType::*;
                 a.grabbing = true;
-                const ATOM_SETUP: [AtomType; 6] = [Salt, Water, Air, Salt, Fire, Earth];
+                let atom_setup: [AtomType; 6] = match a.arm_type{
+                    VanBerlo => [Salt, Water, Air, Salt, Fire, Earth],
+                    Ravari => [Lead, Tin, Iron, Copper, Silver, Gold],
+                    _ => unreachable!()
+                };
                 for i in 0..6 {
                     let pos = a.pos + rot_to_pos((i as Rot) + a.rot);
-                    let atom_type = ATOM_SETUP[i];
+                    let atom_type = atom_setup[i];
                     let key = world.atoms.create_atom(Atom {
-                        pos, atom_type, connections: [Bonds::NO_BOND; 6], is_berlo: true
+                        pos, atom_type, connections: [Bonds::NO_BOND; 6], immutable_wheel: true
                     })?;
                     a.atoms_grabbed[i] = key;
                 }

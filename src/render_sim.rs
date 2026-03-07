@@ -120,6 +120,10 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
 		include_bytes!("../images/BondRed.png"),
 		include_bytes!("../images/BondWhite.png"),
 		include_bytes!("../images/BondYellow.png"),
+        include_bytes!("../images/Projection.png"),//20, rejection
+        include_bytes!("../images/Unbonder.png"),//division
+        include_bytes!("../images/Triplex.png"),//proliferation
+
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
         use image::io::Reader as ImageReader;
@@ -435,6 +439,9 @@ impl RenderDataBase {
                 TriplexBond     => 10,
                 Unbonding       => 11,
                 Unification     => 12,
+                Rejection => 20,
+                Division => 21,
+                Proliferation => 22,
                 Input(atoms_meta,_) | Output(atoms_meta,_,_) | OutputRepeating(atoms_meta,_,_)=> {
                     let atoms = &atoms_meta[0];
                     ctx.apply_bindings(&self.shapes.texture_bindings[14]);
