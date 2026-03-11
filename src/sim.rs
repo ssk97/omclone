@@ -1251,6 +1251,7 @@ impl World {
                         }
                     } else if motion.active_glyphs.front() == Some(&id){
                         pop_make(&mut self.atoms, motion)?;
+                        pop_make(&mut self.atoms, motion)?;
                         motion.active_glyphs.pop_front();
                     }
                 }
@@ -1669,7 +1670,7 @@ impl World {
                     basic_move(instr)?;
                     repeat_ending = curr;
                 }
-                Empty => {}
+                Empty | Halt => {}
 
                 Repeat => {
                     let rep_len = repeat_ending - repeat_source;
@@ -1758,10 +1759,6 @@ impl World {
                     curr += reset_vec.len();
                     repeat_ending = curr;
                 }
-                Halt => {
-                    instructions.push(Halt);
-                    curr += 1;
-                }
                 Noop => {
                     instructions.push(Empty);
                     curr += 1;
@@ -1825,7 +1822,7 @@ impl World {
                 a.grabbing = true;
                 let atom_setup: [AtomType; 6] = match a.arm_type{
                     VanBerlo => [Salt, Water, Air, Salt, Fire, Earth],
-                    Ravari => [Lead, Tin, Iron, Copper, Silver, Gold],
+                    Ravari => [Tin, Lead, Gold, Silver, Copper, Iron],
                     _ => unreachable!()
                 };
                 for i in 0..6 {
