@@ -131,7 +131,7 @@ impl Instr {
              //'C' =>  Some(Repeat                ),
              //'X' =>  Some(Reset                 ),
              //'O' =>  Some(Noop                  ),
-             'B' =>  Some(Halt                  ),
+             'b' =>  Some(Halt                  ),
              ' ' =>  Some(Empty                 ),
              _ => None
         }
