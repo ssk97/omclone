@@ -120,9 +120,9 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
 		include_bytes!("../images/BondRed.png"),
 		include_bytes!("../images/BondWhite.png"),
 		include_bytes!("../images/BondYellow.png"),
-        include_bytes!("../images/Projection.png"),//20, rejection
-        include_bytes!("../images/Unbonder.png"),//division
-        include_bytes!("../images/Triplex.png"),//proliferation
+        include_bytes!("../images/Rejection.png"),//20, rejection
+        include_bytes!("../images/Division.png"),//division
+        include_bytes!("../images/Proliferation.png"),//proliferation
 
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
