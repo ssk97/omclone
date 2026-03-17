@@ -52,11 +52,11 @@ rustc-hash = "1.1"
 smallvec = "1.10"
 
 
-egui = {version = "0.25", optional = true}
+egui = {version = "0.33", optional = true}
 miniquad = { version = "0.4", optional = true}
 fontdue = { version = "0.7", optional = true}
 #egui-miniquad = {version = "0.14", optional = true}
-egui-miniquad = { git = "https://github.com/not-fl3/egui-miniquad", rev="822b2d1b334dbfd41f027722084f6cbb6bbd90b8", optional = true }
+egui-miniquad = { git = "https://github.com/not-fl3/egui-miniquad", rev="62c7d23ac3b2e20346cf794103646534f6fae327", optional = true }
 image = {version = "0.24.6", optional = true, default-features = false, features = ["png"]}
 
 wasm-bindgen = {version = "0.2.84", optional = true}

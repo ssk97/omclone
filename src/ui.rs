@@ -93,6 +93,9 @@ impl egui::widgets::text_edit::TextBuffer for TapeBuffer<'_>{
     fn as_str(&self) -> &str {
         self.as_ref()
     }
+    fn type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<TapeBuffer>()
+    }
 }
 
 struct PathInfo{
@@ -605,7 +608,7 @@ impl EventHandler for MyMiniquadApp {
                             let mut target_time = None;
                             let mut change_arm_id = None;
                             egui::ScrollArea::horizontal().show(ui, |ui| {
-                                ui.add(egui::Label::new(egui::RichText::new(marker).monospace()).wrap(false));
+                                ui.add(egui::Label::new(egui::RichText::new(marker).monospace()).wrap_mode(egui::TextWrapMode::Extend));
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     for (a_num, a) in loaded.base_world.arms.iter_mut().enumerate(){
                                         let text = a.instruction_tape.to_string();
@@ -624,7 +627,7 @@ impl EventHandler for MyMiniquadApp {
                                             }
                                             let text_output = line_edit.show(ui);
                                             if let Some(cursor) = text_output.cursor_range{
-                                                target_time = Some(cursor.primary.ccursor.index);
+                                                target_time = Some(cursor.primary.index);
                                             }
                                             if text_output.response.changed(){
                                                 change_arm_id = Some(a_num);
