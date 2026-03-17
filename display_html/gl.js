@@ -1238,7 +1238,11 @@ var importObject = {
                 if (event.altKey) {
                     modifiers |= SAPP_MODIFIER_ALT;
                 }
-                wasm_exports.key_down(sapp_key_code, modifiers, event.repeat);
+				if (modifiers == SAPP_MODIFIER_CTRL && sapp_key_code == 86) {
+					//handle paste separately
+				} else {
+					wasm_exports.key_down(sapp_key_code, modifiers, event.repeat);
+				}
                 // for "space", "quote", and "slash" preventDefault will prevent
                 // key_press event, so send it here instead
                 if (sapp_key_code == 32 || sapp_key_code == 39 || sapp_key_code == 47) {
@@ -1334,6 +1338,7 @@ var importObject = {
                     stringToUTF8(pastedData, heap, 0, len);
                     wasm_exports.on_clipboard_paste(msg, len);
                 }
+				wasm_exports.key_down(86, SAPP_MODIFIER_CTRL, false);
             });
 
             window.ondragover = function (e) {
