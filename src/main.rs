@@ -6,6 +6,8 @@ mod test;
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod render_library;
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
+mod render_glyphs;
+#[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod render_sim;
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod ui;

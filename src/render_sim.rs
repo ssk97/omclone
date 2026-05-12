@@ -2,6 +2,7 @@ use miniquad::*;
 use crate::sim::*;
 
 use crate::render_library::*;
+use crate::render_glyphs::*;
 
 use std::f32::consts::PI;
 pub fn pos_to_xy(input: &Pos) -> GFXPos{
@@ -100,19 +101,19 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_VERT_BUF));
     let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_INDEX_BUF));
     let texture_list:Vec<&[u8]> = vec![
-        include_bytes!("../images/Ani.png"),
-        include_bytes!("../images/Bonder.png"),
-        include_bytes!("../images/Calcification.png"),
-        include_bytes!("../images/Dispersion.png"),
-        include_bytes!("../images/Disposal.png"),
-        include_bytes!("../images/Duplication.png"),
-        include_bytes!("../images/Equilibrium.png"),
-        include_bytes!("../images/Multibond.png"),
-        include_bytes!("../images/Projection.png"),
-        include_bytes!("../images/Purification.png"),
-        include_bytes!("../images/Triplex.png"),
-        include_bytes!("../images/Unbonder.png"),
-        include_bytes!("../images/Unification.png"),
+        include_bytes!("../mspaintart/animismus.png"),
+        include_bytes!("../mspaintart/bonding.png"),
+        include_bytes!("../mspaintart/calcification.png"),
+        include_bytes!("../mspaintart/dispersion.png"),
+        include_bytes!("../mspaintart/disposal.png"),
+        include_bytes!("../mspaintart/duplication.png"),
+        include_bytes!("../mspaintart/Equilibrium.png"),
+        include_bytes!("../mspaintart/multibonding.png"),
+        include_bytes!("../mspaintart/projection.png"),
+        include_bytes!("../mspaintart/Purification.png"),
+        include_bytes!("../mspaintart/triplex.png"),
+        include_bytes!("../mspaintart/unbonding.png"),
+        include_bytes!("../mspaintart/unification.png"),
         include_bytes!("../images/HexGridTiling.png"),//13
         include_bytes!("../images/ShadeAtomInOut.png"),
         include_bytes!("../images/ShadeAreaFill.png"),
@@ -120,9 +121,9 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
 		include_bytes!("../images/BondRed.png"),
 		include_bytes!("../images/BondWhite.png"),
 		include_bytes!("../images/BondYellow.png"),
-        include_bytes!("../images/Rejection.png"),//20, rejection
-        include_bytes!("../images/Division.png"),//division
-        include_bytes!("../images/Proliferation.png"),//proliferation
+        include_bytes!("../mspaintart/rejection.png"),//20, rejection
+        include_bytes!("../mspaintart/division.png"),//division
+        include_bytes!("../mspaintart/proliferation.png"),//proliferation
 
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
