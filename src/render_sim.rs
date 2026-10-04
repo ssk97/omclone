@@ -87,7 +87,13 @@ pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> Track
     }
 }
 
-const HEX_GRID_ID:usize = 13;
+const HEX_GRID_ID:usize = 0;
+const SHADE_INOUT_ID:usize = 1;
+const SHADE_AREA_ID:usize = 2;
+const BOND_NORMAL_ID:usize = 3;
+const BOND_RED_ID:usize = 4;
+const BOND_WHITE_ID:usize = 5;
+const BOND_YELLOW_ID:usize = 6;
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = Y_FACTOR*5./3.;//height of 1.5 hex (from tip to tip)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -101,46 +107,16 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_VERT_BUF));
     let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_INDEX_BUF));
     let texture_list:Vec<&[u8]> = vec![
-        include_bytes!("../mspaintart/animismus.png"),
-        include_bytes!("../mspaintart/bonding.png"),
-        include_bytes!("../mspaintart/calcification.png"),
-        include_bytes!("../mspaintart/dispersion.png"),
-        include_bytes!("../mspaintart/disposal.png"),
-        include_bytes!("../mspaintart/duplication.png"),
-        include_bytes!("../mspaintart/Equilibrium.png"),
-        include_bytes!("../mspaintart/multibonding.png"),
-        include_bytes!("../mspaintart/projection.png"),
-        include_bytes!("../mspaintart/Purification.png"),
-        include_bytes!("../mspaintart/triplex.png"),
-        include_bytes!("../mspaintart/unbonding.png"),
-        include_bytes!("../mspaintart/unification.png"),
-        include_bytes!("../images/HexGridTiling.png"),//13
+        include_bytes!("../images/HexGridTiling.png"),
         include_bytes!("../images/ShadeAtomInOut.png"),
         include_bytes!("../images/ShadeAreaFill.png"),
-        include_bytes!("../images/BondNormal.png"),//16
-		include_bytes!("../images/BondRed.png"),
-		include_bytes!("../images/BondWhite.png"),
-		include_bytes!("../images/BondYellow.png"),
-        include_bytes!("../mspaintart/rejection.png"),//20, rejection
-        include_bytes!("../mspaintart/division.png"),//division
-        include_bytes!("../mspaintart/proliferation.png"),//proliferation
-
+        include_bytes!("../images/BondNormal.png"),
+        include_bytes!("../images/BondRed.png"),
+        include_bytes!("../images/BondWhite.png"),
+        include_bytes!("../images/BondYellow.png"),
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
-        use image::io::Reader as ImageReader;
-        use image::ImageFormat::Png;
-        use std::io::Cursor;
-        let img = ImageReader::with_format(Cursor::new(byte_data),Png).decode().unwrap().into_rgba8();
-        let width = img.width().try_into().unwrap();
-        let height = img.height().try_into().unwrap();
-        let params = TextureParams {
-            format: TextureFormat::RGBA8,
-            wrap: TextureWrap::Repeat,
-            width, height,
-            ..Default::default()
-        };
-        let texture = ctx.new_texture_from_data_and_format(&img, params);
-        //let texture = Texture::from_rgba8(ctx, width, height, &img);
+        let (texture, _, _) = load_texture(ctx, byte_data);
         if id == HEX_GRID_ID{
             let tmp_vb = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Stream, 
                 BufferSource::empty::<UvVert>(4));
@@ -182,6 +158,7 @@ struct ShapeStore{
     arm_bindings: Bindings,
     circle_bindings: Bindings,
     texture_bindings: Vec<Bindings>,
+    glyph_images: GlyphImages,
 }
 pub struct CameraSetup{
     pub scale_base: f32,
@@ -294,6 +271,7 @@ impl RenderDataBase {
             arm_bindings: setup_arms(ctx),
             circle_bindings: setup_circle(ctx),
             texture_bindings: setup_textures(ctx),
+            glyph_images: GlyphImages::new(ctx),
         };
         
         let font = FontStorage::new(ctx);
@@ -344,10 +322,10 @@ impl RenderDataBase {
 			let offset = [atom.pos.x, atom.pos.y];
 			for r in 0..3 { //4-6 are done by the other atom
 				let matches = [
-					(Bonds::NORMAL, &self.shapes.texture_bindings[16]),
-					(Bonds::TRIPLEX_R, &self.shapes.texture_bindings[17]),
-					(Bonds::TRIPLEX_K, &self.shapes.texture_bindings[18]),
-					(Bonds::TRIPLEX_Y, &self.shapes.texture_bindings[19])];
+					(Bonds::NORMAL, &self.shapes.texture_bindings[BOND_NORMAL_ID]),
+					(Bonds::TRIPLEX_R, &self.shapes.texture_bindings[BOND_RED_ID]),
+					(Bonds::TRIPLEX_K, &self.shapes.texture_bindings[BOND_WHITE_ID]),
+					(Bonds::TRIPLEX_Y, &self.shapes.texture_bindings[BOND_YELLOW_ID])];
 				let bond = atom.connections[r];
 				for (bondtype, bindtype) in matches{
 					if bond.intersects(bondtype){
@@ -414,7 +392,7 @@ impl RenderDataBase {
                 [ 1., 1.,    xc+xdf, yc+ydf]];
             ctx.buffer_update(self.shapes.texture_bindings[HEX_GRID_ID].vertex_buffers[0], BufferSource::slice(&hex_grid_data));
             ctx.apply_pipeline(&self.pipeline_textured);
-            ctx.apply_bindings(&self.shapes.texture_bindings[13]);
+            ctx.apply_bindings(&self.shapes.texture_bindings[HEX_GRID_ID]);
             ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                 offset:[0.,0.], world_offset:[0.,0.], angle:0., scale:(1.,1.)
             }));
@@ -423,29 +401,12 @@ impl RenderDataBase {
         //Draw glyphs (including half-transparent cover for input/outputs)
         ctx.apply_pipeline(&self.pipeline_textured);
         for glyph in world.glyphs.iter(){
-            let offset = pos_to_xy(&glyph.pos);
             let angle = rot_to_angle(glyph.rot);
             use GlyphType::*;
-            let i = match &glyph.glyph_type{
-                Animismus       => 0,
-                Bonding         => 1,
-                Calcification   => 2,
-                Dispersion      => 3,
-                Disposal        => 4,
-                Duplication     => 5,
-                Equilibrium     => 6,
-                MultiBond       => 7,
-                Projection      => 8,
-                Purification    => 9,
-                TriplexBond     => 10,
-                Unbonding       => 11,
-                Unification     => 12,
-                Rejection => 20,
-                Division => 21,
-                Proliferation => 22,
+            match &glyph.glyph_type{
                 Input(atoms_meta,_) | Output(atoms_meta,_,_) | OutputRepeating(atoms_meta,_,_)=> {
                     let atoms = &atoms_meta[0];
-                    ctx.apply_bindings(&self.shapes.texture_bindings[14]);
+                    ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
                     for atom in atoms{ //transparent cover
                         let offset = pos_to_xy(&atom.pos);
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
@@ -456,7 +417,7 @@ impl RenderDataBase {
                     continue
                 },
                 Conduit(pos_vec,_) => {
-                    ctx.apply_bindings(&self.shapes.texture_bindings[14]);
+                    ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
                     for p in pos_vec{
                         let offset = pos_to_xy(p);
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
@@ -466,13 +427,11 @@ impl RenderDataBase {
                     }
                     continue
                 },
-                Track(_) => continue,
+                Track(_) => {},
+                _ => if let Some(glyph_image) = self.shapes.glyph_images.get(&glyph.glyph_type){
+                    glyph_image.draw(ctx, glyph, world_offset, scale);
+                },
             };
-            ctx.apply_bindings(&self.shapes.texture_bindings[i]);
-            ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                offset, world_offset, angle, scale
-            }));
-            ctx.draw(0, 6, 1);
         }
         //Draw conduit numbers
         self.font.set_pipeline(ctx);
@@ -486,7 +445,7 @@ impl RenderDataBase {
         //draw area cover
         if show_area{
             ctx.apply_pipeline(&self.pipeline_textured);
-            ctx.apply_bindings(&self.shapes.texture_bindings[15]);                
+            ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_AREA_ID]);                
             for p in &world.area_touched{
                 let offset = pos_to_xy(p);
                 ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
