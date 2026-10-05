@@ -307,6 +307,11 @@ fn atom_color(t: AtomType) -> [f32;3]{
         RepeatingOutputMarker | ConduitSpace => [0., 0., 0.],
     }
 }
+//Dark symbols on light atoms, light symbols on dark atoms
+fn symbol_color(fill: [f32;3]) -> [f32;3]{
+    let luminance = 0.299*fill[0] + 0.587*fill[1] + 0.114*fill[2];
+    if luminance > 0.5 {[0.1, 0.1, 0.1]} else {[0.95, 0.95, 0.95]}
+}
 
 impl RenderDataBase {
 	fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], camera: &CameraSetup){
@@ -348,6 +353,13 @@ impl RenderDataBase {
 				color, offset, world_offset, angle, scale
 			}));
 			ctx.draw(0, (CIRCLE_VERT_COUNT*3) as i32, 1);
+		}
+		//Draw atom symbols
+		self.font.set_pipeline(ctx);
+		for atom in atoms {
+			let color = symbol_color(atom_color(atom.atom_type));
+			let offset = [atom.pos.x, atom.pos.y];
+			self.font.render_atom_symbol(ctx, atom.atom_type, color, offset, world_offset, scale);
 		}
 	}
     //note: assumes ctx is in the middle of a render pass
@@ -437,7 +449,7 @@ impl RenderDataBase {
             if let GlyphType::Conduit(_, id) = glyph.glyph_type{
                 let offset = pos_to_xy(&glyph.pos);
                 let string = id.to_string();
-                self.font.render_text_centered(ctx, &string, offset, world_offset, scale);
+                self.font.render_text_centered(ctx, &string, [1., 1., 1.], offset, world_offset, scale);
             }
         }
         //draw area cover
@@ -485,7 +497,7 @@ impl RenderDataBase {
         for (num, f_arm) in float_world.arms_xy.iter().enumerate() {
             let offset = [f_arm.pos.x, f_arm.pos.y];
             let string = (num+1).to_string();
-            self.font.render_text_centered(ctx, &string, offset, world_offset, scale);
+            self.font.render_text_centered(ctx, &string, [1., 1., 1.], offset, world_offset, scale);
         }
     }
 }
