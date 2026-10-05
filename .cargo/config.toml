@@ -1,0 +1,3 @@
+# miniquad's JS imports are only resolved at runtime by gl.js, so the linker must allow undefined symbols
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

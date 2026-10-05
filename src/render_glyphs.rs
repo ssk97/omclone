@@ -8,7 +8,8 @@ const QUAD_INDEX_BUF: [u16;6] = [
     0, 1, 2,
     1, 2, 3];
 
-pub fn load_texture(ctx: &mut dyn RenderingBackend, byte_data: &[u8]) -> (TextureId, u32, u32){
+//Non-power-of-two images must use TextureWrap::Clamp (and no mipmaps) or WebGL1 renders them black
+pub fn load_texture(ctx: &mut dyn RenderingBackend, byte_data: &[u8], wrap: TextureWrap) -> (TextureId, u32, u32){
     use image::io::Reader as ImageReader;
     use image::ImageFormat::Png;
     use std::io::Cursor;
@@ -16,7 +17,7 @@ pub fn load_texture(ctx: &mut dyn RenderingBackend, byte_data: &[u8]) -> (Textur
     let (width, height) = (img.width(), img.height());
     let params = TextureParams {
         format: TextureFormat::RGBA8,
-        wrap: TextureWrap::Repeat,
+        wrap,
         width, height,
         ..Default::default()
     };
@@ -25,7 +26,7 @@ pub fn load_texture(ctx: &mut dyn RenderingBackend, byte_data: &[u8]) -> (Textur
 
 //Makes a textured quad where origin_px (in image pixels, from the top-left) lands on (0,0)
 fn image_quad(ctx: &mut dyn RenderingBackend, byte_data: &[u8], origin_px: [f32;2]) -> Bindings{
-    let (texture, width, height) = load_texture(ctx, byte_data);
+    let (texture, width, height) = load_texture(ctx, byte_data, TextureWrap::Clamp);
     let [ox, oy] = origin_px;
     let left = -ox/PX_PER_UNIT;
     let right = (width as f32-ox)/PX_PER_UNIT;
@@ -89,7 +90,7 @@ impl GlyphImages {
         let dot_vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&dot_verts));
         let dot_ib = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&QUAD_INDEX_BUF));
         let mut dot = |byte_data: &[u8]| -> Bindings {
-            let (texture, _, _) = load_texture(ctx, byte_data);
+            let (texture, _, _) = load_texture(ctx, byte_data, TextureWrap::Clamp);
             Bindings {
                 vertex_buffers: vec![dot_vb],
                 index_buffer: dot_ib,

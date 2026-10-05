@@ -105,7 +105,8 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
         include_bytes!("../images/BondYellow.png"),
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
-        let (texture, _, _) = load_texture(ctx, byte_data);
+        let wrap = if id == HEX_GRID_ID {TextureWrap::Repeat} else {TextureWrap::Clamp};
+        let (texture, _, _) = load_texture(ctx, byte_data, wrap);
         if id == HEX_GRID_ID{
             let tmp_vb = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Stream, 
                 BufferSource::empty::<UvVert>(4));
@@ -318,7 +319,7 @@ fn atom_color(t: AtomType) -> [f32;3]{
 //Dark symbols on light atoms, light symbols on dark atoms
 fn symbol_color(fill: [f32;3]) -> [f32;3]{
     let luminance = 0.299*fill[0] + 0.587*fill[1] + 0.114*fill[2];
-    if luminance > 0.5 {[0.1, 0.1, 0.1]} else {[0.95, 0.95, 0.95]}
+    if luminance > 0.7 {[0.1, 0.1, 0.1]} else {[0.95, 0.95, 0.95]}
 }
 
 impl RenderDataBase {
