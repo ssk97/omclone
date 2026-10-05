@@ -454,15 +454,15 @@ fn parse_molecule(f: &mut impl Read) -> Result<AtomPattern> {
         let from_pos = parse_bytepos(f)?;
         let to_pos = parse_bytepos(f)?;
 
-        let atom1 = *atom_locs
-            .get(&from_pos)
-            .ok_or(eyre!("bond1 to nonatom position"))?;
-        let atom2 = *atom_locs
-            .get(&to_pos)
-            .ok_or(eyre!("bond2 to nonatom position"))?;
-        let rot = pos_to_rot(atoms[atom2].pos - atoms[atom1].pos).ok_or(eyre!("nonadjacent bond"))?;
-        atoms[atom1].connections[rot as usize] = bond_type;
-        atoms[atom2].connections[normalize_dir(rot + 3) as usize] = bond_type;
+        let rot = pos_to_rot(to_pos - from_pos).ok_or(eyre!("nonadjacent bond"))?;
+        //Like omsim, a bond may have an empty endpoint (needed for polymers). The bond is only
+        //recorded on the atoms that exist, and repeated bonds combine.
+        if let Some(&atom1) = atom_locs.get(&from_pos) {
+            atoms[atom1].connections[rot as usize] |= bond_type;
+        }
+        if let Some(&atom2) = atom_locs.get(&to_pos) {
+            atoms[atom2].connections[normalize_dir(rot + 3) as usize] |= bond_type;
+        }
     }
     let final_output = smallvec![atoms];
     Ok(final_output)

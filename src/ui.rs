@@ -185,7 +185,7 @@ impl Loaded{
         let portion = self.curr_substep as f32 / self.substep_count as f32;
         if self.show_area{
             self.float_world.regenerate(&self.curr_world, &self.saved_motions, portion);
-            self.curr_world.mark_area_and_collide(&self.float_world, self.saved_motions.spawning_atoms.iter())?;
+            self.curr_world.mark_area_and_collide(&self.float_world, self.saved_motions.spawning_atoms.iter().flatten())?;
         }
         if self.curr_substep == self.substep_count{
             self.curr_substep = 0;

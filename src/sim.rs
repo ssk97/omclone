@@ -13,7 +13,7 @@ use simple_eyre::{
 pub use nalgebra::{Vector2, Point2};
 use slotmap::{new_key_type, Key, SecondaryMap, SlotMap};
 use std::collections::VecDeque;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{f32::consts::PI,fmt,error};
 use enum_primitive_derive::Primitive;
@@ -284,6 +284,8 @@ pub struct Atom {
     pub atom_type: AtomType,
     pub connections: [Bonds; 6],
     pub immutable_wheel: bool,
+    //Null for atoms that aren't on the board (patterns, spawn queue)
+    pub molecule: MoleculeKey,
 }
 impl Atom {
     pub fn new(pos: Pos, atom_type: AtomType) -> Atom {
@@ -292,7 +294,13 @@ impl Atom {
             atom_type,
             connections: [Bonds::NO_BOND; 6],
             immutable_wheel: false,
+            molecule: MoleculeKey::null(),
         }
+    }
+    //Compares everything except molecule membership
+    pub fn matches_pattern(&self, pattern: &Atom) -> bool {
+        self.pos == pattern.pos && self.atom_type == pattern.atom_type
+            && self.connections == pattern.connections && self.immutable_wheel == pattern.immutable_wheel
     }
     pub fn rotate_connections(&mut self, r: Rot) {
         let mut new_connections = [Bonds::NO_BOND; 6];
@@ -454,17 +462,28 @@ pub struct World {
     pub conduit_pairs: ContuitPairMap,
 }
 type ContuitPairMap = FxHashMap<i32, ConduitInfo>;
-new_key_type! { pub struct AtomKey; }
+new_key_type! { pub struct AtomKey; pub struct MoleculeKey; }
+//A molecule is a set of atoms that always move together. Usually it's the atoms connected by bonds,
+//but it can also be disjoint (e.g. from a disjoint input). Bonding merges molecules, and unbonding
+//recalculates the molecule from its bonds, splitting off every disconnected part.
+#[derive(Debug, Clone, Default)]
+pub struct Molecule {
+    pub atoms: SmallVec<[AtomKey; 8]>,
+}
+//A molecule waiting to be created in the second half of the timestep
+pub type SpawnMolecule = SmallVec<[Atom; 1]>;
 #[derive(Debug, Clone)]
 pub struct WorldAtoms {
     pub atom_map: SlotMap<AtomKey, Atom>,
     pub locs: FxHashMap<Pos, AtomKey>,
+    pub molecules: SlotMap<MoleculeKey, Molecule>,
 }
 impl WorldAtoms {
     fn new() -> WorldAtoms {
         WorldAtoms {
             atom_map: SlotMap::with_key(),
             locs: Default::default(),
+            molecules: SlotMap::with_key(),
         }
     }
     fn get_atom_mut(&mut self, loc: Pos) -> Option<&mut Atom> {
@@ -482,17 +501,24 @@ impl WorldAtoms {
         if atom.immutable_wheel {return None};
         Some(self.atom_map.get(key)?.atom_type)
     }
+    pub fn molecule_len(&self, key: AtomKey) -> usize {
+        self.molecules[self.atom_map[key].molecule].atoms.len()
+    }
+    //Consumable atoms are unbonded single-atom molecules
+    fn is_lone_atom(&self, key: AtomKey) -> bool {
+        let atom = self.atom_map.get(key).expect("Inconsistent atoms (consume check)");
+        atom.connections == [Bonds::NO_BOND;6] && self.molecule_len(key) == 1
+    }
     fn get_consumable_type(&self, motion: &WorldStepInfo, loc: Pos) -> Option<AtomType> {
         let &key = self.locs.get(&loc)?;
         if motion.atoms.contains_key(key) || motion.recent_bonds.contains(&key) {
             return None;
         }
-        let atom = self.atom_map.get(key).expect("Inconsistent atoms (consume check)");
-        if atom.connections != [Bonds::NO_BOND;6]{
+        if !self.is_lone_atom(key){
             return None
         }
         //Don't need to check is_berlo since the berlo arm will always be grabbing it (applying a motion)
-        Some(atom.atom_type)
+        Some(self.atom_map[key].atom_type)
     }
     //Same as above except doesn't have the unbond check
     fn get_consumable_type_immediate(&self, motion: &WorldStepInfo, loc: Pos) -> Option<AtomType> {
@@ -500,57 +526,117 @@ impl WorldAtoms {
         if motion.atoms.contains_key(key) {
             return None;
         }
-        let atom = self.atom_map.get(key).expect("Inconsistent atoms (consume check)");
-        if atom.connections != [Bonds::NO_BOND;6]{
+        if !self.is_lone_atom(key){
             return None
         }
         //Don't need to check is_berlo since the berlo arm will always be grabbing it (applying a motion)
-        Some(atom.atom_type)
+        Some(self.atom_map[key].atom_type)
     }
     fn check_empty(&self, motion: &WorldStepInfo, loc: Pos) -> bool {
         if self.locs.contains_key(&loc) {
             return false;
         }
-        return !motion.spawning_atoms.iter().any(|x| x.pos == loc);
+        return !motion.spawning_atoms.iter().flatten().any(|x| x.pos == loc);
     }
 
+    //Removes the atom from the board and from its molecule (deleting the molecule if now empty)
+    fn remove_atom(&mut self, key: AtomKey) -> Atom {
+        let mut atom = self.atom_map.remove(key)
+            .expect("Inconsistent atoms (remove)!");
+        let atom_key = self.locs.remove(&atom.pos).expect("Removing nonatom!");
+        if atom_key != key {
+            panic!("Inconsistent atoms (remove key)!");
+        }
+        let molecule = &mut self.molecules[atom.molecule].atoms;
+        let index = molecule.iter().position(|&k| k == key).expect("Inconsistent molecule (remove)!");
+        molecule.swap_remove(index);
+        if molecule.is_empty() {
+            self.molecules.remove(atom.molecule);
+        }
+        atom.molecule = MoleculeKey::null();
+        atom
+    }
     //Note: only use on non-grabbed atoms!
     fn destroy_atom_at(&mut self, loc: Pos) {
-        let atom_key = self.locs.remove(&loc).expect("Destroying nonatom!");
-        let atom = self.atom_map.remove(atom_key)
-            .expect("Inconsistent atoms (destroy)!");
-        if atom.pos != loc {
-            panic!("Inconsistent atoms (destroy loc)!");
-        }
+        let atom_key = *self.locs.get(&loc).expect("Destroying nonatom!");
+        self.remove_atom(atom_key);
     }
-    fn take_atom(&mut self, key: AtomKey) -> Atom {
-        let atom = self.atom_map.remove(key)
-            .expect("Inconsistent atoms (take)!");
-        let loc = atom.pos;
-        let atom_key = self.locs.remove(&loc).expect("Destroying nonatom!");
-        if atom_key != key {
-            panic!("Inconsistent atoms (take key)!");
-        }
-        return atom;
+    //Removes every atom of the molecule from the board, returning them
+    fn take_molecule(&mut self, molecule_key: MoleculeKey) -> SpawnMolecule {
+        let molecule = self.molecules.remove(molecule_key).expect("Inconsistent molecule (take)!");
+        molecule.atoms.iter().map(|&key| {
+            let mut atom = self.atom_map.remove(key).expect("Inconsistent atoms (take)!");
+            let atom_key = self.locs.remove(&atom.pos).expect("Taking nonatom!");
+            if atom_key != key {
+                panic!("Inconsistent atoms (take key)!");
+            }
+            atom.molecule = MoleculeKey::null();
+            atom
+        }).collect()
     }
-    fn create_atom(&mut self, atom: Atom) -> SimResult<AtomKey> {
-        let key = self.atom_map.insert(atom);
-        let atom_ref = &self.atom_map[key];
-        let output = self.locs.insert(atom_ref.pos, key);
-        if let Some(_old_atom) = output{
-            return Err(SimError{error_str:"Atom creation on hex with existing atom!",location:pos_to_xy(atom_ref.pos)});
+    fn create_molecule(&mut self, atoms: impl IntoIterator<Item=Atom>) -> SimResult<MoleculeKey> {
+        let molecule_key = self.molecules.insert(Molecule::default());
+        for mut atom in atoms {
+            atom.molecule = molecule_key;
+            let pos = atom.pos;
+            let key = self.atom_map.insert(atom);
+            self.molecules[molecule_key].atoms.push(key);
+            let output = self.locs.insert(pos, key);
+            if let Some(_old_atom) = output{
+                return Err(SimError{error_str:"Atom creation on hex with existing atom!",location:pos_to_xy(pos)});
+            }
         }
-        Ok(key)
+        Ok(molecule_key)
+    }
+    //Bonding directly combines the two molecules
+    fn merge_molecules(&mut self, key1: AtomKey, key2: AtomKey) {
+        let m1 = self.atom_map[key1].molecule;
+        let m2 = self.atom_map[key2].molecule;
+        if m1 == m2 {return;}
+        let (big, small) = if self.molecules[m1].atoms.len() >= self.molecules[m2].atoms.len() {(m1, m2)} else {(m2, m1)};
+        let small_atoms = self.molecules.remove(small).expect("Inconsistent molecule (merge)!").atoms;
+        for &key in &small_atoms {
+            self.atom_map[key].molecule = big;
+        }
+        self.molecules[big].atoms.extend(small_atoms);
+    }
+    //Unbonding recalculates the molecule from its bonds, separating all disjoint parts.
+    //A bond only connects two atoms if both atoms have it (dangling bonds are ignored).
+    fn split_molecule(&mut self, molecule_key: MoleculeKey) {
+        let atoms = std::mem::take(&mut self.molecules[molecule_key].atoms);
+        let mut visited = FxHashSet::<AtomKey>::default();
+        let mut stack = Vec::new();
+        let mut first = true;
+        for &start in &atoms {
+            if !visited.insert(start) {continue;}
+            let target = if first {first = false; molecule_key} else {self.molecules.insert(Molecule::default())};
+            stack.push(start);
+            while let Some(key) = stack.pop() {
+                self.atom_map[key].molecule = target;
+                self.molecules[target].atoms.push(key);
+                let atom = &self.atom_map[key];
+                for dir in 0..6 {
+                    if !atom.connections[dir as usize].intersects(Bonds::DYNAMIC_BOND) {continue;}
+                    let Some(&next_key) = self.locs.get(&(atom.pos + rot_to_pos(dir))) else {continue};
+                    let next = &self.atom_map[next_key];
+                    //Unvisited atoms of the original molecule still have the original key
+                    if next.molecule != molecule_key || visited.contains(&next_key) {continue;}
+                    if !next.connections[normalize_dir(dir + 3) as usize].intersects(Bonds::DYNAMIC_BOND) {continue;}
+                    visited.insert(next_key);
+                    stack.push(next_key);
+                }
+            }
+        }
     }
 }
 
 pub struct WorldStepInfo{
     pub atoms: SecondaryMap<AtomKey, Movement>,
     pub arms: Vec<ArmMovement>,
-    pub spawning_atoms: VecDeque<Atom>,
+    pub spawning_atoms: VecDeque<SpawnMolecule>, //One entry per molecule
     pub recent_bonds: FxHashSet<AtomKey>,
     pub drop_conduit_check: FxHashSet<AtomKey>, //contains one entry per arm
-    pub active_glyphs: VecDeque<usize>, //When glyph is a conduit, repeat for number of atoms sent
+    pub active_glyphs: VecDeque<usize>, //One entry per glyph activation; conduits add one per molecule sent
 }
 impl WorldStepInfo{
     pub fn new() -> Self{
@@ -744,12 +830,10 @@ impl FloatWorld{
 
 //Running the world
 impl World {
-    //sets up a move for the specified atom and all atoms connected to it
+    //sets up a move for the specified atom and all atoms in its molecule
     fn premove_atoms(&self, motion: &mut WorldStepInfo, atom_key: AtomKey, movement: Movement) -> SimResult<()> {
-        let mut moving_atoms = VecDeque::<AtomKey>::new();
-        moving_atoms.push_back(atom_key);
-
-        while let Some(this_key) = moving_atoms.pop_front() {
+        let molecule_key = self.atoms.atom_map[atom_key].molecule;
+        for &this_key in &self.atoms.molecules[molecule_key].atoms {
             let maybe_move = motion.atoms.get(this_key);
             if let Some(curr_move) = maybe_move {
                 if curr_move != &movement {
@@ -759,14 +843,6 @@ impl World {
                 }
             } else {
                 motion.atoms.insert(this_key, movement);
-                let atom = &self.atoms.atom_map[this_key];
-                for dir in 0..6 {
-                    if atom.connections[dir as usize].intersects(Bonds::DYNAMIC_BOND) {
-                        let newpos = atom.pos + rot_to_pos(dir);
-                        let newkey = *self.atoms.locs.get(&newpos).expect("Inconsistent atoms (movement prep)");
-                        moving_atoms.push_back(newkey);
-                    }
-                }
             }
         }
         Ok(())
@@ -996,9 +1072,8 @@ impl World {
                 Input(meta_pattern,_) => {
                     let atom_spawn_points = &meta_pattern[0];
                     if atom_spawn_points.iter().all(|a| atoms.check_empty(motion,a.pos)){
-                        for a in atom_spawn_points{
-                            atoms.create_atom(a.clone())?;
-                        }
+                        //The whole input is one molecule, even if it's disjoint
+                        atoms.create_molecule(atom_spawn_points.iter().cloned())?;
                         let tmp = meta_pattern.remove(0);
                         meta_pattern.push(tmp);
                     }
@@ -1008,23 +1083,32 @@ impl World {
         }
         Ok(())
     }
+    //Returns the molecule if it exactly matches the pattern (same atoms and bonds, nothing extra)
+    //and none of its atoms are grabbed. Separate molecules can't stand in for one disjoint molecule,
+    //and a disjoint molecule can't stand in for separate ones.
+    fn match_output(atoms: &WorldAtoms, motion: &WorldStepInfo, pattern: &[Atom]) -> Option<MoleculeKey> {
+        let &first_key = atoms.locs.get(&pattern.first()?.pos)?;
+        let molecule_key = atoms.atom_map[first_key].molecule;
+        if atoms.molecules[molecule_key].atoms.len() != pattern.len() {
+            return None;
+        }
+        for a in pattern {
+            let &atom_key = atoms.locs.get(&a.pos)?;
+            let atom = &atoms.atom_map[atom_key];
+            if atom.molecule != molecule_key || !atom.matches_pattern(a) || motion.atoms.contains_key(atom_key) {
+                return None;
+            }
+        }
+        Some(molecule_key)
+    }
     fn process_outputs(&mut self, motion: &mut WorldStepInfo){
         use GlyphType::*;
         for glyph in self.glyphs.iter_mut() {
             let atoms = &mut self.atoms;
             match &mut glyph.glyph_type{
                 Output(meta_pattern, output_count,_) => {
-                    let atom_drop_points = &meta_pattern[0];
-                    let full_match = atom_drop_points.iter().all( |a|-> bool {
-                            let try_key = atoms.locs.get(&a.pos);
-                            if let Some(&atom_key) = try_key{
-                                &atoms.atom_map[atom_key] == a && !motion.atoms.contains_key(atom_key)
-                            } else {false}
-                        });
-                    if full_match {
-                        for a in atom_drop_points{
-                            atoms.destroy_atom_at(a.pos);
-                        }
+                    if let Some(molecule_key) = World::match_output(atoms, motion, &meta_pattern[0]) {
+                        atoms.take_molecule(molecule_key);
                         if *output_count > 0{
                             *output_count -= 1;
                         }
@@ -1037,7 +1121,7 @@ impl World {
                     let full_match = atom_drop_points.iter().all( |a|-> bool {
                             let try_key = atoms.locs.get(&a.pos);
                             if let Some(&atom_key) = try_key{
-                                &atoms.atom_map[atom_key] == a
+                                atoms.atom_map[atom_key].matches_pattern(a)
                             } else {false}
                         });
                     if full_match {
@@ -1054,32 +1138,25 @@ impl World {
         }
     }
     fn process_glyphs(&mut self, motion: &mut WorldStepInfo, first_half: bool) -> SimResult<()>{
-        fn try_bond(atoms: &mut WorldAtoms, loc1: &Pos, loc2: &Pos) {
+        //Adds the bond to both atoms unless either already has a bond from `unless` in that direction.
+        //Bonds can be one-sided (dangling bonds from puzzle molecules), so both sides are checked.
+        fn add_bond(atoms: &mut WorldAtoms, loc1: &Pos, loc2: &Pos, bond_type: Bonds, unless: Bonds, need_fire: bool) {
             let rot = pos_to_rot(loc2 - loc1).unwrap() as usize;
             if let (Some(&key1), Some(&key2)) = (atoms.locs.get(loc1), atoms.locs.get(loc2)) {
                 let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
                 if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
-                let bond1 = atom1.connections[rot];
-                assert_eq!(atom2.connections[(rot + 3) % 6], bond1, "Inconsistent bonds");
-                if bond1 == Bonds::NO_BOND {
-                    atom1.connections[rot] = Bonds::NORMAL;
-                    atom2.connections[(rot + 3) % 6] = Bonds::NORMAL;
-                }
+                if need_fire && (atom1.atom_type != AtomType::Fire || atom2.atom_type != AtomType::Fire) {return;}
+                if atom1.connections[rot].intersects(unless) || atom2.connections[(rot + 3) % 6].intersects(unless) {return;}
+                atom1.connections[rot] |= bond_type;
+                atom2.connections[(rot + 3) % 6] |= bond_type;
+                atoms.merge_molecules(key1, key2);
             }
         }
+        fn try_bond(atoms: &mut WorldAtoms, loc1: &Pos, loc2: &Pos) {
+            add_bond(atoms, loc1, loc2, Bonds::NORMAL, Bonds::TRIPLEX, false);
+        }
         fn try_triplex_bond(atoms: &mut WorldAtoms, loc1: &Pos, loc2: &Pos, bond_type: Bonds ) {
-            let rot = pos_to_rot(loc2 - loc1).unwrap() as usize;
-            if let (Some(&key1), Some(&key2)) = (atoms.locs.get(loc1), atoms.locs.get(loc2)) {
-                let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
-                if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
-                if (atom1.atom_type != AtomType::Fire || atom2.atom_type != AtomType::Fire) {return;}
-                let bond1 = atom1.connections[rot];
-                assert_eq!(atom2.connections[(rot + 3) % 6], bond1, "Inconsistent bonds");
-                if (bond1 & !Bonds::TRIPLEX).is_empty() {
-                    atom1.connections[rot] |= bond_type;
-                    atom2.connections[(rot + 3) % 6] |= bond_type;
-                }
-            }
+            add_bond(atoms, loc1, loc2, bond_type, Bonds::NORMAL, true);
         }
         use AtomType::*;
         use GlyphType::*;
@@ -1111,12 +1188,12 @@ impl World {
             let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
             fn pop_check_make(atoms:&mut WorldAtoms, motion:&mut WorldStepInfo, atom: Atom) -> SimResult<()>{
                 let a = motion.spawning_atoms.pop_front().unwrap();
-                assert!(a == atom);
-                atoms.create_atom(a)?;
+                assert!(a.len() == 1 && a[0] == atom);
+                atoms.create_molecule(a)?;
                 Ok(())
             }
             fn pop_make(atoms:&mut WorldAtoms, motion:&mut WorldStepInfo) -> SimResult<()>{
-                atoms.create_atom(motion.spawning_atoms.pop_front().unwrap())?;
+                atoms.create_molecule(motion.spawning_atoms.pop_front().unwrap())?;
                 Ok(())
             }
             match &mut glyph.glyph_type{
@@ -1136,8 +1213,8 @@ impl World {
                         if (Some(Salt),Some(Salt),true,true) == (a1,a2,o1,o2) {
                             atoms.destroy_atom_at(pos);
                             atoms.destroy_atom_at(pos_bi);
-                            motion.spawning_atoms.push_back(Atom::new(pos_tri, Vitae));
-                            motion.spawning_atoms.push_back(Atom::new(pos_ani, Mors));
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_tri, Vitae)]);
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_ani, Mors)]);
                             motion.active_glyphs.push_back(id);
                         }
                     } else if motion.active_glyphs.front() == Some(&id){
@@ -1162,7 +1239,7 @@ impl World {
                     if let (true, Some(metal)) = (open, metal){
                         if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x - 1)){
                             atoms.get_atom_mut(pos).unwrap().atom_type = newtype;
-                            atoms.create_atom(Atom::new(pos_bi, Quicksilver))?;
+                            atoms.create_molecule([Atom::new(pos_bi, Quicksilver)])?;
                         }
                     }
                 }
@@ -1175,10 +1252,10 @@ impl World {
                         let o4 = atoms.check_empty(motion, pos_disp4);
                         if (Some(Quintessence),true,true,true,true) == (q,o1,o2,o3,o4){
                             atoms.destroy_atom_at(pos);
-                            motion.spawning_atoms.push_back(Atom::new(pos_bi, Earth));
-                            motion.spawning_atoms.push_back(Atom::new(pos_disp2, Water));
-                            motion.spawning_atoms.push_back(Atom::new(pos_disp3, Fire));
-                            motion.spawning_atoms.push_back(Atom::new(pos_disp4, Air));
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_bi, Earth)]);
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_disp2, Water)]);
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_disp3, Fire)]);
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_disp4, Air)]);
                             motion.active_glyphs.push_back(id);
                         }
                     } else if motion.active_glyphs.front() == Some(&id){
@@ -1203,7 +1280,7 @@ impl World {
                                 atoms.destroy_atom_at(pos_unif2);
                                 atoms.destroy_atom_at(pos_unif3);
                                 atoms.destroy_atom_at(pos_unif4);
-                                motion.spawning_atoms.push_back(Atom::new(pos, Quintessence));
+                                motion.spawning_atoms.push_back(smallvec![Atom::new(pos, Quintessence)]);
                                 motion.active_glyphs.push_back(id);
                             }
                         }
@@ -1223,7 +1300,7 @@ impl World {
                                 if let Some(newtype) = next {
                                     atoms.destroy_atom_at(pos);
                                     atoms.destroy_atom_at(pos_bi);
-                                    motion.spawning_atoms.push_back(Atom::new(pos_tri, newtype));
+                                    motion.spawning_atoms.push_back(smallvec![Atom::new(pos_tri, newtype)]);
                                     motion.active_glyphs.push_back(id);
                                 }
                             }
@@ -1244,8 +1321,8 @@ impl World {
                             let next2 = a.metal_id().and_then(|x:u8| AtomType::id_to_metal((x+1)/2));
                             if let (Some(next1), Some(next2)) = (next1, next2) {
                                 atoms.destroy_atom_at(pos);
-                                motion.spawning_atoms.push_back(Atom::new(pos_bi, next1));
-                                motion.spawning_atoms.push_back(Atom::new(pos_div, next2));
+                                motion.spawning_atoms.push_back(smallvec![Atom::new(pos_bi, next1)]);
+                                motion.spawning_atoms.push_back(smallvec![Atom::new(pos_div, next2)]);
                                 motion.active_glyphs.push_back(id);
                             }
                         }
@@ -1271,7 +1348,7 @@ impl World {
                         let o = atoms.check_empty(motion, pos_proO);
                         if let (Some(m),Some(Quicksilver),true) = (m,qs,o) {
                             atoms.destroy_atom_at(pos_proQS);
-                            motion.spawning_atoms.push_back(Atom::new(pos_proO, m));
+                            motion.spawning_atoms.push_back(smallvec![Atom::new(pos_proO, m)]);
                             motion.active_glyphs.push_back(id);
                         }
                     } else if motion.active_glyphs.front() == Some(&id){
@@ -1295,12 +1372,14 @@ impl World {
                 Unbonding => {
                     if let (Some(&key1), Some(&key2)) = (atoms.locs.get(&pos), atoms.locs.get(&pos_bi)){
                         let bond1 = atoms.atom_map[key1].connections[rot];
-                        assert_eq!(atoms.atom_map[key2].connections[(rot+3)%6], bond1, "Inconsistent bonds");
-                        if bond1.intersects(Bonds::DYNAMIC_BOND) {
+                        let bond2 = atoms.atom_map[key2].connections[(rot+3)%6];
+                        if bond1.intersects(Bonds::DYNAMIC_BOND) && bond2.intersects(Bonds::DYNAMIC_BOND) {
                             atoms.atom_map[key1].connections[rot] = Bonds::NO_BOND;
                             atoms.atom_map[key2].connections[(rot+3)%6] = Bonds::NO_BOND;
                             motion.recent_bonds.insert(key1);
                             motion.recent_bonds.insert(key2);
+                            //Recalculate the molecule, separating all disjoint parts
+                            atoms.split_molecule(atoms.atom_map[key1].molecule);
                         }
                     }
                 }
@@ -1329,9 +1408,6 @@ impl World {
         Ok(())
     }
     fn conduit_process(atoms: &mut WorldAtoms, glyph_id: usize, positions: &Vec<Pos>, origin: Pos, conduit_info: &mut ConduitInfo, motion: &mut WorldStepInfo){
-        let mut viewed_atoms = FxHashSet::<AtomKey>::default();
-        let mut check_atoms = VecDeque::<AtomKey>::new();
-
         let mut offset_pos = conduit_info.offset_pos;
         let mut offset_rot = conduit_info.offset_rot;
         if conduit_info.vecids.0 == glyph_id{
@@ -1341,40 +1417,21 @@ impl World {
             assert!(conduit_info.vecids.1 == glyph_id, "Conduit invalid vec id");
         }
         for pos in positions{
-            //For each position on the conduit, if it has an atom on it:
-            if let Some(key) = atoms.locs.get(pos){
-                //Closure to check if all atoms in the molecule are on the conduit
-                let mut atoms_send_check = |first_key: AtomKey| -> bool {
-                    check_atoms.push_back(first_key);
-                    while let Some(this_key) = check_atoms.pop_front(){
-                        if viewed_atoms.contains(&this_key) {continue;}
-                        if motion.atoms.contains_key(this_key) {return false;}
-                        viewed_atoms.insert(this_key);
-                        
-                        let atom = &atoms.atom_map[this_key];
-                        for dir in 0..6 {
-                            if atom.connections[dir as usize].intersects(Bonds::DYNAMIC_BOND) {
-                                let newpos = atom.pos + rot_to_pos(dir);
-                                if !positions.contains(&newpos) {return false;}
-                                let newkey = *atoms.locs.get(&newpos).expect("Inconsistent atoms (conduits)");
-                                check_atoms.push_back(newkey);
-                            }
-                        }
-                    }
-                    return true;
-                };
-                //If the atom was just dropped and all connected are on the conduit, move the atoms to the new position via spawning
-                if motion.drop_conduit_check.contains(key) && atoms_send_check(*key){
-                    for a in &viewed_atoms{
-                        let mut atom = atoms.take_atom(*a);
-                        atom.pos = rotate_around(atom.pos,offset_rot,origin)+offset_pos;
-                        atom.rotate_connections(offset_rot);
-                        motion.spawning_atoms.push_back(atom);
-                        motion.active_glyphs.push_back(glyph_id);
-                    }
+            //For each position on the conduit, if it has an atom that was just dropped:
+            let Some(&key) = atoms.locs.get(pos) else {continue};
+            if !motion.drop_conduit_check.contains(&key) {continue;}
+            //Send the whole molecule if all of its atoms are on the conduit and none are grabbed
+            let molecule_key = atoms.atom_map[key].molecule;
+            let sendable = atoms.molecules[molecule_key].atoms.iter().all(|&a|
+                !motion.atoms.contains_key(a) && positions.contains(&atoms.atom_map[a].pos));
+            if sendable {
+                let mut molecule = atoms.take_molecule(molecule_key);
+                for atom in &mut molecule {
+                    atom.pos = rotate_around(atom.pos,offset_rot,origin)+offset_pos;
+                    atom.rotate_connections(offset_rot);
                 }
-                viewed_atoms.clear();
-                check_atoms.clear();
+                motion.spawning_atoms.push_back(molecule);
+                motion.active_glyphs.push_back(glyph_id);
             }
         }
     }
@@ -1465,7 +1522,7 @@ impl World {
             for substep in 0..substep_count{
                 let portion = substep as f32 / substep_count as f32;
                 float_world.regenerate(self, motion, portion);
-                self.mark_area_and_collide(float_world, motion.spawning_atoms.iter())?;
+                self.mark_area_and_collide(float_world, motion.spawning_atoms.iter().flatten())?;
             }
         }
         self.finalize_step(motion)?;
@@ -1828,26 +1885,18 @@ impl World {
                 for i in 0..6 {
                     let pos = a.pos + rot_to_pos((i as Rot) + a.rot);
                     let atom_type = atom_setup[i];
-                    let key = world.atoms.create_atom(Atom {
-                        pos, atom_type, connections: [Bonds::NO_BOND; 6], immutable_wheel: true
-                    })?;
-                    a.atoms_grabbed[i] = key;
+                    let molecule_key = world.atoms.create_molecule([Atom {
+                        pos, atom_type, connections: [Bonds::NO_BOND; 6], immutable_wheel: true,
+                        molecule: MoleculeKey::null(),
+                    }])?;
+                    a.atoms_grabbed[i] = world.atoms.molecules[molecule_key].atoms[0];
                 }
             }
         }
         
+        world.process_inputs(&mut WorldStepInfo::new())?;
         let mut unfinished_conduit_count = 0;
         for (id, glyph) in world.glyphs.iter_mut().enumerate() {
-            if let GlyphType::Input(meta_pattern,_) = &mut glyph.glyph_type {
-                let atom_spawn_points = &meta_pattern[0];
-                if atom_spawn_points.iter().all(|a| world.atoms.locs.get(&a.pos) == None){
-                    for a in atom_spawn_points{
-                        world.atoms.create_atom(a.clone())?;
-                    }
-                    let tmp = meta_pattern.remove(0);
-                    meta_pattern.push(tmp);
-                }
-            }
             if let GlyphType::Conduit(_pos,conduit_id) = &glyph.glyph_type {
                 if let Some(pair_data) = world.conduit_pairs.get_mut(conduit_id){
                     ensure!(pair_data.vecids.0 == pair_data.vecids.1,"Conduit {conduit_id} already modified!");
