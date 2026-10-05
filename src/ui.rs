@@ -32,7 +32,8 @@ impl egui::widgets::text_edit::TextBuffer for TapeBuffer<'_>{
     fn is_mutable(&self) -> bool {
         true
     }
-    fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
+    fn insert_text(&mut self, text: &str, char_index: egui::text::CharIndex) -> usize {
+        let char_index = char_index.0;
         let instr_mapped:Vec<Instr> = text.chars().filter_map(|x| Instr::from_char(x.to_ascii_lowercase())).collect();
         if instr_mapped.is_empty() {
             return 0;
@@ -42,7 +43,8 @@ impl egui::widgets::text_edit::TextBuffer for TapeBuffer<'_>{
         self.held_str = self.tape_ref.to_string();
         instr_mapped.len()
     }
-    fn delete_char_range(&mut self, char_range: Range<usize>) {
+    fn delete_char_range(&mut self, char_range: Range<egui::text::CharIndex>) {
+        let char_range = char_range.start.0..char_range.end.0;
         if char_range.is_empty() {
             return;
         }
@@ -410,7 +412,7 @@ impl EventHandler for MyMiniquadApp {
                             ui.add(egui::Slider::new(&mut target_time, 0..=loaded.max_timestep)
                                 .show_value(false));
                             ui.add(egui::DragValue::new(&mut target_time)
-                                .clamp_range(0..=loaded.max_timestep)
+                                .range(0..=loaded.max_timestep)
                                 .speed(0.1));
                             ui.label("Timestep");
                         });
@@ -440,7 +442,7 @@ impl EventHandler for MyMiniquadApp {
 
                             let mut repeat_length = loaded.base_world.repeat_length;
                             let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut repeat_length)
-                                .clamp_range(min_size..=usize::MAX));
+                                .range(min_size..=usize::MAX));
                             if repeat_length_response.changed() && repeat_length != loaded.base_world.repeat_length{
                                 let earliest_step = loaded.change_repeat_length(repeat_length);
                                 loaded.apply_base_change(earliest_step);
@@ -456,7 +458,7 @@ impl EventHandler for MyMiniquadApp {
                             ui.separator();
                             ui.label("Speed:");
                             ui.add(egui::DragValue::new(&mut loaded.run_speed)
-                                .clamp_range(0.01..=10.0f32).fixed_decimals(2).speed(0.002));
+                                .range(0.01..=10.0f32).fixed_decimals(2).speed(0.002));
                             let (mut running_free, enabled) = match loaded.run_state{
                                 RunState::FreeRun => (true, true),
                                 RunState::Manual(_) => (false, true),
@@ -617,7 +619,7 @@ impl EventHandler for MyMiniquadApp {
                                             }
                                             let text_output = line_edit.show(ui);
                                             if let Some(cursor) = text_output.cursor_range{
-                                                target_time = Some(cursor.primary.index);
+                                                target_time = Some(cursor.primary.index.0);
                                             }
                                         });
                                     }
@@ -759,7 +761,7 @@ impl EventHandler for MyMiniquadApp {
 
     fn mouse_wheel_event(&mut self, dx: f32, dy: f32) {
         self.egui_mq.mouse_wheel_event(dx, dy);
-        if !self.egui_mq.egui_ctx().is_pointer_over_area(){
+        if !self.egui_mq.egui_ctx().is_pointer_over_egui(){
             if let Loaded(loaded) = &mut self.app_state{
                 let cam = &mut loaded.camera;
                 if dy.is_sign_negative() && cam.scale_base > 0.002{
@@ -779,7 +781,7 @@ impl EventHandler for MyMiniquadApp {
         y: f32,
     ) {
         self.egui_mq.mouse_button_down_event(mb, x, y);
-        if !self.egui_mq.egui_ctx().is_pointer_over_area() && (mb == MouseButton::Right || mb == MouseButton::Middle){
+        if !self.egui_mq.egui_ctx().is_pointer_over_egui() && (mb == MouseButton::Right || mb == MouseButton::Middle){
             self.dragging = Some([x,y]);
         }
     }
