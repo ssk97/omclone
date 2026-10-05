@@ -510,12 +510,13 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
     };
     Ok(puzzle_output)
 }
-fn process_instructions(input: &[(i32, Instr)]) -> Result<Tape> {
+//`offset` is added to every instruction index; it must make them all non-negative
+fn process_instructions(input: &[(i32, Instr)], offset: i64) -> Result<Tape> {
     let mut first = usize::MAX; //A giant value
     let mut instructions = Vec::new();
     for &(pos, instr) in input {
         ensure!(instr != Instr::Empty, "Empty instruction found in file!");
-        let pos = pos as usize;
+        let pos = usize::try_from(pos as i64 + offset)?;
         if first > pos {
             if first != usize::MAX {
                 let splice_source = std::iter::repeat(Instr::Empty).take(first - pos);
@@ -540,6 +541,12 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
     //Convert from generic parts to glyphs, arms, etc.
     let mut glyphs = Vec::new();
     let mut arms = Vec::new();
+    //Like omsim, if any instruction index is negative, every tape is shifted together so the
+    //earliest instruction is at 0 (only the timing between arms matters)
+    let earliest_instruction = soln.part_list.iter()
+        .flat_map(|p| p.instructions.iter().map(|&(pos, _)| pos))
+        .min().unwrap_or(0);
+    let instruction_offset = -(earliest_instruction.min(0) as i64);
     for p in &soln.part_list {
         match &p.part_type {
             TGlyph(gtype) => {
@@ -550,7 +557,7 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 });
             }
             TArm(atype) => {
-                let instr = process_instructions(&p.instructions)?;
+                let instr = process_instructions(&p.instructions, instruction_offset)?;
                 arms.push((Arm::new(p.pos, p.rot, p.arm_size, *atype, instr),p.arm_index));
             }
             TInput => {
@@ -599,4 +606,30 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
     arms.sort_by(|a, b| a.1.cmp(&b.1));
     let arms = arms.into_iter().map(|a| a.0).collect();
     Ok(InitialWorld { glyphs, arms })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_instruction_indexes_are_shifted() {
+        use Instr::*;
+        let arm = |arm_index: i32, instructions: Vec<(i32, Instr)>| Part {
+            part_type: TArm(ArmType::PlainArm), pos: Pos::new(arm_index * 3, 0), arm_size: 1, rot: 0,
+            input_output_index: 0, instructions, tracks: None, arm_index, conduit: None,
+        };
+        let solution = FullSolution {
+            puzzle_name: String::new(), solution_name: String::new(), stats: None,
+            part_list: vec![arm(0, vec![(-3, Grab), (-1, Drop)]), arm(1, vec![(2, RotateClockwise)])],
+        };
+        let puzzle = FullPuzzle {
+            puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+        };
+        let init = puzzle_prep(&puzzle, &solution).unwrap();
+        let tapes: Vec<(usize, Vec<Instr>)> = init.arms.iter()
+            .map(|a| (a.instruction_tape.first, a.instruction_tape.instructions.clone())).collect();
+        assert_eq!(tapes, vec![(0, vec![Grab, Empty, Drop]), (5, vec![RotateClockwise])]);
+    }
 }
