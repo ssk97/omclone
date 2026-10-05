@@ -467,34 +467,6 @@ fn parse_molecule(f: &mut impl Read) -> Result<AtomPattern> {
     let final_output = smallvec![atoms];
     Ok(final_output)
 }
-fn process_repeats(input: &Vec<Atom>, reps: i32) -> Result<AtomPattern> {
-    let mut rep_offset = None;
-    for atom in input {
-        if atom.atom_type == AtomType::RepeatingOutputMarker {
-            ensure!(rep_offset == None, "Multiple repeating atom markers!");
-            rep_offset = Some(atom.pos);
-        }
-    }
-    let rep_offset = rep_offset.ok_or(eyre!("Repeating atom marker expected but not found!"))?;
-    let mut output = Vec::with_capacity(input.len() * (reps as usize));
-    for atom in input {
-        if atom.atom_type == AtomType::RepeatingOutputMarker {
-            output.push(Atom {
-                pos: atom.pos + ((reps-1) * rep_offset),
-                ..*atom
-            });
-        } else {
-            for i in 0..reps {
-                output.push(Atom {
-                    pos: atom.pos + (i * rep_offset),
-                    ..*atom
-                });
-            }
-        }
-    }
-    Ok(smallvec![output])
-}
-
 pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
     expect_int(f, 3)?;
     let puzzle_name = parse_str(f)?;
@@ -592,9 +564,9 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 let id = p.input_output_index;
                 let molecule = puzzle.outputs.get(id as usize)
                     .ok_or(eyre!("Output(rep) ID {} not found (max {})",id,puzzle.outputs.len()))?;
-                let repeated_molecule = process_repeats(&molecule[0], 6)?;
+                //The monomer (including its repetition marker) is expanded into a polymer in setup_sim
                 let output_glyph =
-                    GlyphType::OutputRepeating(repeated_molecule, 6 * puzzle.output_multiplier, p.input_output_index);
+                    GlyphType::OutputRepeating(molecule.clone(), 6 * puzzle.output_multiplier, p.input_output_index);
                 glyphs.push(Glyph {glyph_type: output_glyph, pos: p.pos, rot: p.rot });
             }
             TTrack => {

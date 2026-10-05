@@ -289,3 +289,108 @@ mod molecule_tests {
         assert!(key_at(&kept, 10, 0).is_none(), "a molecule partly off the conduit must not be sent");
     }
 }
+
+//Repeating ("infinite") output expansion and matching
+mod polymer_tests {
+    use crate::sim::*;
+    use smallvec::smallvec;
+    use AtomType::*;
+
+    fn atom(x: i32, y: i32, atom_type: AtomType) -> Atom {
+        Atom::new(Pos::new(x, y), atom_type)
+    }
+    //Bonds between existing atoms, or dangling bonds toward an empty hex
+    fn bond(atoms: &mut Vec<Atom>, from: (i32, i32), to: (i32, i32)) {
+        let (from, to) = (Pos::new(from.0, from.1), Pos::new(to.0, to.1));
+        let rot = pos_to_rot(to - from).unwrap();
+        for a in atoms.iter_mut() {
+            if a.pos == from { a.connections[rot as usize] |= Bonds::NORMAL; }
+            if a.pos == to { a.connections[normalize_dir(rot + 3) as usize] |= Bonds::NORMAL; }
+        }
+    }
+    fn polymer_world(glyphs: Vec<Glyph>) -> World {
+        World::setup_sim(&InitialWorld { glyphs, arms: vec![] }).unwrap()
+    }
+    fn displayed(world: &World) -> Vec<Atom> {
+        for g in &world.glyphs {
+            if let GlyphType::OutputRepeating(pattern, _, _) = &g.glyph_type {
+                return pattern[0].clone();
+            }
+        }
+        panic!("no repeating output");
+    }
+    fn at(atoms: &[Atom], x: i32, y: i32) -> &Atom {
+        atoms.iter().find(|a| a.pos == Pos::new(x, y)).unwrap_or_else(|| panic!("no atom at {x},{y}"))
+    }
+
+    #[test]
+    fn expansion_fixes_bonds_and_adds_placeholders() {
+        //A at the origin bonds to the marker; B above it has a dangling bond to the next monomer's B
+        let mut monomer = vec![atom(0, 0, Salt), atom(0, 1, Salt), atom(1, 0, RepeatingOutputMarker)];
+        bond(&mut monomer, (0, 0), (0, 1));
+        bond(&mut monomer, (0, 0), (1, 0));
+        bond(&mut monomer, (0, 1), (1, 1));
+        let world = polymer_world(vec![Glyph { pos: Pos::new(0, 0), rot: 0,
+            glyph_type: GlyphType::OutputRepeating(smallvec![monomer], 6, 0) }]);
+        let shown = displayed(&world);
+        let markers: Vec<Pos> = shown.iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
+        assert_eq!(shown.len(), 12 + markers.len());
+        assert_eq!(markers, vec![Pos::new(6, 0), Pos::new(6, 1)], "placeholders go where the 6th repeat's bonds lead");
+        let middle = at(&shown, 3, 0);
+        assert!(middle.connections[0].contains(Bonds::NORMAL) && middle.connections[3].contains(Bonds::NORMAL),
+            "bonds between monomers should be fixed up on both atoms");
+        let upper = at(&shown, 3, 1);
+        assert!(upper.connections[0].contains(Bonds::NORMAL) && upper.connections[3].contains(Bonds::NORMAL));
+    }
+
+    #[test]
+    fn rotated_oblique_expansion() {
+        //Marker diagonal from the origin (a disjoint polymer), glyph rotated twice
+        let monomer = vec![atom(0, 0, Salt), atom(1, 1, RepeatingOutputMarker)];
+        let origin = Pos::new(2, 3);
+        let world = polymer_world(vec![Glyph { pos: origin, rot: 2,
+            glyph_type: GlyphType::OutputRepeating(smallvec![monomer], 6, 0) }]);
+        let shown = displayed(&world);
+        let step = rotate(Pos::new(1, 1), 2);
+        for i in 0..6 {
+            assert_eq!(at(&shown, (origin + step * i).x, (origin + step * i).y).atom_type, Salt);
+        }
+        let marker = origin + step * 6;
+        assert_eq!(at(&shown, marker.x, marker.y).atom_type, RepeatingOutputMarker);
+        assert_eq!(shown.len(), 7);
+    }
+
+    //A chain of `length` bonded salts starting at the origin, delivered by an input on top of the output
+    fn chain_world(length: i32, rot: Rot) -> World {
+        let mut monomer = vec![atom(0, 0, Salt), atom(1, 0, RepeatingOutputMarker)];
+        bond(&mut monomer, (0, 0), (1, 0));
+        let mut chain: Vec<Atom> = (0..length).map(|x| atom(x, 0, Salt)).collect();
+        for x in 0..length - 1 {
+            bond(&mut chain, (x, 0), (x + 1, 0));
+        }
+        let mut world = polymer_world(vec![
+            Glyph { pos: Pos::new(0, 0), rot, glyph_type: GlyphType::Input(smallvec![chain], 0) },
+            Glyph { pos: Pos::new(0, 0), rot, glyph_type: GlyphType::OutputRepeating(smallvec![monomer], 6, 0) }]);
+        let mut motions = WorldStepInfo::new();
+        let mut float_world = FloatWorld::new();
+        world.run_step(false, &mut motions, &mut float_world).unwrap();
+        world
+    }
+    fn remaining(world: &World) -> i32 {
+        world.glyphs.iter().find_map(|g| match g.glyph_type {
+            GlyphType::OutputRepeating(_, count, _) => Some(count),
+            _ => None,
+        }).unwrap()
+    }
+
+    #[test]
+    fn six_monomers_complete_the_output() {
+        for rot in 0..6 {
+            let full = chain_world(6, rot);
+            assert!(full.is_complete(), "6 monomers should complete the output (rotation {rot})");
+            let short = chain_world(5, rot);
+            assert!(!short.is_complete());
+            assert_eq!(remaining(&short), 1, "5 monomers validated (rotation {rot})");
+        }
+    }
+}
