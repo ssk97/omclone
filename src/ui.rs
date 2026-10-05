@@ -1,13 +1,13 @@
 use miniquad::*;
 use crate::{sim::*, parser, render_sim::*, render_library::GFXPos};
-use std::{io::BufReader, io::BufWriter, io::prelude::*};
+use std::{io::BufReader, io::prelude::*};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs::File, path::Path};
 
-#[cfg(feature = "color_eyre")]
+#[cfg(feature = "color-eyre")]
 use color_eyre::eyre::Result;
-#[cfg(not(feature = "color_eyre"))]
+#[cfg(not(feature = "color-eyre"))]
 use simple_eyre::eyre::Result;
 use core::ops::Range;
 struct TapeBuffer<'a>{
@@ -15,6 +15,11 @@ struct TapeBuffer<'a>{
     earliest_edit: &'a mut Option<usize>,
     tape_mode: bool,
     held_str: String,
+}
+impl TapeBuffer<'_>{
+    fn record_edit(&mut self, index: usize) {
+        *self.earliest_edit = Some(self.earliest_edit.map_or(index, |e| e.min(index)));
+    }
 }
 impl AsRef<str> for TapeBuffer<'_>{
     fn as_ref(&self) -> &str {
@@ -28,62 +33,29 @@ impl egui::widgets::text_edit::TextBuffer for TapeBuffer<'_>{
         true
     }
     fn insert_text(&mut self, text: &str, char_index: usize) -> usize {
-        let char_index = char_index;
-        *self.earliest_edit = Some(char_index);
-        let tape = &mut self.tape_ref;
         let instr_mapped:Vec<Instr> = text.chars().filter_map(|x| Instr::from_char(x.to_ascii_lowercase())).collect();
-        let inserted = instr_mapped.len();
-
-        let empty_extension = if char_index < tape.first{
-            let tmp = tape.first-char_index;
-            tape.first = char_index;
-            tmp
-        } else {
-            0
-        };
-        let instr_chain = instr_mapped.into_iter().chain(std::iter::repeat(Instr::Empty).take(empty_extension));
-        let splice_index = char_index-tape.first;
-        let splice_range = if self.tape_mode {
-            splice_index..usize::min(splice_index+text.len(),tape.instructions.len())
-        } else {
-            splice_index..splice_index
-        };
-        tape.instructions.splice(splice_range,instr_chain);
-
-        self.held_str = tape.noop_clear_and_string();
-        inserted
+        if instr_mapped.is_empty() {
+            return 0;
+        }
+        self.record_edit(char_index);
+        self.tape_ref.insert(char_index, &instr_mapped, self.tape_mode);
+        self.held_str = self.tape_ref.to_string();
+        instr_mapped.len()
     }
     fn delete_char_range(&mut self, char_range: Range<usize>) {
-        *self.earliest_edit = Some(char_range.start);
-        let tape = &mut self.tape_ref;
-        if self.tape_mode{
-            for x in char_range{
-                if x >= tape.first{
-                    tape.instructions[x-tape.first] = Instr::Empty;
-                }
-            }
-        } else {
-            if char_range.end <= tape.first{
-                tape.first -= char_range.end.saturating_sub(char_range.start);
-            } else {
-                let start = if char_range.start < tape.first{
-                    tape.first = char_range.start;
-                    0
-                } else {
-                    char_range.start-tape.first
-                };
-                let end = (char_range.end-tape.first).min(tape.instructions.len());
-                tape.instructions.drain(start..end);
-            }
+        if char_range.is_empty() {
+            return;
         }
-        self.held_str = tape.noop_clear_and_string();
+        self.record_edit(char_range.start);
+        self.tape_ref.delete(char_range, self.tape_mode);
+        self.held_str = self.tape_ref.to_string();
     }
 
     fn clear(&mut self) {
-        *self.earliest_edit = Some(0);
+        self.record_edit(0);
         self.tape_ref.instructions.clear();
         self.tape_ref.first = 0;
-        self.held_str = self.tape_ref.noop_clear_and_string();
+        self.held_str = self.tape_ref.to_string();
     }
     fn take(&mut self) -> String {
         let s = self.as_ref().to_owned();
@@ -130,6 +102,38 @@ struct Loaded{
     popup_reload: bool,
 }
 impl Loaded{
+    //Brings the other worlds up to date after the arms (tapes, types) or loop length of base_world
+    //changed. `earliest_step` is the first timestep whose behavior may have changed.
+    fn apply_base_change(&mut self, earliest_step: usize){
+        let old_start = self.base_world.timestep;
+        let new_start = self.base_world.get_first_timestep();
+        self.base_world.timestep = new_start;
+        let earliest_step = (earliest_step as u64).min(old_start).min(new_start);
+        fn sync_arms(target: &mut World, base: &World){
+            target.repeat_length = base.repeat_length;
+            for (arm, base_arm) in target.arms.iter_mut().zip(&base.arms){
+                arm.instruction_tape = base_arm.instruction_tape.clone();
+                arm.arm_type = base_arm.arm_type;
+            }
+        }
+        //The backup is either still valid (it's from before earliest_step) or gets replaced by reset_world
+        sync_arms(&mut self.backup_world, &self.base_world);
+        if earliest_step <= self.curr_time as u64 || earliest_step < self.curr_world.timestep{
+            self.reset_to(earliest_step);
+        } else {
+            sync_arms(&mut self.curr_world, &self.base_world);
+        }
+    }
+    //Sets the loop length, returning the first timestep it can affect
+    fn change_repeat_length(&mut self, length: usize) -> usize{
+        let old = self.base_world.repeat_length;
+        self.base_world.repeat_length = length;
+        if self.max_timestep < length{
+            self.max_timestep = length;
+        }
+        //Arms start looping at their first instruction plus the loop length
+        self.base_world.get_first_timestep() as usize + old.min(length)
+    }
     fn reset_to(&mut self, reset_to:u64){
         if self.backup_step < reset_to{
             self.reset_to_backup();
@@ -432,18 +436,12 @@ impl EventHandler for MyMiniquadApp {
                                 .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()));
                             ui.label("Loop length:");
 
-                            let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut loaded.base_world.repeat_length)
+                            let mut repeat_length = loaded.base_world.repeat_length;
+                            let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut repeat_length)
                                 .clamp_range(min_size..=usize::MAX));
-                            if repeat_length_response.changed(){
-                                let length = loaded.base_world.repeat_length;
-                                loaded.backup_world.repeat_length = length;
-                                loaded.curr_world.repeat_length = length;
-                                if loaded.max_timestep < length{
-                                    loaded.max_timestep = length;
-                                }
-                                if length <= loaded.curr_time as usize{
-                                    loaded.reset_to(length as u64);
-                                }
+                            if repeat_length_response.changed() && repeat_length != loaded.base_world.repeat_length{
+                                let earliest_step = loaded.change_repeat_length(repeat_length);
+                                loaded.apply_base_change(earliest_step);
                             }
                             ui.separator();
                             let area_check = ui.checkbox(&mut loaded.show_area, "Collide/Area");
@@ -506,39 +504,28 @@ impl EventHandler for MyMiniquadApp {
                             ui.horizontal(|ui| {
                                 if ui.button("Save").clicked() {
                                     let dat = &self.unloaded_info;
-                                    
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    let mut f = {
-                                        let base_path = Path::new(&dat.base);
-                                        let solution_path = base_path.join(&dat.solution);
-                                        File::create(solution_path).unwrap()
-                                    };
-                                    #[cfg(target_arch = "wasm32")]
-                                    let mut f = {
-                                        Vec::<u8>::new()
-                                    };
-
-                                    {//scope the writer so it's dropped before trying to save in js
-                                        if !loaded.solution.solution_name.contains("omclone"){
-                                            loaded.solution.solution_name += "(omclone)";
+                                    if !loaded.solution.solution_name.contains("omclone"){
+                                        loaded.solution.solution_name += "(omclone)";
+                                    }
+                                    let new_solution = parser::create_solution(&loaded.base_world,
+                                        loaded.solution.puzzle_name.clone(),
+                                        loaded.solution.solution_name.clone());
+                                    //Serialize fully first so a failure doesn't leave a partial file
+                                    let mut data = Vec::new();
+                                    let saved = parser::write_solution(&mut data, &new_solution).and_then(|()| {
+                                        #[cfg(not(target_arch = "wasm32"))]
+                                        std::fs::write(Path::new(&dat.base).join(&dat.solution), &data)?;
+                                        #[cfg(target_arch = "wasm32")]{
+                                            let filedata = sapp_jsutils::JsObject::buffer(&data);
+                                            let filename = sapp_jsutils::JsObject::string(&dat.solution);
+                                            unsafe {save_file(filedata,filename);}
                                         }
-                                        let mut writer = BufWriter::new(&mut f);
-                                        let base = &loaded.base_world;
-                                        let new_solution = parser::create_solution(base, 
-                                            loaded.solution.puzzle_name.clone(),
-                                            loaded.solution.solution_name.clone());
-                                        parser::write_solution(&mut writer, &new_solution).unwrap();
-                                        writer.flush().unwrap();
-                                    }
-
-                                    #[cfg(target_arch = "wasm32")]{
-                                        let data = f;
-                                        let filedata = sapp_jsutils::JsObject::buffer(&data);
-                                        let filename = sapp_jsutils::JsObject::string(&dat.solution);
-										unsafe {save_file(filedata,filename);}
-                                    }
-
-                                    loaded.message = Some(String::from("Saved!"));
+                                        Ok(())
+                                    });
+                                    loaded.message = Some(match saved {
+                                        Ok(()) => String::from("Saved!"),
+                                        Err(err) => format!("Save failed: {err}"),
+                                    });
                                 }
                                 ui.separator();
                                 if ui.button("Load").clicked() {
@@ -593,6 +580,9 @@ impl EventHandler for MyMiniquadApp {
                                                 }
                                             }
                                         }
+                                        if pistons_added + pistons_removed > 0 {
+                                            loaded.apply_base_change(0);
+                                        }
                                         self.extra_message = Some(format!("{pistons_added} pistons added, {pistons_removed} pistons removed"));
                                     }
                                     ui.separator();
@@ -604,7 +594,6 @@ impl EventHandler for MyMiniquadApp {
                             //+&(" ".repeat(loaded.max_timestep-loaded.curr_timestep));
                             let mut earliest_edit = None;
                             let mut target_time = None;
-                            let mut change_arm_id = None;
                             egui::ScrollArea::horizontal().show(ui, |ui| {
                                 ui.add(egui::Label::new(egui::RichText::new(marker).monospace()).wrap_mode(egui::TextWrapMode::Extend));
                                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -627,9 +616,6 @@ impl EventHandler for MyMiniquadApp {
                                             if let Some(cursor) = text_output.cursor_range{
                                                 target_time = Some(cursor.primary.index);
                                             }
-                                            if text_output.response.changed(){
-                                                change_arm_id = Some(a_num);
-                                            }
                                         });
                                     }
                                     let marker2 = " ".repeat(curr_timestep+3)+"^";
@@ -639,8 +625,7 @@ impl EventHandler for MyMiniquadApp {
                             if let Some(target) = target_time {
                                 loaded.try_set_target_time(target);
                             }
-                            if let Some(edit_step) = earliest_edit{
-                                let arm_id = change_arm_id.unwrap();//If edit is performed, the change must be recorded
+                            if let Some(mut edit_step) = earliest_edit{
                                 let min_time = loaded.base_world.arms.iter()
                                     .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()+arm.instruction_tape.first));
                                 if loaded.max_timestep < min_time{
@@ -649,19 +634,9 @@ impl EventHandler for MyMiniquadApp {
                                 let min_loop = loaded.base_world.arms.iter()
                                     .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()));
                                 if loaded.base_world.repeat_length < min_loop{
-                                    loaded.base_world.repeat_length = min_loop;
-                                    loaded.backup_world.repeat_length = min_loop;
-                                    loaded.curr_world.repeat_length = min_loop;
+                                    edit_step = edit_step.min(loaded.change_repeat_length(min_loop));
                                 }
-                                loaded.backup_world.arms[arm_id].instruction_tape = loaded.base_world.arms[arm_id].instruction_tape.clone();
-                                if edit_step <= loaded.curr_time as usize {
-                                    if let RunState::Crashed(_) = loaded.run_state{
-                                        loaded.run_state = RunState::Manual(loaded.curr_world.timestep as usize);
-                                    }
-                                    loaded.reset_to(edit_step as u64);
-                                } else {
-                                    loaded.curr_world.arms[arm_id].instruction_tape = loaded.base_world.arms[arm_id].instruction_tape.clone();
-                                }
+                                loaded.apply_base_change(edit_step);
                             }
                         });
                     }

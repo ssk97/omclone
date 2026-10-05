@@ -1,11 +1,11 @@
 use crate::sim::*;
 
-#[cfg(feature = "color_eyre")]
+#[cfg(feature = "color-eyre")]
 use color_eyre::{
     eyre::{bail, ensure, eyre},
     Result,
 };
-#[cfg(not(feature = "color_eyre"))]
+#[cfg(not(feature = "color-eyre"))]
 use simple_eyre::{
     eyre::{bail, ensure, eyre},
     Result,
@@ -89,12 +89,15 @@ fn parse_bytepos(f: &mut impl Read) -> Result<Pos> {
     Ok(Pos::new(x, y))
 }
 
+//.NET's 7-bit encoded int: little-endian groups of 7 bits, high bit set on all but the last byte
 fn parse_var_int(f: &mut impl Read) -> Result<usize> {
     let mut acc = 0;
+    let mut shift = 0;
     loop{
         let dat = parse_byte(f)?;
-        acc *= 0x80;
-        acc += (dat&0x7F) as usize;
+        ensure!(shift < 32, "Variable-length integer too long");
+        acc |= ((dat&0x7F) as usize) << shift;
+        shift += 7;
         if dat&0x80 == 0{
             return Ok(acc)
         }
@@ -120,10 +123,15 @@ fn write_pos(f: &mut impl Write, p: Pos) -> Result<()>{
     write_int(f, p.x)?;
     write_int(f, p.y)
 }
+fn write_var_int(f: &mut impl Write, mut n: usize) -> Result<()> {
+    while n >= 0x80 {
+        write_byte(f, (n & 0x7F) as u8 | 0x80)?;
+        n >>= 7;
+    }
+    write_byte(f, n as u8)
+}
 fn write_str(f: &mut impl Write, s: &str) -> Result<()> {
-    //Instead of writing a byte, should write a var_int
-    ensure!(s.len() < 128, "Write string {:?} too long {:?} > 127", s, s.len());
-    write_byte(f, s.len() as u8)?;
+    write_var_int(f, s.len())?;
     f.write_all(s.as_bytes())?;
     Ok(())
 }
@@ -357,8 +365,16 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
             instructions, tracks, arm_index, conduit
         });
     }
-    let mut found_first = false;
+    //If no looping arm's tape reaches the loop length, a Noop on one of them keeps the loop length
     let loop_len = world.repeat_length;
+    let is_looping = |arm: &&Arm| !arm.instruction_tape.instructions.contains(&Instr::Halt);
+    let longest = world.arms.iter().filter(is_looping)
+        .map(|arm| arm.instruction_tape.instructions.len()).max().unwrap_or(0);
+    let noop_arm = if longest < loop_len {
+        world.arms.iter().position(|arm| is_looping(&arm))
+    } else {
+        None
+    };
     for (id, arm) in world.arms.iter().enumerate(){
         let part_type = TArm(arm.arm_type);
         let pos = arm.pos;
@@ -375,10 +391,8 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
             }
             step += 1;
         }
-        let target_loop = (loop_len+tape.first) as i32;
-        if !found_first && step < target_loop{
-            instructions.push((target_loop-1,Instr::Noop));
-            found_first = true;
+        if noop_arm == Some(id) {
+            instructions.push(((loop_len+tape.first) as i32 - 1, Instr::Noop));
         }
         let tracks = None;
         let arm_index = id as _;
@@ -572,7 +586,8 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
             TTrack => {
                 let tracks = p.tracks.clone()
                     .ok_or(eyre!("Track data not found on track glyph"))?;
-                glyphs.push(Glyph {glyph_type: GlyphType::Track(tracks), pos: p.pos, rot: p.rot });
+                //Like omsim, track rotation is ignored
+                glyphs.push(Glyph {glyph_type: GlyphType::Track(tracks), pos: p.pos, rot: 0 });
             }
             TConduit => {
                 let conduits = p.conduit.clone()

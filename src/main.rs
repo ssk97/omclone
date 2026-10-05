@@ -12,9 +12,9 @@ mod render_sim;
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod ui;
 
-#[cfg(feature = "color_eyre")]
+#[cfg(feature = "color-eyre")]
 use color_eyre::{install, eyre::Result};
-#[cfg(not(feature = "color_eyre"))]
+#[cfg(not(feature = "color-eyre"))]
 use simple_eyre::{install, eyre::Result};
 
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]

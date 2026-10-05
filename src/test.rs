@@ -392,3 +392,215 @@ mod polymer_tests {
     }
 }
 
+//Instruction tape editing, as done by the editor's tape text boxes
+mod tape_edit_tests {
+    use crate::sim::*;
+    use Instr::*;
+
+    fn tape(first: usize, instructions: Vec<Instr>) -> Tape {
+        Tape { first, instructions }
+    }
+    fn assert_tape(t: &Tape, first: usize, instructions: &[Instr]) {
+        assert_eq!((t.first, t.instructions.as_slice()), (first, instructions));
+    }
+
+    #[test]
+    fn insert_before_first() {
+        let mut t = tape(5, vec![RotateClockwise, Grab]);
+        t.insert(2, &[Extend], false);
+        assert_tape(&t, 2, &[Extend, Empty, Empty, Empty, RotateClockwise, Grab]);
+    }
+
+    #[test]
+    fn overwrite_before_first_keeps_instructions() {
+        let mut t = tape(5, vec![RotateClockwise, Grab]);
+        t.insert(2, &[Extend], true);
+        assert_tape(&t, 2, &[Extend, Empty, Empty, RotateClockwise, Grab]);
+
+        let mut t = tape(5, vec![RotateClockwise, Grab]);
+        t.insert(4, &[Extend, Extend], true);
+        assert_tape(&t, 4, &[Extend, Extend, Grab]);
+
+        let mut t = tape(0, vec![RotateClockwise]);
+        t.insert(3, &[Grab], true);
+        assert_tape(&t, 0, &[RotateClockwise, Empty, Empty, Grab]);
+    }
+
+    #[test]
+    fn delete_from_leading_blanks_into_instructions() {
+        //Deleting chars 3..7 of "     RG w" leaves "    w"
+        let mut t = tape(5, vec![RotateClockwise, Grab, Empty, Extend]);
+        t.delete(3..7, false);
+        assert_tape(&t, 4, &[Extend]);
+
+        let mut t = tape(5, vec![RotateClockwise]);
+        t.delete(1..3, false);
+        assert_tape(&t, 3, &[RotateClockwise]);
+    }
+
+    #[test]
+    fn overwrite_delete_and_empty_tapes() {
+        let mut t = tape(2, vec![RotateClockwise, Grab, Extend]);
+        t.delete(1..4, true);
+        assert_tape(&t, 4, &[Extend]);
+
+        //A tape without instructions starts at 0
+        let mut t = tape(2, vec![RotateClockwise, Grab]);
+        t.delete(0..4, false);
+        assert_tape(&t, 0, &[]);
+
+        let mut t = tape(3, vec![Grab]);
+        t.insert(1, &[], false);
+        assert_tape(&t, 3, &[Grab]);
+    }
+}
+
+//Repeat blocks, wheels, polymers, and the solution file format
+mod regression_tests {
+    use crate::parser::*;
+    use crate::sim::*;
+    use smallvec::smallvec;
+    use AtomType::*;
+    use Instr::*;
+
+    fn arm(x: i32, y: i32, arm_type: ArmType, instructions: Vec<Instr>) -> Arm {
+        Arm::new(Pos::new(x, y), 0, 1, arm_type, Tape { first: 0, instructions })
+    }
+    fn glyph(x: i32, y: i32, rot: Rot, glyph_type: GlyphType) -> Glyph {
+        Glyph { pos: Pos::new(x, y), rot, glyph_type }
+    }
+    fn run(glyphs: Vec<Glyph>, arms: Vec<Arm>, steps: usize) -> World {
+        let mut world = World::setup_sim(&InitialWorld { glyphs, arms }).unwrap();
+        let mut motions = WorldStepInfo::new();
+        for _ in 0..steps {
+            world.run_step(false, &mut motions).unwrap();
+        }
+        world
+    }
+    fn type_at(world: &World, x: i32, y: i32) -> Option<AtomType> {
+        world.atoms.locs.get(&Pos::new(x, y)).map(|&key| world.atoms.atom_map[key].atom_type)
+    }
+    fn empty_puzzle() -> FullPuzzle {
+        FullPuzzle {
+            puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+        }
+    }
+    //Saves the world as a solution file and loads it back
+    fn round_trip(world: &World, solution_name: &str) -> (Vec<u8>, FullSolution, InitialWorld) {
+        let solution = create_solution(world, String::from("puzzle"), String::from(solution_name));
+        let mut data = Vec::new();
+        write_solution(&mut data, &solution).unwrap();
+        let parsed = parse_solution(&mut data.as_slice()).unwrap();
+        let init = puzzle_prep(&empty_puzzle(), &parsed).unwrap();
+        (data, parsed, init)
+    }
+
+    #[test]
+    fn noop_before_repeat_is_repeated() {
+        //Like omsim, the repeated block runs through the Noop: R _ R _
+        let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Noop, Repeat])], 0);
+        assert_eq!(world.arms[0].instruction_tape.instructions, [RotateClockwise, Empty, RotateClockwise, Empty]);
+        assert_eq!(world.repeat_length, 4);
+        //A halt between moves in a repeated block is copied rather than rejected
+        let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Halt, RotateClockwise, Repeat])], 0);
+        assert_eq!(world.arms[0].instruction_tape.instructions,
+            [RotateClockwise, Halt, RotateClockwise, RotateClockwise, Halt, RotateClockwise]);
+    }
+
+    #[test]
+    fn ravari_wheel_keeps_its_atoms() {
+        let world = run(vec![], vec![arm(0, 0, ArmType::Ravari, vec![Drop, Grab, RotateCounterClockwise])], 3);
+        assert!(world.arms[0].grabbing);
+        //Tin starts at (1,0) and rotates with the wheel
+        assert_eq!(type_at(&world, 0, 1), Some(Tin));
+        assert_eq!(world.atoms.atom_map.len(), 6);
+    }
+
+    #[test]
+    fn projection_and_rejection_ignore_wheel_atoms() {
+        //Ravari's Tin is at (1,0)
+        let projection = run(vec![
+                glyph(2, 0, 0, GlyphType::Input(smallvec![vec![Atom::new(Pos::new(0, 0), Quicksilver)]], 0)),
+                glyph(2, 0, 3, GlyphType::Projection)],
+            vec![arm(0, 0, ArmType::Ravari, vec![])], 1);
+        assert_eq!(type_at(&projection, 1, 0), Some(Tin));
+        assert_eq!(type_at(&projection, 2, 0), Some(Quicksilver));
+
+        let rejection = run(vec![glyph(1, 0, 0, GlyphType::Rejection)],
+            vec![arm(0, 0, ArmType::Ravari, vec![])], 1);
+        assert_eq!(type_at(&rejection, 1, 0), Some(Tin));
+        assert_eq!(type_at(&rejection, 2, 0), None);
+    }
+
+    #[test]
+    fn dangling_bond_without_next_monomer_gets_no_placeholder() {
+        let mut a = Atom::new(Pos::new(0, 0), Salt);
+        a.connections[0] = Bonds::NORMAL; //to the next monomer
+        a.connections[1] = Bonds::NORMAL; //to an empty hex
+        let world = run(vec![glyph(0, 0, 0, GlyphType::OutputRepeating(
+            smallvec![vec![a, Atom::new(Pos::new(1, 0), RepeatingOutputMarker)]], 6, 0))], vec![], 0);
+        let GlyphType::OutputRepeating(shown, _, _) = &world.glyphs[0].glyph_type else {unreachable!()};
+        let markers: Vec<Pos> = shown[0].iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
+        assert_eq!(markers, vec![Pos::new(6, 0)]);
+    }
+
+    #[test]
+    fn polymer_ignores_other_atoms_at_origin() {
+        //The monomer has no atom at the output's origin; a separate salt sits there
+        let mut monomer = vec![Atom::new(Pos::new(0, 1), Salt), Atom::new(Pos::new(1, 0), RepeatingOutputMarker)];
+        monomer[0].connections[0] = Bonds::NORMAL;
+        let mut chain: Vec<Atom> = (0..6).map(|x| Atom::new(Pos::new(x, 1), Salt)).collect();
+        for x in 0..5 {
+            chain[x].connections[0] = Bonds::NORMAL;
+            chain[x + 1].connections[3] = Bonds::NORMAL;
+        }
+        let world = run(vec![
+                glyph(0, 0, 0, GlyphType::Input(smallvec![chain], 0)),
+                glyph(0, 0, 0, GlyphType::Input(smallvec![vec![Atom::new(Pos::new(0, 0), Salt)]], 1)),
+                glyph(0, 0, 0, GlyphType::OutputRepeating(smallvec![monomer], 6, 0))],
+            vec![], 1);
+        assert!(world.is_complete());
+    }
+
+    #[test]
+    fn long_names_round_trip() {
+        let world = run(vec![], vec![], 0);
+        let name = "x".repeat(200);
+        let (data, parsed, _) = round_trip(&world, &name);
+        assert_eq!(parsed.solution_name, name);
+        //.NET's 7-bit encoding of the puzzle name's length (6), then the solution name's (200)
+        assert_eq!(data[4], 6);
+        assert_eq!(data[11..13], [0xC8, 0x01]);
+    }
+
+    #[test]
+    fn saved_loop_length_noop() {
+        //An arm already spans the loop: no Noop needed
+        let world = run(vec![], vec![
+            arm(0, 0, ArmType::PlainArm, vec![RotateClockwise]),
+            arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, Empty, RotateClockwise])], 0);
+        let (_, _, init) = round_trip(&world, "a");
+        assert!(init.arms.iter().all(|a| !a.instruction_tape.instructions.contains(&Noop)));
+
+        //A longer loop is kept with a Noop on an arm that loops (not the halted one)
+        let mut world = run(vec![], vec![
+            arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Halt]),
+            arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
+        world.repeat_length = 5;
+        let (_, _, init) = round_trip(&world, "a");
+        assert!(!init.arms[0].instruction_tape.instructions.contains(&Noop));
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
+    }
+
+    #[test]
+    fn track_rotation_is_ignored() {
+        let track = glyph(2, 2, 1, GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)]));
+        let world = run(vec![track], vec![], 0);
+        let (_, _, init) = round_trip(&world, "a");
+        let loaded = World::setup_sim(&init).unwrap();
+        let GlyphType::Track(hexes) = &loaded.glyphs[0].glyph_type else {unreachable!()};
+        assert_eq!(hexes, &vec![Pos::new(2, 2), Pos::new(3, 2)]);
+    }
+}
+

@@ -171,13 +171,56 @@ impl Tape {
         }
         output
     }
-    pub fn noop_clear_and_string(&mut self) -> String{
-        while self.instructions.get(0).unwrap_or(&Instr::Noop) == &Instr::Empty
-        {
-            self.first += 1;
-            self.instructions.remove(0);
+    //Moves leading empty instructions into `first`. A tape with no instructions starts at 0,
+    //like omsim does for arms without instructions.
+    fn trim_start(&mut self) {
+        let leading = self.instructions.iter().take_while(|&&i| i == Instr::Empty).count();
+        self.instructions.drain(..leading);
+        self.first += leading;
+        if self.instructions.is_empty() {
+            self.first = 0;
         }
-        self.to_string()
+    }
+    //Inserts instructions at the absolute position `index`, or writes over existing ones if `overwrite`
+    pub fn insert(&mut self, index: usize, new: &[Instr], overwrite: bool) {
+        if new.is_empty() {return;}
+        if index < self.first {
+            let gap = self.first - index;
+            self.instructions.splice(0..0, std::iter::repeat(Instr::Empty).take(gap));
+            self.first = index;
+        }
+        let start = index - self.first;
+        if self.instructions.len() < start {
+            self.instructions.resize(start, Instr::Empty);
+        }
+        if overwrite {
+            let end = start + new.len();
+            if self.instructions.len() < end {
+                self.instructions.resize(end, Instr::Empty);
+            }
+            self.instructions[start..end].copy_from_slice(new);
+        } else {
+            self.instructions.splice(start..start, new.iter().copied());
+        }
+        self.trim_start();
+    }
+    //Deletes the absolute positions in `range`, or blanks them if `overwrite`
+    pub fn delete(&mut self, range: std::ops::Range<usize>, overwrite: bool) {
+        let old_first = self.first;
+        let old_end = old_first + self.instructions.len();
+        let start = range.start.clamp(old_first, old_end) - old_first;
+        let end = range.end.clamp(old_first, old_end) - old_first;
+        if overwrite {
+            for i in start..end {
+                self.instructions[i] = Instr::Empty;
+            }
+        } else {
+            self.instructions.drain(start..end);
+            //Deleted blank space before the first instruction shifts it earlier
+            let blanks_before = range.end.min(old_first).saturating_sub(range.start);
+            self.first -= blanks_before;
+        }
+        self.trim_start();
     }
 }
 
@@ -347,6 +390,12 @@ pub enum ArmType {
     PlainArm, DoubleArm, TripleArm, HexArm,
     Piston, VanBerlo, Ravari
 }
+impl ArmType {
+    //Wheels hold their atoms permanently and ignore grab/drop
+    pub fn is_wheel(&self) -> bool {
+        matches!(self, ArmType::VanBerlo | ArmType::Ravari)
+    }
+}
 #[derive(Debug, Clone)]
 pub struct Glyph {
     pub pos: Pos,
@@ -464,6 +513,9 @@ pub struct Polymer {
     //fixed-up bonds between monomers, so it's what atoms are compared against.
     pub second_monomer: Vec<Atom>,
     pub origin: Pos,
+    //Position of the pattern atom whose molecule is checked: the origin if the monomer has an atom
+    //there, otherwise the monomer's first atom (like omsim's center_atom_index)
+    pub center: Pos,
     //Basis of "polymer space": u along the repetition direction, v across it
     pub dir_u: Pos,
     pub dir_v: Pos,
@@ -487,7 +539,7 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
 impl Polymer {
     //Returns the polymer data along with the atoms to display (6 repetitions plus placeholders).
     //- The marker can be anywhere: each repetition's origin goes to the previous repetition's marker.
-    //- Every hex reached by a bond from the 6th repetition that has no atom gets a placeholder.
+    //- Like omsim, a placeholder goes where a bond from the 6th repetition reaches the 7th repetition.
     pub fn build(origin: Pos, raw: &[Atom], outputs_per_repetition: i32) -> Result<(Polymer, Vec<Atom>)> {
         use AtomType::RepeatingOutputMarker;
         let mut markers = raw.iter().filter(|a| a.atom_type == RepeatingOutputMarker);
@@ -500,9 +552,10 @@ impl Polymer {
         ensure!(divisor != 0, "Repetition marker at the output origin!");
         let dir_u = offset / divisor;
         let dir_v = Pos::new(-dir_u.y, dir_u.x + dir_u.y);
+        let center = if monomer.iter().any(|a| a.pos == origin) {origin} else {monomer[0].pos};
         let mut polymer = Polymer {
             monomer, second_monomer: Vec::new(),
-            origin, dir_u, dir_v, monomer_width: 0,
+            origin, center, dir_u, dir_v, monomer_width: 0,
             min_v: 0, row_min_u: Vec::new(), row_max_u: Vec::new(),
             outputs_per_repetition, validated: 0,
         };
@@ -526,14 +579,15 @@ impl Polymer {
         }
         polymer.second_monomer = expanded[n..2 * n].to_vec();
 
-        let occupied: FxHashSet<Pos> = expanded.iter().map(|a| a.pos).collect();
+        let monomer_positions: FxHashSet<Pos> = polymer.monomer.iter().map(|a| a.pos).collect();
         let mut placeholders = vec![marker.pos + offset * (POLYMER_REPETITIONS - 1)];
-        for a in &expanded[n * (POLYMER_REPETITIONS as usize - 1)..] {
+        for a in &polymer.monomer {
             for dir in 0..6 {
                 if a.connections[dir as usize] == Bonds::NO_BOND {continue;}
-                let target = a.pos + rot_to_pos(dir);
-                if !occupied.contains(&target) {
-                    placeholders.push(target);
+                //A bond to the next monomer's copy of an atom
+                let target = a.pos + rot_to_pos(dir) - offset;
+                if monomer_positions.contains(&target) {
+                    placeholders.push(target + offset * POLYMER_REPETITIONS);
                 }
             }
         }
@@ -632,10 +686,9 @@ impl Polymer {
         }
         true
     }
-    //Validates as many additional monomers as the molecule at the output origin allows
+    //Validates as many additional monomers as the molecule at the center allows
     fn update(&mut self, atoms: &WorldAtoms) {
-        let center = if atoms.locs.contains_key(&self.origin) {self.origin} else {self.monomer[0].pos};
-        let Some(&key) = atoms.locs.get(&center) else {return};
+        let Some(&key) = atoms.locs.get(&self.center) else {return};
         let molecule_key = atoms.atom_map[key].molecule;
         let mut monomer_count = self.validated + 1;
         while self.check(atoms, molecule_key, monomer_count) {
@@ -703,9 +756,10 @@ impl WorldAtoms {
         let atom = self.atom_map.get(key).expect("Inconsistent atoms (type check)");
         Some(atom.atom_type)
     }
-    fn get_nonberlo_type(&self, loc: Pos) -> Option<AtomType> {
+    //Like get_type, but wheel atoms are invisible (as they are to most glyphs)
+    fn get_nonwheel_type(&self, loc: Pos) -> Option<AtomType> {
         let &key = self.locs.get(&loc)?;
-        let atom = self.atom_map.get(key).expect("Inconsistent atoms (nonberlo type check)");
+        let atom = self.atom_map.get(key).expect("Inconsistent atoms (nonwheel type check)");
         if atom.immutable_wheel {return None};
         Some(self.atom_map.get(key)?.atom_type)
     }
@@ -1136,7 +1190,7 @@ impl World {
             PivotCounterClockwise => Pivot(1),
             PivotClockwise => Pivot(-1),
             Drop => {
-                if arm_type != VanBerlo {
+                if !arm_type.is_wheel() {
                     for r in 0..6{
                         let grabbed_atom = arm.atoms_grabbed[r];
                         if !grabbed_atom.is_null(){
@@ -1149,7 +1203,7 @@ impl World {
                 STILL
             }
             Grab => {
-                if !arm.grabbing && arm_type != VanBerlo {
+                if !arm.grabbing && !arm_type.is_wheel() {
                     arm.grabbing = true;
                     for r in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
                         let grab_pos = arm.pos + (rot_to_pos(arm.rot + r) * arm.len);
@@ -1440,7 +1494,7 @@ impl World {
                 }
                 Projection => {
                     let qs = atoms.get_consumable_type(motion, pos);
-                    let metal = atoms.get_type(pos_bi);
+                    let metal = atoms.get_nonwheel_type(pos_bi);
                     if let (Some(Quicksilver), Some(metal)) = (qs, metal){
                         if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x + 1)){
                             atoms.destroy_atom_at(pos);
@@ -1449,7 +1503,7 @@ impl World {
                     }
                 }
                 Rejection => {
-                    let metal = atoms.get_type(pos);
+                    let metal = atoms.get_nonwheel_type(pos);
                     let open = atoms.check_empty(motion, pos_bi);
                     if let (true, Some(metal)) = (open, metal){
                         if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x - 1)){
@@ -1549,7 +1603,7 @@ impl World {
                 }
                 Duplication => {
                     let source = atoms.get_type(pos);
-                    let salt = atoms.get_nonberlo_type(pos_bi);
+                    let salt = atoms.get_nonwheel_type(pos_bi);
                     if let (Some(elem), Some(Salt)) = (source, salt){
                         if elem.is_element() {
                             atoms.get_atom_mut(pos_bi).unwrap().atom_type = elem;
@@ -1838,8 +1892,8 @@ impl World {
                             position_check += offset;
                         }
                     }
-                    PivotCounterClockwise | PivotClockwise | Empty => {}
-                    Reset | Repeat | Noop | Halt => {bail!("Instruction {:?} not basic move!",instr);}
+                    PivotCounterClockwise | PivotClockwise | Empty | Halt => {}
+                    Reset | Repeat | Noop => {bail!("Instruction {:?} not basic move!",instr);}
                 }
                 Ok(())
             };
@@ -1944,6 +1998,8 @@ impl World {
                 Noop => {
                     instructions.push(Empty);
                     curr += 1;
+                    //A noop takes a cycle, so like omsim it extends the repeated block (and the loop)
+                    repeat_ending = curr;
                 }
             };
         }
@@ -2048,7 +2104,7 @@ impl World {
         world.timestep = world.get_first_timestep();
         Ok(world)
     }
-    fn get_first_timestep(&self) -> u64{
+    pub fn get_first_timestep(&self) -> u64{
         if self.arms.len() == 0 { return 0 }
         self.arms.iter().map(|a|a.instruction_tape.first as u64).fold(u64::MAX, std::cmp::min)
     }
