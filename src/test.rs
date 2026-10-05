@@ -173,7 +173,7 @@ mod molecule_tests {
     }
     //Plain arm at (-1,0) pointing at (0,0)
     fn arm(instructions: Vec<Instr>) -> Arm {
-        Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape { first: 0, instructions })
+        Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions))
     }
     fn run(glyphs: Vec<Glyph>, arms: Vec<Arm>, steps: usize) -> World {
         let mut world = World::setup_sim(&InitialWorld { glyphs, arms }).unwrap();
@@ -398,7 +398,7 @@ mod tape_edit_tests {
     use Instr::*;
 
     fn tape(first: usize, instructions: Vec<Instr>) -> Tape {
-        Tape { first, instructions }
+        Tape::new(first, instructions)
     }
     fn assert_tape(t: &Tape, first: usize, instructions: &[Instr]) {
         assert_eq!((t.first, t.instructions.as_slice()), (first, instructions));
@@ -464,7 +464,7 @@ mod regression_tests {
     use Instr::*;
 
     fn arm(x: i32, y: i32, arm_type: ArmType, instructions: Vec<Instr>) -> Arm {
-        Arm::new(Pos::new(x, y), 0, 1, arm_type, Tape { first: 0, instructions })
+        Arm::new(Pos::new(x, y), 0, 1, arm_type, Tape::new(0, instructions))
     }
     fn glyph(x: i32, y: i32, rot: Rot, glyph_type: GlyphType) -> Glyph {
         Glyph { pos: Pos::new(x, y), rot, glyph_type }
@@ -500,7 +500,7 @@ mod regression_tests {
     fn noop_before_repeat_is_repeated() {
         //Like omsim, the repeated block runs through the Noop: R _ R _
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Noop, Repeat])], 0);
-        assert_eq!(world.arms[0].instruction_tape.instructions, [RotateClockwise, Empty, RotateClockwise, Empty]);
+        assert_eq!(world.arms[0].instruction_tape.instructions, [RotateClockwise, Noop, RotateClockwise, Noop]);
         assert_eq!(world.repeat_length, 4);
         //A halt between moves in a repeated block is copied rather than rejected
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Halt, RotateClockwise, Repeat])], 0);
@@ -591,6 +591,56 @@ mod regression_tests {
         let (_, _, init) = round_trip(&world, "a");
         assert!(!init.arms[0].instruction_tape.instructions.contains(&Noop));
         assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
+    }
+
+    #[test]
+    fn saved_noops_keep_loop_length() {
+        //R O C runs R _ R _: the trailing Noop is the only thing making the loop 4 long
+        let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Noop, Repeat])], 0);
+        assert_eq!(world.repeat_length, 4);
+        let (_, _, init) = round_trip(&world, "a");
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 4);
+
+        //Leading and trailing Noops are both saved
+        let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![Noop, RotateClockwise, Noop])], 0);
+        let (_, _, init) = round_trip(&world, "a");
+        assert_eq!(init.arms[0].instruction_tape.first, 0);
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 3);
+    }
+
+    #[test]
+    fn saved_loop_length_ignores_blank_padding() {
+        //Trailing blanks (like from "space ends") aren't saved, so they can't hold the loop length
+        let mut world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
+        world.repeat_length = 5;
+        world.arms[0].instruction_tape.instructions.resize(5, Empty);
+        let (_, _, init) = round_trip(&world, "a");
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
+    }
+
+    #[test]
+    fn saved_loop_length_noop_skips_empty_tapes() {
+        //The Noop must go on an arm with instructions: alone on an empty tape, it spans just one step
+        let mut world = run(vec![], vec![
+            arm(0, 0, ArmType::PlainArm, vec![]),
+            arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
+        world.repeat_length = 5;
+        let (_, _, init) = round_trip(&world, "a");
+        assert!(init.arms[0].instruction_tape.instructions.is_empty());
+        assert!(init.arms[1].instruction_tape.instructions.contains(&Noop));
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
+    }
+
+    #[test]
+    fn tape_edits_track_halting() {
+        let mut tape = Tape::new(0, vec![RotateClockwise]);
+        assert!(!tape.halts());
+        tape.insert(1, &[Halt], false);
+        assert!(tape.halts());
+        assert_eq!(tape.get(5, 2), Empty, "halting tapes don't loop");
+        tape.delete(1..2, false);
+        assert!(!tape.halts());
+        assert_eq!(tape.get(2, 2), RotateClockwise);
     }
 
     #[test]

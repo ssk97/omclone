@@ -112,15 +112,17 @@ impl FontStorage{
         ctx.apply_pipeline(&self.pipeline);
     }
     //WARNING: Assumes pipeline has been set already
+    //Only digits are drawn; other characters are skipped
     pub fn render_text_centered(&self, ctx: &mut dyn RenderingBackend, text: &str, pos: GFXPos, world_offset: GFXPos, scale: (f32, f32)){
+        let digits = || text.chars().filter_map(|c| c.to_digit(10));
         let mut width_total = 0.;
-        for char in text.chars(){
-            let char_data = &self.data[char as usize-'0' as usize];
+        for digit in digits(){
+            let char_data = &self.data[digit as usize];
             width_total += char_data.metrics.advance_width * FONT_SCALE + FONT_EXTRA_SPACING;
         }
         let mut x = pos[0]-width_total/2.;
-        for char in text.chars(){
-            let char_data = &self.data[char as usize-'0' as usize];
+        for digit in digits(){
+            let char_data = &self.data[digit as usize];
             let metrics = char_data.metrics;
             ctx.apply_bindings(&char_data.binding);
             let offset = [x+(metrics.xmin as f32 *FONT_SCALE), pos[1]+(metrics.ymin as f32 *FONT_SCALE)];

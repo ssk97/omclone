@@ -92,6 +92,8 @@ impl Instr {
             b'C' => Some(Repeat),
             b'X' => Some(Reset),
             b'O' => Some(Noop),
+            //Found in some solution files; omsim treats it as a blank cell, the same as a noop
+            b'I' => Some(Noop),
             b'B' => Some(Halt),
             b' ' => Some(Empty),
             _ => None,
@@ -132,7 +134,7 @@ impl Instr {
              't' =>  Some(Back                  ),
              //'C' =>  Some(Repeat                ),
              //'X' =>  Some(Reset                 ),
-             //'O' =>  Some(Noop                  ),
+             'o' =>  Some(Noop                  ),
              'b' =>  Some(Halt                  ),
              ' ' =>  Some(Empty                 ),
              _ => None
@@ -144,13 +146,33 @@ impl Instr {
 pub struct Tape {
     pub first: usize,
     pub instructions: Vec<Instr>,
+    //Cached `instructions.contains(&Halt)`, since it's needed every step. The methods below keep it
+    //up to date; anything else that adds or removes a Halt in `instructions` must call update_halts.
+    halts: bool,
 }
 impl Tape {
+    pub fn new(first: usize, instructions: Vec<Instr>) -> Self {
+        let mut tape = Tape { first, instructions, halts: false };
+        tape.update_halts();
+        tape
+    }
+    pub fn update_halts(&mut self) {
+        self.halts = self.instructions.contains(&Instr::Halt);
+    }
+    //Halting tapes run once; all others loop
+    pub fn halts(&self) -> bool {
+        self.halts
+    }
+    pub fn clear(&mut self) {
+        self.instructions.clear();
+        self.first = 0;
+        self.halts = false;
+    }
     pub fn get(&self, timestep: usize, loop_len: usize) -> Instr {
         use Instr::Empty;
         if timestep >= self.first{
             let after_first = timestep - self.first;
-            if self.instructions.contains(&Instr::Halt){
+            if self.halts{
                 return *self
                     .instructions
                     .get(after_first)
@@ -203,6 +225,7 @@ impl Tape {
             self.instructions.splice(start..start, new.iter().copied());
         }
         self.trim_start();
+        self.update_halts();
     }
     //Deletes the absolute positions in `range`, or blanks them if `overwrite`
     pub fn delete(&mut self, range: std::ops::Range<usize>, overwrite: bool) {
@@ -221,6 +244,7 @@ impl Tape {
             self.first -= blanks_before;
         }
         self.trim_start();
+        self.update_halts();
     }
 }
 
@@ -1108,7 +1132,6 @@ impl World {
             let maybe_move = motion.atoms.get(this_key);
             if let Some(curr_move) = maybe_move {
                 if curr_move != &movement {
-                    println!("was {:?},applying {:?}",curr_move,movement);
                     let error_str = &"Atom moved in multiple directions!";
                     return Err(sim_error_pos(error_str,self.atoms.atom_map[this_key].pos));
                 }
@@ -1227,11 +1250,11 @@ impl World {
                 self.track_maps.minus.get(&arm.pos)
                     .map_or(STILL, |&x| {Move(Linear(x))})
             }
-            Repeat | Reset | Noop => {
+            Repeat | Reset => {
                 panic!("Unprocessed instruction!");
             }
             Halt => {arm.halted = true; STILL}
-            Empty => STILL,
+            Noop | Empty => STILL,
         }};
         let rotation_store = arm.rot;
         for (grabber, &atom) in arm.atoms_grabbed.iter().enumerate() {
@@ -1245,7 +1268,6 @@ impl World {
                 let tmp = motion.atoms.insert(atom, atom_movement);
                 match tmp{
                     Some(x) if x != atom_movement => {
-                        println!("was {:?},applying {:?}",atom_movement,x);
                         let error_str = &"Atom moved in multiple directions!";
                         return Err(sim_error_pos(error_str,self.atoms.atom_map[atom].pos));
                     }
@@ -1892,8 +1914,8 @@ impl World {
                             position_check += offset;
                         }
                     }
-                    PivotCounterClockwise | PivotClockwise | Empty | Halt => {}
-                    Reset | Repeat | Noop => {bail!("Instruction {:?} not basic move!",instr);}
+                    PivotCounterClockwise | PivotClockwise | Empty | Halt | Noop => {}
+                    Reset | Repeat => {bail!("Instruction {:?} not basic move!",instr);}
                 }
                 Ok(())
             };
@@ -1996,7 +2018,8 @@ impl World {
                     repeat_ending = curr;
                 }
                 Noop => {
-                    instructions.push(Empty);
+                    //Kept (rather than becoming Empty) so saving writes it back, preserving the loop length
+                    instructions.push(Noop);
                     curr += 1;
                     //A noop takes a cycle, so like omsim it extends the repeated block (and the loop)
                     repeat_ending = curr;
@@ -2005,10 +2028,7 @@ impl World {
         }
         instructions.shrink_to_fit();
         let len = instructions.len();
-        original.instruction_tape = Tape {
-            first: original.instruction_tape.first,
-            instructions,
-        };
+        original.instruction_tape = Tape::new(original.instruction_tape.first, instructions);
         Ok(len)
     }
 
@@ -2057,8 +2077,8 @@ impl World {
             };
             let instr_len = World::normalize_instructions(a, &world.track_maps)?;
             world.instruction_count += a.instruction_tape.instructions.iter()
-                .filter(|&&a| a != Instr::Empty && a != Instr::Halt).count() as i32;
-            if world.repeat_length < instr_len && a.instruction_tape.instructions.iter().all(|x| *x != Instr::Halt){
+                .filter(|&&a| !matches!(a, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32;
+            if world.repeat_length < instr_len && !a.instruction_tape.halts(){
                 world.repeat_length = instr_len;
             }
             if a.arm_type == VanBerlo || a.arm_type == Ravari {

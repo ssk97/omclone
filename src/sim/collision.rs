@@ -358,7 +358,7 @@ mod tests {
                 for rot in -6..6 {
                     for rotation in [1, -1] {
                         let base = Pos::new(2, -1);
-                        let arm = Arm::new(base, rot, len, arm_type, Tape { first: 0, instructions: Vec::new() });
+                        let arm = Arm::new(base, rot, len, arm_type, Tape::new(0, Vec::new()));
                         let grabbers: Vec<Rot> = (0..6).step_by(Arm::angles_between_arm(arm_type) as usize).collect();
                         //Arm hexes before and after the rotation are marked at the start and end of the step
                         let mut endpoints = FxHashSet::default();

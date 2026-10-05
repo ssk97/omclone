@@ -53,8 +53,7 @@ impl egui::widgets::text_edit::TextBuffer for TapeBuffer<'_>{
 
     fn clear(&mut self) {
         self.record_edit(0);
-        self.tape_ref.instructions.clear();
-        self.tape_ref.first = 0;
+        self.tape_ref.clear();
         self.held_str = self.tape_ref.to_string();
     }
     fn take(&mut self) -> String {
@@ -135,7 +134,8 @@ impl Loaded{
         self.base_world.get_first_timestep() as usize + old.min(length)
     }
     fn reset_to(&mut self, reset_to:u64){
-        if self.backup_step < reset_to{
+        //The backup hasn't run its own timestep yet, so it's still valid for a change at backup_step
+        if self.backup_step <= reset_to{
             self.reset_to_backup();
         } else {
             self.reset_world();
@@ -316,7 +316,8 @@ impl MyMiniquadApp {
         
             tape_mode: false,
             run_state: RunState::Manual(0),
-            show_area: false,
+            //Also enables collision checks, so edits that collide are caught
+            show_area: true,
             run_speed: 0.05,
             popup_reload: false,
         };
@@ -391,7 +392,8 @@ impl EventHandler for MyMiniquadApp {
         self.egui_mq.run(ctx, |_mq_ctx, egui_ctx|{
             if let Some(msg) = &self.extra_message{
                 let mut opened = true;
-                egui::Window::new("Message").open(&mut opened).show(egui_ctx, |ui| {
+                egui::Window::new("Message").id(egui::Id::new("app_message"))
+                    .open(&mut opened).show(egui_ctx, |ui| {
                     ui.label(msg);
                 });
                 if !opened {self.extra_message = None;}
@@ -471,7 +473,8 @@ impl EventHandler for MyMiniquadApp {
                     });
                     if let Some(msg) = &loaded.message{
                         let mut opened = true;
-                        egui::Window::new("Message").open(&mut opened).show(egui_ctx, |ui| {
+                        egui::Window::new("Message").id(egui::Id::new("world_message"))
+                            .open(&mut opened).show(egui_ctx, |ui| {
                             ui.label(msg);
                         });
                         if !opened {loaded.message = None;}

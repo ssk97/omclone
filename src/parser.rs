@@ -365,13 +365,21 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
             instructions, tracks, arm_index, conduit
         });
     }
-    //If no looping arm's tape reaches the loop length, a Noop on one of them keeps the loop length
+    //Empty instructions aren't saved, so when loaded, the loop length is the longest span from a looping
+    //arm's first to last saved instruction. If that's short of the loop length, a Noop extends one of them.
     let loop_len = world.repeat_length;
-    let is_looping = |arm: &&Arm| !arm.instruction_tape.instructions.contains(&Instr::Halt);
-    let longest = world.arms.iter().filter(is_looping)
-        .map(|arm| arm.instruction_tape.instructions.len()).max().unwrap_or(0);
-    let noop_arm = if longest < loop_len {
-        world.arms.iter().position(|arm| is_looping(&arm))
+    let saved_spans: Vec<(usize, usize, usize)> = world.arms.iter().enumerate()
+        .filter(|(_, arm)| !arm.instruction_tape.halts())
+        .filter_map(|(id, arm)| {
+            let tape = &arm.instruction_tape;
+            let start = tape.instructions.iter().position(|&i| i != Instr::Empty)?;
+            let end = tape.instructions.iter().rposition(|&i| i != Instr::Empty)?;
+            Some((id, tape.first + start, end - start + 1))
+        }).collect();
+    let longest = saved_spans.iter().map(|&(_, _, len)| len).max().unwrap_or(0);
+    let noop = if longest < loop_len {
+        //Past the end of that arm's span, so it never overwrites an instruction
+        saved_spans.first().map(|&(id, start, _)| (id, start + loop_len - 1))
     } else {
         None
     };
@@ -391,8 +399,10 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
             }
             step += 1;
         }
-        if noop_arm == Some(id) {
-            instructions.push(((loop_len+tape.first) as i32 - 1, Instr::Noop));
+        if let Some((noop_id, noop_step)) = noop {
+            if noop_id == id {
+                instructions.push((noop_step as i32, Instr::Noop));
+            }
         }
         let tracks = None;
         let arm_index = id as _;
@@ -532,10 +542,7 @@ fn process_instructions(input: &[(i32, Instr)], offset: i64) -> Result<Tape> {
     if first == usize::MAX{
         first = 0;
     }
-    Ok(Tape {
-        first,
-        instructions,
-    })
+    Ok(Tape::new(first, instructions))
 }
 pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWorld> {
     //Convert from generic parts to glyphs, arms, etc.
