@@ -68,6 +68,15 @@ fn apply_movement(pos: Pos, movement: Movement) -> Pos {
     }
 }
 
+//Hexes whose center is closer than `distance` to the point
+fn hexes_near(center: Xy, distance: f32) -> impl Iterator<Item = Pos> {
+    let p = from_xy(center);
+    let neighbors = [(0, 0), (1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1)];
+    neighbors.into_iter()
+        .map(move |(du, dv)| p + Pos::new(du, dv))
+        .filter(move |&hex| xy_dist(center, to_xy(hex)) < distance)
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ColliderKind {
     Atom,
@@ -106,13 +115,7 @@ impl<'a> ColliderList<'a> {
     }
     fn add(&mut self, collider: Collider) -> SimResult<()> {
         //Mark area and check against the board (atoms that aren't moving)
-        let p = from_xy(collider.center);
-        let neighbors = [(0, 0), (1, 0), (0, 1), (-1, 1), (-1, 0), (0, -1), (1, -1)];
-        for (du, dv) in neighbors {
-            let hex = p + Pos::new(du, dv);
-            if !(xy_dist(collider.center, to_xy(hex)) < collider.radius + ATOM_RADIUS) {
-                continue;
-            }
+        for hex in hexes_near(collider.center, collider.radius + ATOM_RADIUS) {
             self.area.insert(hex);
             if let Some(&key) = self.board.locs.get(&hex) {
                 let moving = matches!(self.motion.atoms.get(key), Some(m) if *m != Movement::HeldStill);
@@ -172,6 +175,9 @@ impl World {
     pub fn collide_substep(&mut self, motion: &WorldStepInfo, substep: usize, substep_count: usize) -> SimResult<()> {
         let progress = substep as f32 / substep_count as f32;
         let remaining = 1. - progress;
+        for (arm, &arm_motion) in self.arms.iter().zip(&motion.arms) {
+            mark_arm_sweep(&mut self.area_touched, arm, arm_motion, remaining);
+        }
         let mut list = ColliderList {
             colliders: Vec::new(),
             cursor: 0,
@@ -279,25 +285,105 @@ impl World {
     }
 }
 
-//Hexes swept by a long arm's grabber when rotating from `position` (omsim's record_swing_area)
-pub(super) fn swing_area(base: Pos, position: Pos, rotation: Rot, output: &mut Vec<Pos>) {
-    let mut offset = position - base;
-    if rotation == -1 {
-        offset = Pos::new(offset.x + offset.y, -offset.x);
+//Marks the area of a moving arm partway through its motion, treating the grabber and each hex-length
+//point along the arm like an atom. For the arm lengths that exist (1 to 3), sweeping this over a rotation
+//gives exactly the hexes of omsim's record_swing_area, while showing the area as the arm moves.
+fn mark_arm_sweep(area: &mut FxHashSet<Pos>, arm: &Arm, arm_motion: ArmMovement, remaining: f32) {
+    let mut base = to_xy(arm.pos);
+    let mut final_rotation = arm.arm_rotation;
+    let mut swing = 0.;
+    let mut len = arm.len as f32;
+    match arm_motion {
+        ArmMovement::Move(Movement::Rotation(r, _)) => {
+            final_rotation = (final_rotation + r) % 6;
+            swing = to_radians(r);
+        }
+        ArmMovement::Move(Movement::Linear(translation)) => {
+            let final_base = to_xy(arm.pos + translation);
+            let tr = to_xy(translation);
+            base = Xy { x: final_base.x - tr.x * remaining, y: final_base.y - tr.y * remaining };
+        }
+        ArmMovement::LengthAdjust(a) => len += a as f32 * (1. - remaining),
+        ArmMovement::Move(Movement::HeldStill) | ArmMovement::Pivot(_) => return,
     }
-    let arm_length = offset.x.abs() | offset.y.abs();
-    let o = Pos::new(offset.x.signum(), offset.y.signum());
-    let mut mark = |du: i32, dv: i32, ou: i32, ov: i32| {
-        output.push(base + Pos::new(du * o.x - dv * o.y, ou * o.x + ov * o.y));
-    };
-    if arm_length >= 3 {
-        mark(3, 1, 1, 4);
-        mark(2, 2, 2, 4);
-        mark(1, 3, 3, 4);
+    let rotation = to_radians(final_rotation) - swing * remaining;
+    let (c, s) = (cos(rotation), sin(rotation));
+    let mut distances: SmallVec<[f32; 4]> = (1..=len.floor() as i32).map(|d| d as f32).collect();
+    if len.fract() != 0. {
+        distances.push(len);
     }
-    if arm_length >= 2 {
-        mark(2, 1, 1, 3);
-        mark(1, 1, 1, 2);
-        mark(1, 2, 2, 3);
+    for g in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
+        let dir = to_xy(rot_to_pos(g as Rot));
+        for &d in &distances {
+            let point = Xy {
+                x: base.x + (dir.x * c - dir.y * s) * d,
+                y: base.y + (dir.x * s + dir.y * c) * d,
+            };
+            area.extend(hexes_near(point, ATOM_RADIUS + ATOM_RADIUS));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    //omsim's record_swing_area: the hexes a long arm's grabber sweeps when rotating from `position`
+    fn omsim_swing_area(base: Pos, position: Pos, rotation: Rot, output: &mut FxHashSet<Pos>) {
+        let mut offset = position - base;
+        if rotation == -1 {
+            offset = Pos::new(offset.x + offset.y, -offset.x);
+        }
+        let arm_length = offset.x.abs() | offset.y.abs();
+        let o = Pos::new(offset.x.signum(), offset.y.signum());
+        let mut mark = |du: i32, dv: i32, ou: i32, ov: i32| {
+            output.insert(base + Pos::new(du * o.x - dv * o.y, ou * o.x + ov * o.y));
+        };
+        if arm_length >= 3 {
+            mark(3, 1, 1, 4);
+            mark(2, 2, 2, 4);
+            mark(1, 3, 3, 4);
+        }
+        if arm_length >= 2 {
+            mark(2, 1, 1, 3);
+            mark(1, 1, 1, 2);
+            mark(1, 2, 2, 3);
+        }
+    }
+
+    #[test]
+    fn arm_sweep_matches_omsim_swing_area() {
+        for arm_type in [ArmType::PlainArm, ArmType::TripleArm] {
+            for len in 1..=3 {
+                for rot in -6..6 {
+                    for rotation in [1, -1] {
+                        let base = Pos::new(2, -1);
+                        let arm = Arm::new(base, rot, len, arm_type, Tape { first: 0, instructions: Vec::new() });
+                        let grabbers: Vec<Rot> = (0..6).step_by(Arm::angles_between_arm(arm_type) as usize).collect();
+                        //Arm hexes before and after the rotation are marked at the start and end of the step
+                        let mut endpoints = FxHashSet::default();
+                        for r in [rot, rot + rotation] {
+                            for &g in &grabbers {
+                                for l in 0..=len {
+                                    endpoints.insert(base + rot_to_pos(r + g) * l);
+                                }
+                            }
+                        }
+                        let mut expected = endpoints.clone();
+                        for &g in &grabbers {
+                            omsim_swing_area(base, base + rot_to_pos(rot + g) * len, rotation, &mut expected);
+                        }
+                        for substep_count in [8, 16, 32, 64, 256] {
+                            let mut swept = endpoints.clone();
+                            for substep in 1..substep_count {
+                                let remaining = 1. - substep as f32 / substep_count as f32;
+                                mark_arm_sweep(&mut swept, &arm, ArmMovement::Move(Movement::Rotation(rotation, base)), remaining);
+                            }
+                            assert_eq!(swept, expected, "{arm_type:?} len {len} rot {rot} rotation {rotation} substeps {substep_count}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

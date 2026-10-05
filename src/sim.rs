@@ -850,7 +850,6 @@ pub struct WorldStepInfo{
     pub atoms: SecondaryMap<AtomKey, Movement>,
     pub grabs: Vec<GrabMovement>,
     pub grab_atoms: Vec<SmallVec<[AtomKey; 8]>>, //atoms moved by each grab (parallel to grabs)
-    pub swing_area: Vec<Pos>, //hexes swept by rotating long arms
     pub arms: Vec<ArmMovement>,
     pub spawning_atoms: VecDeque<SpawnMolecule>, //One entry per molecule
     pub recent_bonds: FxHashSet<AtomKey>,
@@ -863,7 +862,6 @@ impl WorldStepInfo{
             atoms: SecondaryMap::new(),
             grabs: Vec::new(),
             grab_atoms: Vec::new(),
-            swing_area: Vec::new(),
             arms: Vec::new(),
             spawning_atoms:VecDeque::new(),
             recent_bonds:FxHashSet::default(),
@@ -875,7 +873,6 @@ impl WorldStepInfo{
         self.atoms.clear();
         self.grabs.clear();
         self.grab_atoms.clear();
-        self.swing_area.clear();
         self.arms.clear();
         self.spawning_atoms.clear();
         self.recent_bonds.clear();
@@ -1183,12 +1180,6 @@ impl World {
             Empty => STILL,
         }};
         let rotation_store = arm.rot;
-        if let Move(Rotation(r, _)) = action {
-            for g in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
-                let grabber_pos = arm.pos + rot_to_pos(arm.rot + g) * arm.len;
-                collision::swing_area(arm.pos, grabber_pos, r, &mut motion.swing_area);
-            }
-        }
         for (grabber, &atom) in arm.atoms_grabbed.iter().enumerate() {
             if !atom.is_null() {
                 let atom_movement = match action{
@@ -1679,7 +1670,6 @@ impl World {
         }
         if mark_area {
             self.mark_arm_area();
-            self.area_touched.extend(motion.swing_area.iter().copied());
         }
         self.process_inputs(motion)?;
         self.process_glyphs(motion, true)?;
