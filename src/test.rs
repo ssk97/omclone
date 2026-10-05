@@ -111,6 +111,7 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
 }
 
 #[test]
+#[ignore = "Long running test, only run on explicit request"]
 fn check_all(){
     let mut puzzle_map = PuzzleMap::new();
     read_puzzle_recurse(&mut puzzle_map, fs::read_dir(PUZZLE_DIR).unwrap());

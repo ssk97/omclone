@@ -17,3 +17,7 @@ Enable "benchmark" to get a program which will just run the default solution for
 To use "hab_checker", uncomment its lib in Cargo.toml, enable "bindgen" and compile with "wasm-pack build --target web".
 
 You used to be able to enable "cx_checker" and compile with "wasm-pack build --target no-modules" to get the .wasm and .js in pkg folder. However, this functionality is currently broken.
+
+----
+
+Thanks to @Dark_Brick for the new art.
