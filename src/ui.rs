@@ -173,7 +173,7 @@ impl Loaded{
     }
     fn advance(&mut self, substep_time: &mut f64) -> SimResult<()>{
         if self.curr_substep == 0{
-            let failcheck = self.curr_world.prepare_step(&mut self.saved_motions);
+            let failcheck = self.curr_world.prepare_step(&mut self.saved_motions, self.show_area);
             if failcheck.is_err(){
                 self.saved_motions.clear();
                 return failcheck;
@@ -182,14 +182,12 @@ impl Loaded{
             *substep_time = 1.0/(self.substep_count as f64);
         }
         self.curr_substep += 1;
-        let portion = self.curr_substep as f32 / self.substep_count as f32;
-        if self.show_area{
-            self.float_world.regenerate(&self.curr_world, &self.saved_motions, portion);
-            self.curr_world.mark_area_and_collide(&self.float_world, self.saved_motions.spawning_atoms.iter().flatten())?;
+        if self.show_area && self.curr_substep < self.substep_count{
+            self.curr_world.collide_substep(&self.saved_motions, self.curr_substep, self.substep_count)?;
         }
         if self.curr_substep == self.substep_count{
             self.curr_substep = 0;
-            self.curr_world.finalize_step(&mut self.saved_motions)?;
+            self.curr_world.finalize_step(&mut self.saved_motions, self.show_area)?;
         }
         Ok(())
     }

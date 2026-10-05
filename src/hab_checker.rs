@@ -112,10 +112,9 @@ pub fn run_test(first: usize, variants: &[usize], test_area: bool) -> OutputStat
     let init = parser::puzzle_prep(&puzzle, &sol).unwrap();
     let mut world = sim::World::setup_sim(&init).unwrap();
 
-    let mut float_world = sim::FloatWorld::new();
     let mut motions = sim::WorldStepInfo::new();
     while !world.is_complete() {
-        if let Err(error_out) = world.run_step(test_area, &mut motions, &mut float_world){
+        if let Err(error_out) = world.run_step(test_area, &mut motions){
             add_text(&format!("{}: Step {} error: {}\n", fail_str, world.timestep, error_out));
             return fail_stats;
         }

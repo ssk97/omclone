@@ -74,7 +74,6 @@ pub fn evaluate_solution(solution: &[u8]){
 
     let mut any_failures = false;
     let mut worst_stats:Option<sim::SolutionStats> = None;
-    let mut float_world = sim::FloatWorld::new();
     let mut motions = sim::WorldStepInfo::new();
     'variants: for variant in 0..64{
         let variant_data = make_variant(variant, &puzzle.inputs[0][0]);
@@ -84,7 +83,7 @@ pub fn evaluate_solution(solution: &[u8]){
         let mut world = sim::World::setup_sim(&init).unwrap();
         let fail_str = format!("ID {}, input {}, output {}",variant,variant_data.input_name,variant_data.output_name);
         while !world.is_complete() {
-            if let Err(error_out) = world.run_step(true, &mut motions, &mut float_world){
+            if let Err(error_out) = world.run_step(true, &mut motions){
                 any_failures = true;
                 add_square(false);
                 add_text(&format!("{}: Step {} error: {}", fail_str, world.timestep, error_out));
@@ -131,7 +130,6 @@ pub fn random_test(solution: &[u8], variants: &[usize]) -> bool{
     let mut reader = solution;
     let sol = parser::parse_solution(&mut reader).unwrap();
 
-    let mut float_world = sim::FloatWorld::new();
     let mut motions = sim::WorldStepInfo::new();
 
     let mut new_inputs = sim::AtomPattern::new();
@@ -148,7 +146,7 @@ pub fn random_test(solution: &[u8], variants: &[usize]) -> bool{
     let fail_str = format!("{:?}",variants);
 
     while !world.is_complete() {
-        if let Err(error_out) = world.run_step(true, &mut motions, &mut float_world){
+        if let Err(error_out) = world.run_step(true, &mut motions){
             add_text(&format!("{}: Step {} error: {}", fail_str, world.timestep, error_out));
             return false;
         }

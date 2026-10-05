@@ -18,6 +18,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{f32::consts::PI,fmt,error};
 use enum_primitive_derive::Primitive;
 
+mod collision;
+
 #[derive(Debug)]
 pub struct SimError{
     pub error_str: &'static str,
@@ -398,6 +400,8 @@ pub struct Arm {
     pub grabbing: bool,
     pub halted: bool,
     pub atoms_grabbed: [AtomKey; 6],
+    //Rotation as tracked by omsim (truncated % 6 after each rotation), used for collision positions
+    pub arm_rotation: Rot,
 }
 
 impl Arm {
@@ -405,6 +409,8 @@ impl Arm {
         Arm { pos, rot, len, arm_type, instruction_tape,
             grabbing: false, halted: false,
             atoms_grabbed: [AtomKey::null(); 6],
+            //omsim reduces the solution file's rotation with a truncating % 6 when loading
+            arm_rotation: rot % 6,
         }
     }
     pub fn angles_between_arm(arm_type: ArmType) -> Rot {
@@ -421,7 +427,10 @@ impl Arm {
         use Movement::*;
         match action{
             Move(Linear(p)) => self.pos += p,
-            Move(Rotation(r,_)) => self.rot += r,
+            Move(Rotation(r,_)) => {
+                self.rot += r;
+                self.arm_rotation = (self.arm_rotation + r) % 6;
+            }
             LengthAdjust(a) => self.len += a,
             Move(HeldStill) | Pivot(_) => {},
         }
@@ -829,8 +838,19 @@ impl WorldAtoms {
     }
 }
 
+//A grabbed atom and the movement its arm gives it this timestep
+#[derive(Debug, Clone, Copy)]
+pub struct GrabMovement {
+    pub arm: usize,
+    pub grabber: usize, //grabber direction index relative to the arm
+    pub atom: AtomKey,
+    pub movement: Movement,
+}
 pub struct WorldStepInfo{
     pub atoms: SecondaryMap<AtomKey, Movement>,
+    pub grabs: Vec<GrabMovement>,
+    pub grab_atoms: Vec<SmallVec<[AtomKey; 8]>>, //atoms moved by each grab (parallel to grabs)
+    pub swing_area: Vec<Pos>, //hexes swept by rotating long arms
     pub arms: Vec<ArmMovement>,
     pub spawning_atoms: VecDeque<SpawnMolecule>, //One entry per molecule
     pub recent_bonds: FxHashSet<AtomKey>,
@@ -841,6 +861,9 @@ impl WorldStepInfo{
     pub fn new() -> Self{
         WorldStepInfo{
             atoms: SecondaryMap::new(),
+            grabs: Vec::new(),
+            grab_atoms: Vec::new(),
+            swing_area: Vec::new(),
             arms: Vec::new(),
             spawning_atoms:VecDeque::new(),
             recent_bonds:FxHashSet::default(),
@@ -850,6 +873,9 @@ impl WorldStepInfo{
     }
     pub fn clear(&mut self) {
         self.atoms.clear();
+        self.grabs.clear();
+        self.grab_atoms.clear();
+        self.swing_area.clear();
         self.arms.clear();
         self.spawning_atoms.clear();
         self.recent_bonds.clear();
@@ -867,7 +893,6 @@ pub struct SolutionStats {
 }
 
 pub type XYPos = Point2<f32>;
-pub type XYVec = Vector2<f32>;
 #[derive(Debug, Copy, Clone)]
 pub struct FloatAtom{
     pub pos: XYPos,
@@ -904,11 +929,6 @@ fn pos_to_xy(input: Pos) -> XYPos{
 }
 fn rot_to_angle(r: Rot) -> f32{
     (-r as f32)*PI/3.
-}
-fn xy_to_simple_pos(input: XYPos) -> Pos{
-    let b = input.y/f32::sqrt(3.);
-    let a = (input.x-b)/2.;
-    Pos::new(a.round() as i32, b.round() as i32)
 }
 //https://stackoverflow.com/questions/7705228/hexagonal-grids-how-do-you-find-which-hexagon-a-point-is-in/23370350#23370350
 fn xy_to_pos(input: XYPos) -> Pos{
@@ -1032,6 +1052,7 @@ impl World {
     //sets up a move for the specified atom and all atoms in its molecule
     fn premove_atoms(&self, motion: &mut WorldStepInfo, atom_key: AtomKey, movement: Movement) -> SimResult<()> {
         let molecule_key = self.atoms.atom_map[atom_key].molecule;
+        let mut moved = SmallVec::new();
         for &this_key in &self.atoms.molecules[molecule_key].atoms {
             let maybe_move = motion.atoms.get(this_key);
             if let Some(curr_move) = maybe_move {
@@ -1042,13 +1063,15 @@ impl World {
                 }
             } else {
                 motion.atoms.insert(this_key, movement);
+                moved.push(this_key);
             }
         }
+        motion.grab_atoms.push(moved);
         Ok(())
     }
 
     //Finalize atom movement
-    fn apply_motion(&mut self, motion: &WorldStepInfo) -> SimResult<()> {
+    fn apply_motion(&mut self, motion: &WorldStepInfo, mark_area: bool) -> SimResult<()> {
         for i in 0..self.arms.len() {
             self.arms[i].do_motion(motion.arms[i]);
         }
@@ -1070,6 +1093,9 @@ impl World {
                     atom.rotate_connections(*r);
                 }
                 Movement::HeldStill => (),
+            }
+            if mark_area {
+                self.area_touched.insert(atom.pos);
             }
             let current = self.atoms.locs.insert(atom.pos, atom_key);
             if current != None {
@@ -1157,13 +1183,20 @@ impl World {
             Empty => STILL,
         }};
         let rotation_store = arm.rot;
-        for atom in arm.atoms_grabbed {
+        if let Move(Rotation(r, _)) = action {
+            for g in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
+                let grabber_pos = arm.pos + rot_to_pos(arm.rot + g) * arm.len;
+                collision::swing_area(arm.pos, grabber_pos, r, &mut motion.swing_area);
+            }
+        }
+        for (grabber, &atom) in arm.atoms_grabbed.iter().enumerate() {
             if !atom.is_null() {
                 let atom_movement = match action{
                     ArmMovement::Pivot(r) => Movement::Rotation(r, self.atoms.atom_map[atom].pos),
                     ArmMovement::Move(m) => m,
                     ArmMovement::LengthAdjust(a) => Linear(rot_to_pos(rotation_store)*a)
                 };
+                motion.grabs.push(GrabMovement { arm: arm_id, grabber, atom, movement: atom_movement });
                 let tmp = motion.atoms.insert(atom, atom_movement);
                 match tmp{
                     Some(x) if x != atom_movement => {
@@ -1253,14 +1286,18 @@ impl World {
                 Disposal => {
                     add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_ani, pos_disp3,pos_disp4,pos_unif2])
                 },
-                Conduit(_atom_teleport,_) => {
-                    Ok(())//TODO
+                Conduit(conduit_hexes,_) => {
+                    add_all(&mut self.area_touched,conduit_hexes.iter().copied())
                 },
                 Equilibrium => {
                     add_all(&mut self.area_touched,[pos])
                 }
             }?;
         }
+        for arm in &self.arms {
+            self.area_touched.insert(arm.pos);
+        }
+        self.mark_arm_area();
         Ok(())
     }
     fn process_inputs(&mut self, motion: &mut WorldStepInfo) -> SimResult<()>{
@@ -1623,103 +1660,26 @@ impl World {
         }
     }
 
-    pub fn mark_area_and_collide<'a>(&mut self, float_world: &FloatWorld, spawning_atoms: impl Iterator<Item = &'a Atom>) -> SimResult<()>{
-        //atom radius = 29/41 or 1/sqrt(2)
-        //spawning atom = 15/41
-        //arm base = 20/41
-        //grabber, cabinet = 24/41, 20/41
-        const ATOM_RADIUS: f32 = 29./41.;
-        const ARM_RADIUS: f32 = 20./41.;
-        const SPAWNING_ATOM_RADIUS: f32 = 15./41.;
-        const ATOM_ATOM_RADIUS_SQUARED: f32 = (ATOM_RADIUS*2.)*(ATOM_RADIUS*2.);
-        const ATOM_ARM_RADIUS_SQUARED: f32 = (ATOM_RADIUS+ARM_RADIUS)*(ATOM_RADIUS+ARM_RADIUS);
-        const ATOM_SPAWN_RADIUS_SQUARED: f32 = (ATOM_RADIUS+SPAWNING_ATOM_RADIUS)*(ATOM_RADIUS+SPAWNING_ATOM_RADIUS);
-        fn make_candidates(primary: Pos) -> [Pos;7]{
-            [
-                Pos::new(primary.x, primary.y),
-                Pos::new(primary.x+1, primary.y),
-                Pos::new(primary.x-1, primary.y),
-                Pos::new(primary.x, primary.y+1),
-                Pos::new(primary.x, primary.y-1),
-                Pos::new(primary.x-1, primary.y+1),
-                Pos::new(primary.x+1, primary.y-1),
-            ]
-        }
-        fn mark_point(area_set: &mut FxHashSet<Pos>, point: XYPos){
-            let primary = xy_to_simple_pos(point);
-            let candidates = make_candidates(primary);
-            for hex in candidates{
-                let distance = nalgebra::distance_squared(&pos_to_xy(hex),&point);
-                if distance < ATOM_ATOM_RADIUS_SQUARED{
-                    area_set.insert(hex);
-                }
-            }
-        }
-        fn collide(atom_collisions: &mut FxHashMap<Pos, SmallVec<[XYPos;2]>>, point: XYPos, check_dist:f32, error_str: &'static str) -> SimResult<()>{
-            let primary = xy_to_simple_pos(point);
-            let candidates = make_candidates(primary);
-            for check in candidates{
-                let possible_vec = atom_collisions.get(&check);
-                if let Some(atoms) = possible_vec{
-                    for atom_point in atoms{
-                        if nalgebra::distance_squared(atom_point,&point) < check_dist {
-                            let error_point = nalgebra::center(atom_point, &point);
-                            return Err(SimError{error_str, location:error_point});
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        let mut atom_collisions = FxHashMap::with_capacity_and_hasher(float_world.atoms_xy.len(),Default::default());
-        for atom in &float_world.atoms_xy{
-            let primary = xy_to_simple_pos(atom.pos);
-            mark_point(&mut self.area_touched, atom.pos);
-            collide(&mut atom_collisions, atom.pos, ATOM_ATOM_RADIUS_SQUARED, "atom/atom collision!")?;
-            atom_collisions.entry(primary).or_insert_with(SmallVec::new).push(atom.pos);
-        }
-        for arm in &float_world.arms_xy{
-            mark_point(&mut self.area_touched, arm.pos);
-            collide(&mut atom_collisions, arm.pos, ATOM_ARM_RADIUS_SQUARED,"atom/arm collision!")?;
-            for r in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
-                let angle = arm.rot+rot_to_angle(r);
-                let offset = nalgebra::Rotation2::new(-angle)*XYVec::new(arm.len, 0.);
-                mark_point(&mut self.area_touched, arm.pos+offset);
-                //arm lengths are doubled in floatworld
-                if arm.len > 3.0{
-                    let offset = nalgebra::Rotation2::new(-angle)*XYVec::new(2., 0.);
-                    mark_point(&mut self.area_touched, arm.pos+offset);
-                }
-                if arm.len > 5.0{
-                    let offset = nalgebra::Rotation2::new(-angle)*XYVec::new(4., 0.);
-                    mark_point(&mut self.area_touched, arm.pos+offset);
-                }
-            }
-        }
-        for spawning_atom in spawning_atoms{
-            collide(&mut atom_collisions, pos_to_xy(spawning_atom.pos), ATOM_SPAWN_RADIUS_SQUARED, "atom/spawning atom collision!")?;
-        }
-        Ok(())
-    }
-
-    pub fn run_step(&mut self, mark_area: bool, motion: &mut WorldStepInfo, float_world: &mut FloatWorld) -> SimResult<()> {
-        self.prepare_step(motion)?;
+    //mark_area enables area tracking and collision checks
+    pub fn run_step(&mut self, mark_area: bool, motion: &mut WorldStepInfo) -> SimResult<()> {
+        self.prepare_step(motion, mark_area)?;
         if mark_area{
             let substep_count = self.substep_count(motion);
-            for substep in 0..substep_count{
-                let portion = substep as f32 / substep_count as f32;
-                float_world.regenerate(self, motion, portion);
-                self.mark_area_and_collide(float_world, motion.spawning_atoms.iter().flatten())?;
+            for substep in 1..substep_count{
+                self.collide_substep(motion, substep, substep_count)?;
             }
         }
-        self.finalize_step(motion)?;
+        self.finalize_step(motion, mark_area)?;
         Ok(())
     }
-    //returns the step size to be used for this timestep
-    pub fn prepare_step(&mut self, motion: &mut WorldStepInfo) -> SimResult<()> {
+    pub fn prepare_step(&mut self, motion: &mut WorldStepInfo, mark_area: bool) -> SimResult<()> {
         motion.clear();
         for i in 0..self.arms.len() {
             self.do_instruction(motion, i, self.timestep)?;
+        }
+        if mark_area {
+            self.mark_arm_area();
+            self.area_touched.extend(motion.swing_area.iter().copied());
         }
         self.process_inputs(motion)?;
         self.process_glyphs(motion, true)?;
@@ -1734,31 +1694,19 @@ impl World {
                 }
             }
         }
-        let tmp = motion.atoms.clone();
         motion.atoms.clear();
-        for (atom, movement) in tmp{
-            self.premove_atoms(motion, atom, movement)?;
+        for i in 0..motion.grabs.len() {
+            let grab = motion.grabs[i];
+            self.premove_atoms(motion, grab.atom, grab.movement)?;
         }
         motion.recent_bonds.clear();
         Ok(())
     }
-    pub fn substep_count(&self, motion: &WorldStepInfo) -> usize{
-        let mut max_radius:f64 = 1.;
-        for (atom_key, movement) in &motion.atoms{
-            if let Movement::Rotation(_rot, center) = movement{
-                let atom_pos = self.atoms.atom_map[atom_key].pos;
-                let distance = nalgebra::distance(&pos_to_xy(atom_pos),&pos_to_xy(*center)) as f64;
-                if max_radius < distance {
-                    max_radius = distance;
-                }
-            }
+    pub fn finalize_step(&mut self, motion: &mut WorldStepInfo, mark_area: bool) -> SimResult<()> {
+        self.apply_motion(motion, mark_area)?;
+        if mark_area {
+            self.mark_arm_area();
         }
-        max_radius *= 2.;
-        usize::pow(2,max_radius.log2().round() as u32).max(8)
-        //usize::max(10, (max_radius*2.0) as usize)
-    }
-    pub fn finalize_step(&mut self, motion: &mut WorldStepInfo) -> SimResult<()> {
-        self.apply_motion(motion)?;
         self.process_inputs(motion)?;
         self.process_glyphs(motion, false)?;
         motion.clear();

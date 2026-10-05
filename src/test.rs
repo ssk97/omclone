@@ -71,10 +71,9 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         Some(s) if !expect_collision => first_timestep + (s.cycles.max(0) as u64) + 100,
         _ => first_timestep + 200_000,
     };
-    let mut float_world = FloatWorld::new();
     let mut motions = WorldStepInfo::new();
     while !world.is_complete() && world.timestep < max_timestep {
-        let step = world.run_step(check_area || expect_collision, &mut motions, &mut float_world);
+        let step = world.run_step(check_area || expect_collision, &mut motions);
         if let Err(e) = step{
             if expect_collision {
                 results.expected_collisions += 1;
@@ -179,9 +178,8 @@ mod molecule_tests {
     fn run(glyphs: Vec<Glyph>, arms: Vec<Arm>, steps: usize) -> World {
         let mut world = World::setup_sim(&InitialWorld { glyphs, arms }).unwrap();
         let mut motions = WorldStepInfo::new();
-        let mut float_world = FloatWorld::new();
         for _ in 0..steps {
-            world.run_step(false, &mut motions, &mut float_world).unwrap();
+            world.run_step(false, &mut motions).unwrap();
         }
         world
     }
@@ -372,8 +370,7 @@ mod polymer_tests {
             Glyph { pos: Pos::new(0, 0), rot, glyph_type: GlyphType::Input(smallvec![chain], 0) },
             Glyph { pos: Pos::new(0, 0), rot, glyph_type: GlyphType::OutputRepeating(smallvec![monomer], 6, 0) }]);
         let mut motions = WorldStepInfo::new();
-        let mut float_world = FloatWorld::new();
-        world.run_step(false, &mut motions, &mut float_world).unwrap();
+        world.run_step(false, &mut motions).unwrap();
         world
     }
     fn remaining(world: &World) -> i32 {
@@ -394,3 +391,4 @@ mod polymer_tests {
         }
     }
 }
+

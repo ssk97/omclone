@@ -30,9 +30,8 @@ fn main() -> Result<()> {
     }
     let stats = world.get_stats();
     println!("Complete! {:?}", stats);*/
-    let mut float_world = sim::FloatWorld::new();
     let mut motions = sim::WorldStepInfo::new();
 	loop {
-        world.run_step(true, &mut motions, &mut float_world)?;
+        world.run_step(true, &mut motions)?;
     }
 }
