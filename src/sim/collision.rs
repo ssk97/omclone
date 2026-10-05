@@ -23,28 +23,13 @@ fn to_xy(p: Pos) -> Xy {
 fn from_xy(xy: Xy) -> Pos {
     let u = xy.x / HEX_X - 0.5 * xy.y / HEX_Y;
     let v = xy.y / HEX_Y;
-    let w = 0. - u - v;
-    let mut ui = u.round() as i32;
-    let mut vi = v.round() as i32;
-    let wi = w.round() as i32;
-    let uf = (u - ui as f32).abs();
-    let vf = (v - vi as f32).abs();
-    let wf = (w - wi as f32).abs();
-    if uf > vf && uf > wf {
-        ui = -vi - wi;
-    } else if vf > wf {
-        vi = -ui - wi;
-    }
-    Pos::new(ui, vi)
+    round_axial(u, v)
 }
 fn xy_len(xy: Xy) -> f32 {
     (xy.x * xy.x + xy.y * xy.y).sqrt()
 }
 fn xy_dist(a: Xy, b: Xy) -> f32 {
     xy_len(Xy { x: a.x - b.x, y: a.y - b.y })
-}
-fn to_radians(r: Rot) -> f32 {
-    (r * 60) as f32 * (std::f32::consts::PI / 180.)
 }
 //Matches C's (float)cos(double) on a float argument
 fn cos(a: f32) -> f32 {
@@ -216,7 +201,7 @@ impl World {
             }
             let arm = &self.arms[grab.arm];
             let mut base = arm.pos;
-            let mut base_rotation = arm.arm_rotation;
+            let mut base_rotation = arm.rot;
             let mut len = arm.len;
             let mut rotation = 0;
             let mut swing = false;
@@ -240,7 +225,7 @@ impl World {
                 ArmMovement::Move(Movement::HeldStill) => continue,
             }
             let mut v = to_xy(base);
-            let rotation_rad = to_radians(rotation);
+            let rotation_rad = rot_to_angle(rotation);
             let arm_rotation_rad = if swing {rotation_rad} else {0.};
             let r = (0. - rotation_rad) * remaining;
             if let Some(translation) = track {
@@ -248,7 +233,7 @@ impl World {
                 v.x -= tr.x * remaining;
                 v.y -= tr.y * remaining;
             }
-            let base_rotation_rad = to_radians(base_rotation);
+            let base_rotation_rad = rot_to_angle(base_rotation);
             let mut g = to_xy(rot_to_pos(grab.grabber as Rot) * len);
             if arm.arm_type == ArmType::Piston {
                 let g_len = xy_len(g);
@@ -290,13 +275,13 @@ impl World {
 //gives exactly the hexes of omsim's record_swing_area, while showing the area as the arm moves.
 fn mark_arm_sweep(area: &mut FxHashSet<Pos>, arm: &Arm, arm_motion: ArmMovement, remaining: f32) {
     let mut base = to_xy(arm.pos);
-    let mut final_rotation = arm.arm_rotation;
+    let mut final_rotation = arm.rot;
     let mut swing = 0.;
     let mut len = arm.len as f32;
     match arm_motion {
         ArmMovement::Move(Movement::Rotation(r, _)) => {
             final_rotation = (final_rotation + r) % 6;
-            swing = to_radians(r);
+            swing = rot_to_angle(r);
         }
         ArmMovement::Move(Movement::Linear(translation)) => {
             let final_base = to_xy(arm.pos + translation);
@@ -306,7 +291,7 @@ fn mark_arm_sweep(area: &mut FxHashSet<Pos>, arm: &Arm, arm_motion: ArmMovement,
         ArmMovement::LengthAdjust(a) => len += a as f32 * (1. - remaining),
         ArmMovement::Move(Movement::HeldStill) | ArmMovement::Pivot(_) => return,
     }
-    let rotation = to_radians(final_rotation) - swing * remaining;
+    let rotation = rot_to_angle(final_rotation) - swing * remaining;
     let (c, s) = (cos(rotation), sin(rotation));
     let mut distances: SmallVec<[f32; 4]> = (1..=len.floor() as i32).map(|d| d as f32).collect();
     if len.fract() != 0. {

@@ -5,18 +5,8 @@ use crate::render_library::*;
 use crate::render_glyphs::*;
 
 use std::f32::consts::PI;
-pub fn pos_to_xy(input: &Pos) -> GFXPos{
-    let a = input.x as f32;
-    let b = input.y as f32;
-    [a*2.+b,b*f32::sqrt(3.)]
-}
-pub fn rot_to_angle(r: Rot) -> f32{
-    (-r as f32)*PI/3.
-}
 
-//note: 1 hex has inner radius of 1 (width of 2).
-//hex height, 3 tiles tip-to-tip=sqrt(3)*5/6
-const Y_FACTOR:f32 = 1.7320508075688772935274463415;
+//note: 1 hex has inner radius of 1 (width of 2), see sim/coords.rs
 fn setup_arms(ctx: &mut dyn RenderingBackend) -> Bindings{
     const ARM_VERT_BUF: [Vert;14] = [
         //Arm Base
@@ -60,14 +50,13 @@ pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> Track
     let mut index_vec:Vec<u16> = Vec::new();
     let mut curr_index = 0;
     let mut add_from = |track: &TrackMap| {
-        for (from, offset) in track{
-            let gfxpos = pos_to_xy(from);
-            verts_vec.push(gfxpos);
+        for (&from, &offset) in track{
+            let xy = pos_to_xy(from);
+            verts_vec.push(xy.into());
             index_vec.push(curr_index);
             curr_index += 1;
-            let gfxoffset = pos_to_xy(offset);
-            let outer_pos = [gfxpos[0]+gfxoffset[0]*0.5,gfxpos[1]+gfxoffset[1]*0.5];
-            verts_vec.push(outer_pos);
+            let outer_pos = xy + pos_to_xy_vec(offset)*0.5;
+            verts_vec.push(outer_pos.into());
             index_vec.push(curr_index);
             curr_index += 1;
         }
@@ -95,7 +84,7 @@ const BOND_RED_ID:usize = 4;
 const BOND_WHITE_ID:usize = 5;
 const BOND_YELLOW_ID:usize = 6;
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
-    const HL:f32 = Y_FACTOR*5./3.;//height of 1.5 hex (from tip to tip)
+    const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
         [-3.,HL-6.,  0., 1.],
         [-3., HL,    0., 0.],
@@ -160,19 +149,38 @@ struct ShapeStore{
     texture_bindings: Vec<Bindings>,
     glyph_images: GlyphImages,
 }
+//scale_base is in units of (SCALE_REF_PX/2) pixels per world unit, independent of window size
+const SCALE_REF_PX: f32 = 1000.;
 pub struct CameraSetup{
     pub scale_base: f32,
-    pub offset: GFXPos,
+    pub offset: XYVec,
 }
 impl CameraSetup{
+    //Clip-space units per world unit, as passed to the shaders
     pub fn scale(&self, screen_size:(f32,f32)) -> (f32, f32) {
-        (1000./screen_size.0*self.scale_base,1000./screen_size.1*self.scale_base)
+        (SCALE_REF_PX/screen_size.0*self.scale_base,SCALE_REF_PX/screen_size.1*self.scale_base)
+    }
+    pub fn px_per_world(&self) -> f32 {
+        self.scale_base*SCALE_REF_PX/2.
+    }
+    //Moves the view by a mouse movement in screen pixels (y down)
+    pub fn pan_pixels(&mut self, dx: f32, dy: f32) {
+        self.offset += XYVec::new(dx, -dy)/self.px_per_world();
+    }
+    //The world position under a screen pixel (y down, origin top-left)
+    #[allow(dead_code)]//not used for mouse picking yet
+    pub fn screen_to_world(&self, px: (f32, f32), screen_size: (f32, f32)) -> XYPos {
+        let scale = self.scale(screen_size);
+        let ndc_x = px.0/screen_size.0*2. - 1.;
+        let ndc_y = 1. - px.1/screen_size.1*2.;
+        XYPos::new(ndc_x/scale.0, ndc_y/scale.1) - self.offset
     }
     pub fn frame_center(world: &World, screen_size:(f32,f32)) -> Self{
-        let pos_list = world.glyphs.iter().map(|x| pos_to_xy(&x.pos));
+        let pos_list = world.glyphs.iter().map(|x| pos_to_xy(x.pos));
         let (mut lowx, mut lowy, mut highx, mut highy) = pos_list.fold(
             (f32::INFINITY,f32::INFINITY,f32::NEG_INFINITY,f32::NEG_INFINITY),
-            |(lowx, lowy, highx, highy), [thisx, thisy]| {
+            |(lowx, lowy, highx, highy), this| {
+                let (thisx, thisy) = (this.x, this.y);
                 let new_lowx = if thisx < lowx {thisx} else {lowx};
                 let new_highx = if thisx > highx {thisx} else {highx};
                 let new_lowy = if thisy < lowy {thisy} else {lowy};
@@ -185,9 +193,9 @@ impl CameraSetup{
         lowy -= BORDER;
         highx+= BORDER;
         highy+= BORDER;
-        let offset = [-(lowx+highx)/2., -(lowy+highy)/2.];
-        let world_width_scale = screen_size.0/1000.*2./(highx-lowx);
-        let world_height_scale = screen_size.1/1000.*2./(highy-lowy);
+        let offset = XYVec::new(-(lowx+highx)/2., -(lowy+highy)/2.);
+        let world_width_scale = screen_size.0/SCALE_REF_PX*2./(highx-lowx);
+        let world_height_scale = screen_size.1/SCALE_REF_PX*2./(highy-lowy);
         let scale_base = if world_width_scale < world_height_scale {world_width_scale} else {world_height_scale};
         CameraSetup {scale_base, offset}
     }
@@ -316,13 +324,13 @@ fn symbol_color(fill: [f32;3]) -> [f32;3]{
 impl RenderDataBase {
 	fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], camera: &CameraSetup){
         let scale = camera.scale(window::screen_size());
-        let world_offset = camera.offset;
+        let world_offset: GFXPos = camera.offset.into();
         ctx.apply_pipeline(&self.pipeline_textured);
 
         //Draw atom bonds
         let atoms_copy = atoms;
 		for atom in atoms_copy {
-			let offset = [atom.pos.x, atom.pos.y];
+			let offset = atom.pos.into();
 			for r in 0..3 { //4-6 are done by the other atom
 				let matches = [
 					(Bonds::NORMAL, &self.shapes.texture_bindings[BOND_NORMAL_ID]),
@@ -347,7 +355,7 @@ impl RenderDataBase {
 		ctx.apply_bindings(&self.shapes.circle_bindings);
 		for atom in atoms {
 			let color = atom_color(atom.atom_type);
-			let offset = [atom.pos.x, atom.pos.y];
+			let offset = atom.pos.into();
 			let angle = 0.;
 			ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
 				color, offset, world_offset, angle, scale
@@ -358,8 +366,7 @@ impl RenderDataBase {
 		self.font.set_pipeline(ctx);
 		for atom in atoms {
 			let color = symbol_color(atom_color(atom.atom_type));
-			let offset = [atom.pos.x, atom.pos.y];
-			self.font.render_atom_symbol(ctx, atom.atom_type, color, offset, world_offset, scale);
+			self.font.render_atom_symbol(ctx, atom.atom_type, color, atom.pos, world_offset, scale);
 		}
 	}
     //note: assumes ctx is in the middle of a render pass
@@ -367,7 +374,7 @@ impl RenderDataBase {
          show_area: bool, world: &World, float_world: &FloatWorld)
     {
         let scale = camera.scale(window::screen_size());
-        let world_offset = camera.offset;
+        let world_offset: GFXPos = camera.offset.into();
 
 
         //Draw input/output atoms
@@ -391,9 +398,9 @@ impl RenderDataBase {
         if camera.scale_base > 0.01{
             let (inv_scale_x, inv_scale_y)= (1./scale.0,1./scale.1);
             let xc = (-world_offset[0]/2.-0.26).fract();
-            let yc = ((-world_offset[1]/2.)/Y_FACTOR+0.09).fract();
+            let yc = ((-world_offset[1]/2.)/SQRT3+0.09).fract();
             let xdf = inv_scale_x/2.;
-            let ydf = inv_scale_y/(2.*Y_FACTOR);
+            let ydf = inv_scale_y/(2.*SQRT3);
             
             let hex_grid_data: [UvVert;4] = [
                 [-1.,-1.,    xc-xdf, yc-ydf],
@@ -418,7 +425,7 @@ impl RenderDataBase {
                     let atoms = &atoms_meta[0];
                     ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
                     for atom in atoms{ //transparent cover
-                        let offset = pos_to_xy(&atom.pos);
+                        let offset = pos_to_xy(atom.pos).into();
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                             offset, world_offset, angle, scale
                         }));
@@ -429,7 +436,7 @@ impl RenderDataBase {
                 Conduit(pos_vec,_) => {
                     ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
                     for p in pos_vec{
-                        let offset = pos_to_xy(p);
+                        let offset = pos_to_xy(*p).into();
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                             offset, world_offset, angle, scale
                         }));
@@ -447,7 +454,7 @@ impl RenderDataBase {
         self.font.set_pipeline(ctx);
         for glyph in world.glyphs.iter(){
             if let GlyphType::Conduit(_, id) = glyph.glyph_type{
-                let offset = pos_to_xy(&glyph.pos);
+                let offset = pos_to_xy(glyph.pos);
                 let string = id.to_string();
                 self.font.render_text_centered(ctx, &string, [1., 1., 1.], offset, world_offset, scale);
             }
@@ -457,7 +464,7 @@ impl RenderDataBase {
             ctx.apply_pipeline(&self.pipeline_textured);
             ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_AREA_ID]);                
             for p in &world.area_touched{
-                let offset = pos_to_xy(p);
+                let offset = pos_to_xy(*p).into();
                 ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                     offset, world_offset, angle:0., scale
                 }));
@@ -482,22 +489,48 @@ impl RenderDataBase {
         ctx.apply_bindings(&self.shapes.arm_bindings);
         for f_arm in float_world.arms_xy.iter() {
             let color = [0., 0., 0.];
-            let offset = [f_arm.pos.x, f_arm.pos.y];
+            let offset = f_arm.pos.into();
             let triangles_drawn = if f_arm.grabbing {6} else {3};
             for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
                 let angle = f_arm.rot+rot_to_angle(r);
                 ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
                     color, offset, world_offset, angle, scale
                 }));
-                let rounded_len = (f_arm.len.round() as i32)/2;
-                ctx.draw((rounded_len-1)*6, triangles_drawn, 1);
+                //Only whole lengths 1-3 have geometry, so a piston snaps halfway through its motion
+                let shown_len = f_arm.len.round().clamp(1., 3.) as i32;
+                ctx.draw((shown_len-1)*6, triangles_drawn, 1);
             }
         }
         self.font.set_pipeline(ctx);
         for (num, f_arm) in float_world.arms_xy.iter().enumerate() {
-            let offset = [f_arm.pos.x, f_arm.pos.y];
             let string = (num+1).to_string();
-            self.font.render_text_centered(ctx, &string, [1., 1., 1.], offset, world_offset, scale);
+            self.font.render_text_centered(ctx, &string, [1., 1., 1.], f_arm.pos, world_offset, scale);
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn screen_to_world_inverts_shader() {
+        let camera = CameraSetup { scale_base: 0.03, offset: XYVec::new(-4.5, 2.25) };
+        let screen_size = (1280., 720.);
+        let scale = camera.scale(screen_size);
+        for world in [XYPos::new(0., 0.), XYPos::new(3., -7.5), XYPos::new(-12., 4.)] {
+            //Same math as the vertex shaders, then clip space to pixels
+            let ndc = (world + camera.offset).coords.component_mul(&XYVec::new(scale.0, scale.1));
+            let px = ((ndc.x + 1.)/2.*screen_size.0, (1. - ndc.y)/2.*screen_size.1);
+            let back = camera.screen_to_world(px, screen_size);
+            assert!((back - world).norm() < 1e-3, "{world:?} -> {px:?} -> {back:?}");
+        }
+    }
+    #[test]
+    fn pan_follows_cursor() {
+        let mut camera = CameraSetup { scale_base: 0.03, offset: XYVec::zeros() };
+        let screen_size = (1280., 720.);
+        let grabbed = camera.screen_to_world((100., 200.), screen_size);
+        camera.pan_pixels(37., -12.);
+        let moved = camera.screen_to_world((137., 188.), screen_size);
+        assert!((moved - grabbed).norm() < 1e-3, "{grabbed:?} != {moved:?}");
     }
 }

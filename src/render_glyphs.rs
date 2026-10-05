@@ -1,7 +1,6 @@
 use crate::render_library::*;
 use miniquad::*;
 use crate::sim::*;
-use crate::render_sim::*;
 
 //The mspaintart images are drawn at 110 pixels per world unit (1 hex = 220 pixels wide)
 const PX_PER_UNIT: f32 = 110.;
@@ -55,7 +54,7 @@ pub struct GlyphImageData {
 impl GlyphImageData {
     //WARNING: Assumes the textured pipeline has been set already
     pub fn draw(&self, ctx: &mut Context, glyph: &Glyph, world_offset: GFXPos, scale: (f32, f32)) {
-        let offset = pos_to_xy(&glyph.pos);
+        let offset = pos_to_xy(glyph.pos).into();
         let angle = rot_to_angle(glyph.rot+self.rot_offset);
         ctx.apply_bindings(&self.tex);
         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
@@ -64,7 +63,7 @@ impl GlyphImageData {
         ctx.draw(0, 6, 1);
         //Dot positions rotate with the glyph, but the dots themselves stay upright
         for (binding, pos) in self.aux.iter(){
-            let offset = pos_to_xy(&glyph.reposition(*pos));
+            let offset = pos_to_xy(glyph.reposition(*pos)).into();
             ctx.apply_bindings(binding);
             ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                 offset, world_offset, angle: 0., scale

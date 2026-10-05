@@ -482,10 +482,10 @@ impl EventHandler for MyMiniquadApp {
                     egui::Window::new("Camera controls").show(egui_ctx, |ui| {
 						ui.horizontal(|ui|{
 							ui.label("x:");
-							ui.add(egui::DragValue::new(&mut loaded.camera.offset[0])
+							ui.add(egui::DragValue::new(&mut loaded.camera.offset.x)
 								.speed(0.1));
 							ui.label("y:");
-							ui.add(egui::DragValue::new(&mut loaded.camera.offset[1])
+							ui.add(egui::DragValue::new(&mut loaded.camera.offset.y)
 								.speed(0.1));
                             if ui.button("Center").clicked(){
                                 loaded.camera = CameraSetup::frame_center(&loaded.base_world, screen_size);
@@ -751,9 +751,7 @@ impl EventHandler for MyMiniquadApp {
         self.egui_mq.mouse_motion_event( x, y);
         if let Some(drag_last) = &mut self.dragging{
             if let Loaded(loaded) = &mut self.app_state{
-                let cam = &mut loaded.camera;
-                cam.offset[0] += (x-drag_last[0])/cam.scale_base*0.002;
-                cam.offset[1] -= (y-drag_last[1])/cam.scale_base*0.002;
+                loaded.camera.pan_pixels(x-drag_last[0], y-drag_last[1]);
                 *drag_last = [x,y];
             }
         }

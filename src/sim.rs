@@ -10,15 +10,17 @@ use simple_eyre::{
     eyre::{bail, ensure, eyre},
     Result,
 };
-pub use nalgebra::{Vector2, Point2};
+pub use nalgebra::Vector2;
 use slotmap::{new_key_type, Key, SecondaryMap, SlotMap};
 use std::collections::VecDeque;
 use smallvec::{SmallVec, smallvec};
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::{f32::consts::PI,fmt,error};
+use std::{fmt,error};
 use enum_primitive_derive::Primitive;
 
 mod collision;
+pub mod coords;
+pub use coords::*;
 
 #[derive(Debug)]
 pub struct SimError{
@@ -466,6 +468,8 @@ impl Glyph {
 #[derive(Debug, Clone)]
 pub struct Arm {
     pub pos: Pos,
+    //Rotation as tracked by omsim (truncated % 6 after each rotation, so it ranges -5..=5),
+    //which collision positions depend on
     pub rot: Rot,
     pub len: i32,
     pub arm_type: ArmType,
@@ -473,17 +477,14 @@ pub struct Arm {
     pub grabbing: bool,
     pub halted: bool,
     pub atoms_grabbed: [AtomKey; 6],
-    //Rotation as tracked by omsim (truncated % 6 after each rotation), used for collision positions
-    pub arm_rotation: Rot,
 }
 
 impl Arm {
     pub fn new(pos: Pos, rot: Rot, len: i32, arm_type: ArmType, instruction_tape: Tape) -> Self {
-        Arm { pos, rot, len, arm_type, instruction_tape,
+        //omsim reduces the solution file's rotation with a truncating % 6 when loading
+        Arm { pos, rot: rot % 6, len, arm_type, instruction_tape,
             grabbing: false, halted: false,
             atoms_grabbed: [AtomKey::null(); 6],
-            //omsim reduces the solution file's rotation with a truncating % 6 when loading
-            arm_rotation: rot % 6,
         }
     }
     pub fn angles_between_arm(arm_type: ArmType) -> Rot {
@@ -500,10 +501,7 @@ impl Arm {
         use Movement::*;
         match action{
             Move(Linear(p)) => self.pos += p,
-            Move(Rotation(r,_)) => {
-                self.rot += r;
-                self.arm_rotation = (self.arm_rotation + r) % 6;
-            }
+            Move(Rotation(r,_)) => self.rot = (self.rot + r) % 6,
             LengthAdjust(a) => self.len += a,
             Move(HeldStill) | Pivot(_) => {},
         }
@@ -967,7 +965,6 @@ pub struct SolutionStats {
     pub instructions: i32,
 }
 
-pub type XYPos = Point2<f32>;
 #[derive(Debug, Copy, Clone)]
 pub struct FloatAtom{
     pub pos: XYPos,
@@ -988,7 +985,7 @@ impl From<&Atom> for FloatAtom{
 pub struct FloatArm{
     pub pos: XYPos,
     pub rot: f32,
-    pub len: f32,
+    pub len: f32,//in hexes
     pub arm_type: ArmType,
     pub grabbing: bool,
 }
@@ -996,36 +993,6 @@ pub struct FloatWorld{//Might add arms, maybe some other animation stuff too
     pub portion: f32,
     pub atoms_xy: Vec<FloatAtom>,
     pub arms_xy: Vec<FloatArm>
-}
-fn pos_to_xy(input: Pos) -> XYPos{
-    let a = input.x as f32;
-    let b = input.y as f32;
-    XYPos::new(a*2.+b,b*f32::sqrt(3.))
-}
-fn rot_to_angle(r: Rot) -> f32{
-    (-r as f32)*PI/3.
-}
-//https://stackoverflow.com/questions/7705228/hexagonal-grids-how-do-you-find-which-hexagon-a-point-is-in/23370350#23370350
-fn xy_to_pos(input: XYPos) -> Pos{
-    //x=a*2.+b, y=b*f32::sqrt(3.)
-    let b = input.y/f32::sqrt(3.);
-    let a = (input.x-b)/2.;
-    // check closest to (p+1,q), (p,q+1), (p-1,q) or (p,q-1)
-    let (p, q) = (a.round(), b.round());
-    let (lambda, mu) = (a-p, b-q);
-    // opposite signs, so we are guaranteed to be inside hexagon (p,q)
-    let base_hex = Pos::new(p as i32, q as i32);
-    if lambda * mu < 0.0 {return base_hex;}
-    let distance = nalgebra::distance_squared(&pos_to_xy(base_hex),&input);
-    // inside circle, so guaranteed inside hexagon (p,q)
-    if distance < 1. {return base_hex;}
-
-    // same sign, but which end of the parallelogram are we?
-    let sign = lambda.signum();
-    let candidate = if ( lambda.abs() > mu.abs() ) {(p+sign,q)} else {(p,q+sign)};
-    let candidate_hex = Pos::new(candidate.0 as i32, candidate.1 as i32);
-    let distance2 = nalgebra::distance_squared(&pos_to_xy(candidate_hex),&input);
-    if distance < distance2 {base_hex} else {candidate_hex}
 }
 impl FloatWorld{
     pub fn new() -> Self{
@@ -1045,14 +1012,13 @@ impl FloatWorld{
             let xy = pos_to_xy(base);
             match movement{
                 Linear(offset) => {
-                    let offset_xy = pos_to_xy(offset)-XYPos::origin();
-                    return (xy+(offset_xy*amount), 0.)
+                    return (xy+(pos_to_xy_vec(offset)*amount), 0.)
                 },
                 Rotation(r, pivot) => {
                     let pivot_xy = pos_to_xy(pivot);
                     let offset = xy-pivot_xy;
                     let rot = rot_to_angle(r)*amount;
-                    return (pivot_xy+(nalgebra::Rotation2::new(-rot)*offset), rot)
+                    return (pivot_xy+(nalgebra::Rotation2::new(rot)*offset), rot)
                 }
                 HeldStill => {
                     return (xy, 0.)
@@ -1087,7 +1053,7 @@ impl FloatWorld{
             let new_arm = FloatArm{
                 pos: xy,
                 rot: angle+rot_to_angle(arm.rot),
-                len: arm_len*2.,
+                len: arm_len,
                 arm_type: arm.arm_type,
                 grabbing: arm.grabbing,
             };
@@ -1109,11 +1075,10 @@ impl FloatWorld{
         }
         for a_index in 0..world.arms.len(){
             let arm = &world.arms[a_index];
-            let arm_len = arm.len as f32;
             let new_arm = FloatArm{
                 pos: pos_to_xy(arm.pos),
                 rot: rot_to_angle(arm.rot),
-                len: arm_len*2.,
+                len: arm.len as f32,
                 arm_type: arm.arm_type,
                 grabbing: arm.grabbing,
             };
