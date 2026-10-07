@@ -356,6 +356,9 @@ impl Loaded{
         if edit.is_noop(){
             return Ok(());
         }
+        if let Some(reason) = self.part_lock(edit.part){
+            return Err(reason.to_owned());
+        }
         let world = World::setup_sim(&edited_layout(&self.base_world, edit)).map_err(|e| e.to_string())?;
         self.check_overlap(&world.part_overlaps(edit.part))?;
         self.commit_world(world);
@@ -403,11 +406,17 @@ impl Loaded{
             }
         }
     }
-    //Picks another part from the stack. A drag carries over to it (keeping the offset).
+    //Picks another part from the stack. A drag carries over to it (keeping the offset) if it can be edited;
+    //otherwise the drag ends, and starts again on the next mouse movement once an editable part is picked.
     fn cycle(&mut self, step: i32){
         let Some(press) = &mut self.press else {return};
         press.cand = (press.cand as i32 + step).rem_euclid(press.stack.len() as i32) as usize;
-        if let Some(drag) = &mut press.drag{
+        let part = press.part();
+        if !self.part_editable(part){
+            if let Some(drag) = self.press.as_mut().and_then(|p| p.drag.take()){
+                self.retire_drag(drag);
+            }
+        } else if let Some(drag) = self.press.as_mut().and_then(|p| p.drag.as_mut()){
             drag.rot = 0;
             drag.len = 0;
         }
@@ -468,7 +477,7 @@ impl Loaded{
                 let glyph = &layout.glyphs[i];
                 let polymer = glyph.build_polymer().ok().flatten();
                 let track = glyph.is_track().then(||
-                    setup_tracks(ctx, &World::build_track_maps([glyph]).unwrap_or_default()));
+                    setup_tracks(ctx, &TrackMaps::build([glyph]).unwrap_or_default()));
                 let landing = glyph.footprint(polymer.as_ref());
                 (polymer, track, landing)
             }
@@ -511,7 +520,7 @@ impl Loaded{
         } else {
             let others = self.base_world.glyphs.iter().enumerate()
                 .filter(|&(i, _)| PartId::Glyph(i) != part).map(|(_, g)| g);
-            Some((part, setup_tracks(ctx, &World::build_track_maps(others).unwrap_or_default())))
+            Some((part, setup_tracks(ctx, &TrackMaps::build(others).unwrap_or_default())))
         };
         if scene_tracks_part.is_some() || new_scene_tracks.is_some(){
             let drag = self.press.as_mut().unwrap().drag.as_mut().unwrap();
@@ -573,8 +582,13 @@ impl Loaded{
     fn apply_base_change(&mut self, earliest_step: usize){
         let old_start = self.base_world.timestep;
         let new_start = self.base_world.get_first_timestep();
-        self.base_world.timestep = new_start;
-        let earliest_step = (earliest_step as u64).min(old_start).min(new_start);
+        if new_start != old_start{
+            //The other worlds started at the old first timestep, so none of them can be reused
+            self.base_world.timestep = new_start;
+            self.reset_world();
+            return;
+        }
+        let earliest_step = earliest_step as u64;
         fn sync_arms(target: &mut World, base: &World){
             target.repeat_length = base.repeat_length;
             for (arm, base_arm) in target.arms.iter_mut().zip(&base.arms){

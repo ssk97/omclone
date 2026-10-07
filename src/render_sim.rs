@@ -203,7 +203,6 @@ impl CameraSetup{
         self.offset += XYVec::new(dx, -dy)/self.px_per_world();
     }
     //The world position under a screen pixel (y down, origin top-left)
-    #[allow(dead_code)]//not used for mouse picking yet
     pub fn screen_to_world(&self, px: (f32, f32), screen_size: (f32, f32)) -> XYPos {
         let scale = self.scale(screen_size);
         let ndc_x = px.0/screen_size.0*2. - 1.;

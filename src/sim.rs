@@ -2,12 +2,12 @@
 use bitflags::bitflags;
 #[cfg(feature = "color-eyre")]
 use color_eyre::{
-    eyre::{bail, ensure, eyre},
+    eyre::{ensure, eyre},
     Result,
 };
 #[cfg(not(feature = "color-eyre"))]
 use simple_eyre::{
-    eyre::{bail, ensure, eyre},
+    eyre::{ensure, eyre},
     Result,
 };
 pub use nalgebra::Vector2;
@@ -19,6 +19,8 @@ use std::{fmt,error};
 use enum_primitive_derive::Primitive;
 
 mod collision;
+mod track;
+pub use track::*;
 pub mod coords;
 pub use coords::*;
 
@@ -534,14 +536,6 @@ pub struct InitialWorld {
     pub arms: Vec<Arm>,
 }
 
-pub type TrackMap = FxHashMap<Pos, Pos>;
-
-#[derive(Debug, Clone, Default)]
-pub struct TrackMaps{
-    pub plus: TrackMap,
-    pub minus: TrackMap,
-}
-
 
 //Number of monomers shown for (and required by) a repeating output
 pub const POLYMER_REPETITIONS: i32 = 6;
@@ -682,7 +676,7 @@ impl Polymer {
         let d = p - self.origin;
         Pos::new(self.dir_v.y * d.x - self.dir_v.x * d.y, -self.dir_u.y * d.x + self.dir_u.x * d.y)
     }
-    //Atoms outside the rows of the polymer, or beyond either end of a row, are allowed garbage
+    //Atoms beyond either end of a row are allowed garbage. Atoms outside the rows of the polymer aren't (like omsim).
     fn is_ignored(&self, pos: Pos, monomer_count: i32) -> bool {
         let p = self.polymer_pos(pos);
         let row = p.y - self.min_v;
@@ -767,6 +761,9 @@ pub struct World {
     pub conduit_pairs: ContuitPairMap,
     //Repeating output data, keyed by glyph index
     pub polymers: FxHashMap<usize, Polymer>,
+    //The variants of each input with several, as they were before setup spawned the first one (which moved
+    //it on to the next), so layout() can restore them. Keyed by glyph index.
+    input_variants: Vec<(usize, AtomPattern)>,
 }
 type ContuitPairMap = FxHashMap<i32, ConduitInfo>;
 new_key_type! { pub struct AtomKey; pub struct MoleculeKey; }
@@ -1774,146 +1771,103 @@ impl World {
     }
 }
 
+//What a reset instruction has to undo: the arm's changes since the last repeat or reset
+#[derive(Clone)]
+struct ResetState {
+    piston: bool,
+    base_len: i32,
+    len: i32,
+    rot: i32,
+    grabbing: bool,
+    track: Option<TrackPosition>,
+}
+impl ResetState {
+    fn new(arm: &Arm, track_maps: &TrackMaps) -> Self {
+        ResetState {
+            piston: arm.arm_type == ArmType::Piston,
+            base_len: arm.len,
+            len: arm.len,
+            rot: 0,
+            grabbing: false,
+            track: track_maps.start_position(arm.pos),
+        }
+    }
+    fn apply(&mut self, instr: Instr, track_maps: &TrackMaps) {
+        use Instr::*;
+        match instr {
+            Extend if self.piston && self.len < 3 => self.len += 1,
+            Retract if self.piston && self.len > 1 => self.len -= 1,
+            RotateCounterClockwise => self.rot += 1,
+            RotateClockwise => self.rot -= 1,
+            Grab => self.grabbing = true,
+            Drop => self.grabbing = false,
+            Forward | Back => if let Some(track) = &mut self.track {
+                track.step(track_maps, instr == Forward);
+            }
+            _ => {}
+        }
+    }
+    //The instructions that undo it: drop, retract, rotate back the shorter way, move back along
+    //the track, then extend
+    fn undo(&self, track_maps: &TrackMaps) -> Vec<Instr> {
+        use Instr::*;
+        let mut out = Vec::new();
+        if self.grabbing {
+            out.push(Drop);
+        }
+        let len_diff = self.len - self.base_len;
+        out.extend(std::iter::repeat(Retract).take(len_diff.max(0) as usize));
+        let mut rot = self.rot;
+        while rot > 3 {rot -= 6;}
+        while rot < -3 {rot += 6;}
+        let rotate = if rot > 0 {RotateClockwise} else {RotateCounterClockwise};
+        out.extend(std::iter::repeat(rotate).take(rot.unsigned_abs() as usize));
+        let steps = self.track.map_or(0, |t| t.steps_to_return(track_maps));
+        let step = if steps > 0 {Back} else {Forward};
+        out.extend(std::iter::repeat(step).take(steps.unsigned_abs() as usize));
+        out.extend(std::iter::repeat(Extend).take((-len_diff).max(0) as usize));
+        out
+    }
+}
+
 //Setup stuff
 impl World {
-    fn add_track(track_maps: &mut TrackMaps, track_pos:&Vec<Pos>) -> Result<()> {
-        ensure!(track_pos.len() > 0, "Track of length 0!");
-        fn try_insert(map: &mut TrackMap, key: Pos, value: Pos){
-            if !map.contains_key(&key){
-                map.insert(key,value);
-            }
-        }
-        //first do all except the possible loopback
-        for track_pair in track_pos.windows(2) {
-            let (t_prev, t_now) = (track_pair[0], track_pair[1]);
-            let offset = t_now - t_prev;
-            try_insert(&mut track_maps.minus, t_now, -offset);
-            try_insert(&mut track_maps.plus, t_prev, offset);
-        }
-        let first = *track_pos.first().unwrap();
-        let last = *track_pos.last().unwrap();
-        let offset = first - last;
-        //check for looping on first/last
-        if track_pos.len() > 2 && pos_to_rot(offset).is_some() {
-            try_insert(&mut track_maps.minus, first, -offset);
-            try_insert(&mut track_maps.plus, last, offset);
-        } else {
-            //If not looping, block future track overlaps here
-            try_insert(&mut track_maps.minus, first, Pos::new(0,0));
-            try_insert(&mut track_maps.plus, last, Pos::new(0,0));
-        }
-        Ok(())
-    }
-    //Track movement for a set of glyphs (earlier tracks win where tracks overlap)
-    pub fn build_track_maps<'a>(glyphs: impl IntoIterator<Item=&'a Glyph>) -> Result<TrackMaps> {
-        let mut track_maps = TrackMaps::default();
-        for g in glyphs {
-            if let GlyphType::Track(track_data) = &g.glyph_type {
-                let hexes: Vec<Pos> = track_data.iter().map(|&p| g.reposition(p)).collect();
-                World::add_track(&mut track_maps, &hexes)?;
-            }
-        }
-        World::clean_track(&mut track_maps);
-        Ok(track_maps)
-    }
-    fn clean_track(track_maps: &mut TrackMaps){
-        //Remove {0,0} track offsets that were used to block track overlaps
-        let pos_nil = Pos::new(0,0);
-        track_maps.plus.retain(|_, v|->bool {
-            v != &pos_nil});
-        track_maps.minus.retain(|_, v|->bool {
-            v != &pos_nil});
-    }
-
     //modifies the original arm to have the new instructions
     //returns the length of the tape (repetition size)
     fn normalize_instructions(
         original: &mut Arm,
         track_maps: &TrackMaps,
     ) -> Result<usize> {
-        use ArmType::*;
         use Instr::*;
-        let arm_type = original.arm_type;
         let old_instructions = &original.instruction_tape.instructions;
         let mut instructions = Vec::with_capacity(old_instructions.len() + 8);
         let mut repeat_source = 0;
         let mut repeat_ending = 0;
         let mut any_nonrepeat = false;
         let mut curr = 0;
-        let mut track_steps = 0;
-        let mut rot_diff = 0;
-        let mut len = original.len;
-        let mut known_grab = false;
-        let mut position_check = original.pos;
-        fn get_track_loop_length(track_map: &TrackMap, pos: Pos) -> Option<i32>{
-            let mut my_pos = pos;
-            let mut loop_length = 0;
-            loop{
-                let offset = track_map.get(&my_pos)?;
-                my_pos += offset;
-                loop_length += 1;
-                if my_pos == pos {return Some(loop_length);}
-                if loop_length as usize > track_map.len() {return None;}
-            }
-        }
-        let track_loop = get_track_loop_length(&track_maps.plus, original.pos);
+        let fresh = ResetState::new(original, track_maps);
+        let mut to_undo = fresh.clone();
         while curr < old_instructions.len() {
             let instr = old_instructions[curr];
             if !any_nonrepeat && !matches!(instr, Repeat | Empty ){
                 any_nonrepeat = true;
                 repeat_source = curr;
             }
-            if !matches!(instr, Repeat | Reset | Noop) {
-                instructions.push(instr);
-                curr += 1;
-            }
-            let mut basic_move = |instr: Instr|->Result<()>{
-                match instr{
-                    Extend => {
-                        if arm_type == Piston && len < 3 {
-                            len += 1;
-                        }
-                    }
-                    Retract => {
-                        if arm_type == Piston && len > 1 {
-                            len -= 1;
-                        }
-                    }
-                    RotateCounterClockwise => {
-                        rot_diff += 1;
-                    }
-                    RotateClockwise => {
-                        rot_diff -= 1;
-                    }
-                    Grab => known_grab = true,
-                    Drop => known_grab = false,
-                    Forward => {
-                        if let Some(offset) = track_maps.plus.get(&position_check){
-                            track_steps += 1;
-                            position_check += offset;
-                        }
-                    }
-                    Back => {
-                        if let Some(offset) = track_maps.minus.get(&position_check){
-                            track_steps -= 1;
-                            position_check += offset;
-                        }
-                    }
-                    PivotCounterClockwise | PivotClockwise | Empty | Halt | Noop => {}
-                    Reset | Repeat => {bail!("Instruction {:?} not basic move!",instr);}
-                }
-                Ok(())
-            };
             match instr {
                 Extend|Retract|
                 RotateCounterClockwise|RotateClockwise|
                 Grab|Drop|
                 Forward|Back|
                 PivotCounterClockwise|PivotClockwise => {
-                    basic_move(instr)?;
+                    instructions.push(instr);
+                    curr += 1;
+                    to_undo.apply(instr, track_maps);
                     repeat_ending = curr;
                 }
-                Empty | Halt => {}
+                Empty | Halt => {
+                    instructions.push(instr);
+                    curr += 1;
+                }
 
                 Repeat => {
                     let rep_len = repeat_ending - repeat_source;
@@ -1929,62 +1883,16 @@ impl World {
                                 curr,i,repeat_source,repeat_ending
                             );
                             instructions.push(copied_instr);
-                            basic_move(copied_instr)?;
                         }
                         curr += rep_len;
                         any_nonrepeat = false;
-
-                        known_grab = false;
-                        rot_diff = 0;
-                        len = original.len;
-                        track_steps = 0;
-                        position_check = original.pos;
+                        //A repeated block starts afresh, so a later reset only undoes what follows it
+                        to_undo = fresh.clone();
                     }
                 }
                 Reset => {
-                    let mut reset_vec = Vec::new();
-                    if known_grab {
-                        reset_vec.push(Drop);
-                        known_grab = false;
-                    }
-                    while len > original.len {
-                        reset_vec.push(Retract);
-                        len -= 1;
-                    }
-                    while rot_diff > 3 {rot_diff -= 6;}
-                    while rot_diff < -3 {rot_diff += 6;}
-                    while rot_diff > 0 {
-                        reset_vec.push(RotateClockwise);
-                        rot_diff -= 1;
-                    }
-                    while rot_diff < 0 {
-                        reset_vec.push(RotateCounterClockwise);
-                        rot_diff += 1;
-                    }
-                    // look for a path forward on the track that's shorter than
-                    // the path backward.
-                    if let Some(loop_len) = track_loop{
-                        while track_steps > loop_len/2 {
-                            track_steps -= loop_len;
-                        }
-                        while track_steps < -loop_len/2 {
-                            track_steps += loop_len
-                        }
-                    }
-                    while track_steps > 0 {
-                        reset_vec.push(Back);
-                        track_steps -= 1;
-                    }
-                    while track_steps < 0 {
-                        reset_vec.push(Forward);
-                        track_steps += 1;
-                    }
-                    while len < original.len {
-                        reset_vec.push(Extend);
-                        len += 1;
-                    }
-                    position_check = original.pos;
-
+                    let mut reset_vec = to_undo.undo(track_maps);
+                    to_undo = fresh.clone();
                     if reset_vec.len() == 0 {
                         reset_vec.push(Empty)
                     };
@@ -2030,6 +1938,7 @@ impl World {
             instruction_count: 0,
             conduit_pairs: Default::default(),
             polymers: Default::default(),
+            input_variants: Vec::new(),
         };
         for (id, g) in world.glyphs.iter().enumerate() {
             use GlyphType::*;
@@ -2046,7 +1955,7 @@ impl World {
                 world.polymers.insert(id, polymer);
             }
         }
-        world.track_maps = World::build_track_maps(&world.glyphs)?;
+        world.track_maps = TrackMaps::build(&world.glyphs)?;
         for a in &mut world.arms {
             use ArmType::*;
             world.cost += match a.arm_type {
@@ -2080,6 +1989,10 @@ impl World {
             }
         }
         
+        world.input_variants = world.glyphs.iter().enumerate().filter_map(|(id, g)| match &g.glyph_type {
+            GlyphType::Input(variants, _) if variants.len() > 1 => Some((id, variants.clone())),
+            _ => None,
+        }).collect();
         world.process_inputs(&mut WorldStepInfo::new())?;
         let mut unfinished_conduit_count = 0;
         for (id, glyph) in world.glyphs.iter_mut().enumerate() {
@@ -2105,8 +2018,14 @@ impl World {
     }
     //The parts, ready to be set up again (the tapes are already normalized, which setup leaves as they are)
     pub fn layout(&self) -> InitialWorld {
+        let mut glyphs = self.glyphs.clone();
+        for (id, variants) in &self.input_variants {
+            if let GlyphType::Input(current, _) = &mut glyphs[*id].glyph_type {
+                *current = variants.clone();
+            }
+        }
         InitialWorld {
-            glyphs: self.glyphs.clone(),
+            glyphs,
             arms: self.arms.iter().map(|a| Arm::new(a.pos, a.rot, a.len, a.arm_type, a.instruction_tape.clone())).collect(),
         }
     }

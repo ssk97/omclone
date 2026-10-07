@@ -674,6 +674,16 @@ mod regression_tests {
         let hexes: Vec<Pos> = hexes.iter().map(|&p| loaded.glyphs[0].reposition(p)).collect();
         assert_eq!(hexes, vec![Pos::new(2, 2), Pos::new(3, 2)]);
     }
+
+    #[test]
+    fn layout_keeps_input_variant_order() {
+        //Setup spawns the first variant and moves on to the second, but a rebuild must start from the first again
+        let variants = smallvec![vec![Atom::new(Pos::new(0, 0), Salt)], vec![Atom::new(Pos::new(0, 0), Water)]];
+        let world = run(vec![glyph(0, 0, 0, GlyphType::Input(variants, 0))], vec![], 0);
+        let rebuilt = World::setup_sim(&world.layout()).unwrap();
+        assert_eq!(type_at(&rebuilt, 0, 0), Some(Salt));
+        assert_eq!(rebuilt.glyphs[0].glyph_type, world.glyphs[0].glyph_type);
+    }
 }
 
 
@@ -741,5 +751,83 @@ mod part_tests {
         //Glyph 0 moved one hex right still covers (1,0), which only it covered before
         assert!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(1, 0), Pos::new(2, 0)]).is_empty());
         assert_eq!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(3, 0), Pos::new(4, 0)]).to_vec(), vec![Pos::new(4, 0)]);
+    }
+}
+
+//Track movement and how reset instructions undo it
+mod track_tests {
+    use crate::sim::*;
+    use Instr::*;
+
+    fn track(path: &[(i32, i32)]) -> Glyph {
+        Glyph { pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(path.iter().map(|&(a, b)| Pos::new(a, b)).collect()) }
+    }
+    fn maps(tracks: &[&[(i32, i32)]]) -> TrackMaps {
+        TrackMaps::build(&tracks.iter().map(|t| track(t)).collect::<Vec<_>>()).unwrap()
+    }
+    fn at(map: &TrackMap, x: i32, y: i32) -> Option<(i32, i32)> {
+        map.get(&Pos::new(x, y)).map(|p| (p.x, p.y))
+    }
+    //The arm's tape after setup expands its reset instructions
+    fn normalized(tracks: &[&[(i32, i32)]], arm_pos: (i32, i32), instructions: Vec<Instr>) -> Vec<Instr> {
+        let arm = Arm::new(Pos::new(arm_pos.0, arm_pos.1), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
+        let glyphs = tracks.iter().map(|t| track(t)).collect();
+        let world = World::setup_sim(&InitialWorld { glyphs, arms: vec![arm] }).unwrap();
+        world.arms[0].instruction_tape.instructions.clone()
+    }
+
+    #[test]
+    fn non_looping_ends_block_later_tracks() {
+        let m = maps(&[&[(0, 0), (1, 0)], &[(1, 0), (2, 0)]]);
+        assert_eq!(at(&m.plus, 0, 0), Some((1, 0)));
+        assert_eq!(at(&m.plus, 1, 0), None);
+        assert_eq!(at(&m.minus, 1, 0), Some((-1, 0)));
+        assert_eq!(at(&m.minus, 2, 0), Some((-1, 0)));
+        assert_eq!(at(&m.minus, 0, 0), None);
+    }
+
+    #[test]
+    fn adjacent_ends_loop_unless_two_hexes() {
+        let looping = maps(&[&[(0, 0), (1, 0), (0, 1)]]);
+        assert_eq!(at(&looping.plus, 0, 1), Some((0, -1)));
+        assert_eq!(at(&looping.minus, 0, 0), Some((0, 1)));
+        let pair = maps(&[&[(0, 0), (1, 0)]]);
+        assert_eq!(at(&pair.plus, 1, 0), None);
+        assert_eq!(at(&pair.minus, 0, 0), None);
+    }
+
+    #[test]
+    fn self_intersecting_track_start_keeps_its_back_move() {
+        //Revisits its start, but the start's (blocked) back move wins over the revisit's
+        let m = maps(&[&[(0, 0), (1, 0), (0, 1), (0, 0), (0, -1), (0, -2)]]);
+        assert_eq!(at(&m.minus, 0, 0), None);
+        assert_eq!(at(&m.plus, 0, 0), Some((1, 0)));
+        assert_eq!(at(&m.minus, 0, -1), Some((0, 1)));
+    }
+
+    #[test]
+    fn reset_takes_the_shorter_way_round_a_loop() {
+        let square: &[(i32, i32)] = &[(0, 0), (1, 0), (1, 1), (0, 1)];
+        assert_eq!(normalized(&[square], (0, 0), vec![Forward, Forward, Forward, Reset]),
+            vec![Forward, Forward, Forward, Forward]);
+        //Ties undo the steps taken
+        assert_eq!(normalized(&[square], (0, 0), vec![Forward, Forward, Reset]),
+            vec![Forward, Forward, Back, Back]);
+        assert_eq!(normalized(&[square], (0, 0), vec![Back, Back, Reset]),
+            vec![Back, Back, Forward, Forward]);
+    }
+
+    #[test]
+    fn reset_follows_the_arms_own_track() {
+        //Like test/solution/edge-cases/just-salt-overlapped-track-reset: the earlier one-hex track
+        //blocks the back move, but the game's reset counts it along the arm's own track anyway
+        assert_eq!(normalized(&[&[(1, 0)], &[(0, 0), (1, 0)]], (0, 0), vec![Forward, Back, Reset]),
+            vec![Forward, Back, Empty]);
+        //Moving off a non-looping end doesn't count
+        assert_eq!(normalized(&[&[(0, 0), (1, 0)]], (0, 0), vec![Forward, Forward, Reset]),
+            vec![Forward, Forward, Back]);
+        //Off the track, track moves do nothing
+        assert_eq!(normalized(&[&[(0, 0), (1, 0)]], (5, 5), vec![Forward, Reset]),
+            vec![Forward, Empty]);
     }
 }
