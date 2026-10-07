@@ -40,7 +40,8 @@ struct TestResults{
     panics: usize,
 }
 
-fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap){
+//With `rebuild`, the world is set up a second time from its own layout (as part edits do) before running
+fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap, rebuild: bool){
     let check_area = check_area_enabled();
     let f_sol = File::open(fpath).unwrap();
     let sol_maybe = parse_solution(&mut BufReader::new(f_sol));
@@ -65,6 +66,21 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         Err(e) => {println!("Failed to setup {:?}: {}",fpath, e); results.setup_errors += 1; return}
         Ok(s) => s
     };
+    if rebuild {
+        let rebuilt = match World::setup_sim(&world.layout()){
+            Err(e) => {println!("Failed to rebuild {:?}: {}",fpath, e); results.setup_errors += 1; return}
+            Ok(s) => s
+        };
+        let same_tapes = world.arms.iter().zip(&rebuilt.arms).all(|(a, b)|
+            a.instruction_tape.first == b.instruction_tape.first && a.instruction_tape.instructions == b.instruction_tape.instructions);
+        if !same_tapes || world.cost != rebuilt.cost || world.repeat_length != rebuilt.repeat_length
+            || world.instruction_count != rebuilt.instruction_count || world.area_touched != rebuilt.area_touched {
+            println!("Rebuild changed the world: {:?}", fpath);
+            results.setup_errors += 1;
+            return;
+        }
+        world = rebuilt;
+    }
     //Stop a bit after the expected completion time, since running longer can't produce a match
     let first_timestep = world.timestep;
     let max_timestep = match &sol.stats {
@@ -113,20 +129,29 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
 #[test]
 #[ignore = "Long running test, only run on explicit request"]
 fn check_all(){
+    sweep(false);
+}
+//Like check_all, but each world is set up again from its own layout first
+#[test]
+#[ignore = "Long running test, only run on explicit request"]
+fn check_all_rebuilt(){
+    sweep(true);
+}
+fn sweep(rebuild: bool){
     let mut puzzle_map = PuzzleMap::new();
     read_puzzle_recurse(&mut puzzle_map, fs::read_dir(PUZZLE_DIR).unwrap());
-    fn read_solution_recurse(results: &mut TestResults, puzzle_map: &PuzzleMap, directory: fs::ReadDir){
+    fn read_solution_recurse(results: &mut TestResults, puzzle_map: &PuzzleMap, directory: fs::ReadDir, rebuild: bool){
         for f in directory{
             if let Ok(f) = f{
                 let ftype = f.file_type().unwrap();
                 if ftype.is_dir(){
-                    read_solution_recurse(results, puzzle_map,fs::read_dir(f.path()).unwrap());
+                    read_solution_recurse(results, puzzle_map,fs::read_dir(f.path()).unwrap(), rebuild);
                 } else if ftype.is_file(){
                     let fpath = f.path();
                     let lname = fpath.to_str().unwrap().to_ascii_lowercase();
                     if lname.contains(".solution"){
                         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-                            check_solution(results, &fpath, puzzle_map)));
+                            check_solution(results, &fpath, puzzle_map, rebuild)));
                         if outcome.is_err(){
                             //total was already counted inside check_solution
                             println!("Panic while checking {:?}", fpath);
@@ -138,8 +163,8 @@ fn check_all(){
         }
     }
     let mut results = TestResults::default();
-    read_solution_recurse(&mut results, &puzzle_map, fs::read_dir("test/solution").unwrap());
-    read_solution_recurse(&mut results, &puzzle_map, fs::read_dir("test/om-leaderboard-master").unwrap());
+    read_solution_recurse(&mut results, &puzzle_map, fs::read_dir("test/solution").unwrap(), rebuild);
+    read_solution_recurse(&mut results, &puzzle_map, fs::read_dir("test/om-leaderboard-master").unwrap(), rebuild);
     println!("area checked: {}", check_area_enabled());
     println!("{:?}", results);
     println!("final score = {}/{}",results.passed,results.total);
@@ -651,3 +676,70 @@ mod regression_tests {
     }
 }
 
+
+//Footprints, picking stacks, and overlap
+mod part_tests {
+    use crate::sim::*;
+    use smallvec::smallvec;
+
+    fn glyph(x: i32, y: i32, rot: Rot, glyph_type: GlyphType) -> Glyph {
+        Glyph { pos: Pos::new(x, y), rot, glyph_type }
+    }
+    fn arm(x: i32, y: i32) -> Arm {
+        Arm::new(Pos::new(x, y), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]))
+    }
+    fn world(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> World {
+        World::setup_sim(&InitialWorld { glyphs, arms }).unwrap()
+    }
+    fn track(x: i32, y: i32, path: &[(i32, i32)]) -> Glyph {
+        glyph(x, y, 0, GlyphType::Track(path.iter().map(|&(a, b)| Pos::new(a, b)).collect()))
+    }
+
+    #[test]
+    fn footprints_follow_position_and_rotation() {
+        let w = world(vec![
+            glyph(2, 2, 1, GlyphType::Bonding),
+            glyph(3, 3, 2, GlyphType::Input(smallvec![vec![Atom::new(Pos::new(1, 0), AtomType::Salt)]], 0)),
+        ], vec![arm(7, 7)]);
+        assert_eq!(w.glyph_footprint(0).to_vec(), vec![Pos::new(2, 2), Pos::new(2, 2) + rotate(Pos::new(1, 0), 1)]);
+        assert_eq!(w.glyph_footprint(1).to_vec(), vec![Pos::new(3, 3) + rotate(Pos::new(1, 0), 2)]);
+        assert_eq!(w.part_footprint(PartId::Arm(0)).to_vec(), vec![Pos::new(7, 7)]);
+    }
+
+    #[test]
+    fn stack_is_in_drawing_order() {
+        let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Calcification)],
+            vec![arm(0, 0), arm(5, 5), arm(0, 0)]);
+        use PartId::*;
+        assert_eq!(w.parts_at(Pos::new(0, 0)), vec![Arm(2), Arm(0), Glyph(1), Glyph(0)]);
+        assert_eq!(w.parts_at(Pos::new(1, 0)), vec![Glyph(0)]);
+        assert!(w.parts_at(Pos::new(2, 0)).is_empty());
+    }
+
+    #[test]
+    fn arms_may_sit_on_tracks_but_nothing_else() {
+        let on_track = world(vec![track(0, 0, &[(0, 0), (1, 0)])], vec![arm(0, 0)]);
+        assert!(!on_track.has_overlap());
+        assert!(on_track.part_overlaps(PartId::Arm(0)).is_empty());
+
+        let on_glyph = world(vec![glyph(5, 0, 0, GlyphType::Bonding)], vec![arm(6, 0)]);
+        assert!(on_glyph.has_overlap());
+        assert_eq!(on_glyph.part_overlaps(PartId::Arm(0)).to_vec(), vec![Pos::new(6, 0)]);
+        assert_eq!(on_glyph.part_overlaps(PartId::Glyph(0)).to_vec(), vec![Pos::new(6, 0)]);
+
+        let crossing_tracks = world(vec![track(0, 0, &[(0, 0), (1, 0)]), track(1, 0, &[(0, 0), (0, 1)])], vec![]);
+        assert!(crossing_tracks.has_overlap());
+        assert_eq!(crossing_tracks.part_overlaps(PartId::Glyph(1)).to_vec(), vec![Pos::new(1, 0)]);
+
+        let apart = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 1, 0, GlyphType::Bonding)], vec![arm(3, 3)]);
+        assert!(!apart.has_overlap());
+    }
+
+    #[test]
+    fn moved_footprint_overlap_ignores_its_old_spot() {
+        let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(4, 0, 0, GlyphType::Bonding)], vec![]);
+        //Glyph 0 moved one hex right still covers (1,0), which only it covered before
+        assert!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(1, 0), Pos::new(2, 0)]).is_empty());
+        assert_eq!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(3, 0), Pos::new(4, 0)]).to_vec(), vec![Pos::new(4, 0)]);
+    }
+}

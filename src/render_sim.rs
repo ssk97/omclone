@@ -3,6 +3,7 @@ use crate::sim::*;
 
 use crate::render_library::*;
 use crate::render_glyphs::*;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::f32::consts::PI;
 
@@ -44,6 +45,14 @@ fn setup_arms(ctx: &mut dyn RenderingBackend) -> Bindings{
 pub struct TrackBindings{
     bindings: Bindings,
     vert_count: usize,
+}
+impl TrackBindings{
+    pub fn delete(self, ctx: &mut dyn RenderingBackend){
+        for &buffer in &self.bindings.vertex_buffers{
+            ctx.delete_buffer(buffer);
+        }
+        ctx.delete_buffer(self.bindings.index_buffer);
+    }
 }
 pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> TrackBindings{
     let mut verts_vec:Vec<GFXPos> = Vec::new();
@@ -144,7 +153,32 @@ fn setup_circle(ctx: &mut dyn RenderingBackend) -> Bindings{
         images: vec![],
     }
 }
+//An outline just inside a hex's edges (12 triangles)
+fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
+    const CORNER: f32 = 2./SQRT3;//distance to a corner, for an inner radius of 1
+    let mut verts = [[0.;2];12];
+    for i in 0..6{
+        let angle = PI/6. + (i as f32)*PI/3.;
+        let (s, c) = angle.sin_cos();
+        verts[i] = [c*CORNER*0.95, s*CORNER*0.95];
+        verts[i+6] = [c*CORNER*0.78, s*CORNER*0.78];
+    }
+    let mut indices = [0u16;36];
+    for i in 0..6{
+        let next = (i+1)%6;
+        let (outer, outer_next, inner, inner_next) = (i as u16, next as u16, (i+6) as u16, (next+6) as u16);
+        indices[i*6..i*6+6].copy_from_slice(&[outer, outer_next, inner, inner, outer_next, inner_next]);
+    }
+    let vertex_buffer = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&verts));
+    let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&indices));
+    Bindings {
+        vertex_buffers: vec![vertex_buffer],
+        index_buffer,
+        images: vec![],
+    }
+}
 struct ShapeStore{
+    hex_ring_bindings: Bindings,
     arm_bindings: Bindings,
     circle_bindings: Bindings,
     texture_bindings: Vec<Bindings>,
@@ -275,6 +309,7 @@ impl RenderDataBase {
             }
         );
         let shapes = ShapeStore{
+            hex_ring_bindings: setup_hex_ring(ctx),
             arm_bindings: setup_arms(ctx),
             circle_bindings: setup_circle(ctx),
             texture_bindings: setup_textures(ctx),
@@ -323,14 +358,11 @@ fn symbol_color(fill: [f32;3]) -> [f32;3]{
 }
 
 impl RenderDataBase {
-	fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], camera: &CameraSetup){
-        let scale = camera.scale(window::screen_size());
-        let world_offset: GFXPos = camera.offset.into();
+	fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], world_offset: GFXPos, scale: (f32, f32)){
         ctx.apply_pipeline(&self.pipeline_textured);
 
         //Draw atom bonds
-        let atoms_copy = atoms;
-		for atom in atoms_copy {
+		for atom in atoms {
 			let offset = atom.pos.into();
 			for r in 0..3 { //4-6 are done by the other atom
 				let matches = [
@@ -370,33 +402,83 @@ impl RenderDataBase {
 			self.font.render_atom_symbol(ctx, atom.atom_type, color, atom.pos, world_offset, scale);
 		}
 	}
+    //The atoms shown on an input or output
+    fn glyph_atoms(glyph: &Glyph, polymer: Option<&Polymer>) -> Vec<FloatAtom> {
+        use GlyphType::*;
+        match &glyph.glyph_type{
+            Input(atoms_meta,_) | Output(atoms_meta,_,_) => {
+                atoms_meta[0].iter().map(|atom| (&glyph.place_atom(atom)).into()).collect()
+            },
+            OutputRepeating(..) => polymer.map_or(Vec::new(), |p| p.display.iter().map(|atom| atom.into()).collect()),
+            _ => Vec::new(),
+        }
+    }
+    //The glyph's image, or the half-transparent cover for inputs/outputs/conduits (textured pipeline)
+    fn draw_glyph_cover(&self, ctx: &mut Context, glyph: &Glyph, polymer: Option<&Polymer>, world_offset: GFXPos, scale: (f32, f32)){
+        let angle = rot_to_angle(glyph.rot);
+        use GlyphType::*;
+        match &glyph.glyph_type{
+            Input(..) | Output(..) | OutputRepeating(..) | Conduit(..) => {
+                ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
+                for p in glyph.footprint(polymer){
+                    let offset = pos_to_xy(p).into();
+                    ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
+                        offset, world_offset, angle, scale
+                    }));
+                    ctx.draw(0, 6, 1);
+                }
+            },
+            Track(_) => {},
+            _ => if let Some(glyph_image) = self.shapes.glyph_images.get(&glyph.glyph_type){
+                glyph_image.draw(ctx, glyph, world_offset, scale);
+            },
+        };
+    }
+    //Font pipeline
+    fn draw_conduit_number(&self, ctx: &mut Context, glyph: &Glyph, world_offset: GFXPos, scale: (f32, f32)){
+        if let GlyphType::Conduit(_, id) = glyph.glyph_type{
+            let offset = pos_to_xy(glyph.pos);
+            self.font.render_text_centered(ctx, &id.to_string(), [1., 1., 1.], offset, world_offset, scale);
+        }
+    }
+    fn draw_tracks(&self, ctx: &mut Context, tracks: &TrackBindings, world_offset: GFXPos, scale: (f32, f32)){
+        ctx.apply_pipeline(&self.pipeline_tracks);
+        ctx.apply_bindings(&tracks.bindings);
+        ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
+            color:[1., 1., 1.], offset:[0.,0.], world_offset, angle:0., scale
+        }));
+        ctx.draw(0, tracks.vert_count as i32, 1);
+    }
+    //Basic pipeline with the arm bindings
+    fn draw_arm(&self, ctx: &mut Context, f_arm: &FloatArm, world_offset: GFXPos, scale: (f32, f32)){
+        let color = [0., 0., 0.];
+        let offset = f_arm.pos.into();
+        let triangles_drawn = if f_arm.grabbing {6} else {3};
+        for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
+            let angle = f_arm.rot+rot_to_angle(r);
+            ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
+                color, offset, world_offset, angle, scale
+            }));
+            //Only whole lengths 1-3 have geometry, so a piston snaps halfway through its motion
+            let shown_len = f_arm.len.round().clamp(1., 3.) as i32;
+            ctx.draw((shown_len-1)*6, triangles_drawn, 1);
+        }
+    }
     //note: assumes ctx is in the middle of a render pass
     pub fn draw(&self, ctx: &mut Context, camera: &CameraSetup, tracks: &TrackBindings,
-         show_area: bool, world: &World, float_world: &FloatWorld)
+         show_area: bool, scene: &Scene)
     {
         let scale = camera.scale(window::screen_size());
         let world_offset: GFXPos = camera.offset.into();
-
+        let shown_glyphs = || scene.glyphs.iter().enumerate()
+            .filter(|&(id, _)| scene.hidden != Some(PartId::Glyph(id)));
 
         //Draw input/output atoms
-        let mut temp_atoms_vec:Vec<FloatAtom> = Vec::new();
-        for (id, glyph) in world.glyphs.iter().enumerate(){
-            use GlyphType::*;
-            temp_atoms_vec.clear();
-            match &glyph.glyph_type{
-                Input(atoms_meta,_) | Output(atoms_meta,_,_) => {
-                    for atom in &atoms_meta[0]{
-                        temp_atoms_vec.push((&glyph.place_atom(atom)).into());
-                    }
-                },
-                OutputRepeating(..) => {
-                    for atom in &world.polymers[&id].display{
-                        temp_atoms_vec.push(atom.into());
-                    }
-                },
-                _ => continue,
-            };
-            self.draw_atoms(ctx, &temp_atoms_vec, camera);
+        for (id, glyph) in shown_glyphs(){
+            let atoms = Self::glyph_atoms(glyph, scene.polymers.get(&id));
+            if !atoms.is_empty(){
+                self.draw_atoms(ctx, &atoms, world_offset, scale);
+            }
         }
         //Draw the Hex grid
         if camera.scale_base > 0.01{
@@ -405,7 +487,7 @@ impl RenderDataBase {
             let yc = ((-world_offset[1]/2.)/SQRT3+0.09).fract();
             let xdf = inv_scale_x/2.;
             let ydf = inv_scale_y/(2.*SQRT3);
-            
+
             let hex_grid_data: [UvVert;4] = [
                 [-1.,-1.,    xc-xdf, yc-ydf],
                 [-1., 1.,    xc-xdf, yc+ydf],
@@ -421,52 +503,19 @@ impl RenderDataBase {
         }
         //Draw glyphs (including half-transparent cover for input/outputs)
         ctx.apply_pipeline(&self.pipeline_textured);
-        for (id, glyph) in world.glyphs.iter().enumerate(){
-            let angle = rot_to_angle(glyph.rot);
-            use GlyphType::*;
-            match &glyph.glyph_type{
-                Input(..) | Output(..) | OutputRepeating(..) => {
-                    ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
-                    for p in world.glyph_footprint(id){ //transparent cover
-                        let offset = pos_to_xy(p).into();
-                        ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                            offset, world_offset, angle, scale
-                        }));
-                        ctx.draw(0, 6, 1);
-                    }
-                    continue
-                },
-                Conduit(pos_vec,_) => {
-                    ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
-                    for p in pos_vec{
-                        let offset = pos_to_xy(glyph.reposition(*p)).into();
-                        ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                            offset, world_offset, angle, scale
-                        }));
-                        ctx.draw(0, 6, 1);
-                    }
-                    continue
-                },
-                Track(_) => {},
-                _ => if let Some(glyph_image) = self.shapes.glyph_images.get(&glyph.glyph_type){
-                    glyph_image.draw(ctx, glyph, world_offset, scale);
-                },
-            };
+        for (id, glyph) in shown_glyphs(){
+            self.draw_glyph_cover(ctx, glyph, scene.polymers.get(&id), world_offset, scale);
         }
         //Draw conduit numbers
         self.font.set_pipeline(ctx);
-        for glyph in world.glyphs.iter(){
-            if let GlyphType::Conduit(_, id) = glyph.glyph_type{
-                let offset = pos_to_xy(glyph.pos);
-                let string = id.to_string();
-                self.font.render_text_centered(ctx, &string, [1., 1., 1.], offset, world_offset, scale);
-            }
+        for (_, glyph) in shown_glyphs(){
+            self.draw_conduit_number(ctx, glyph, world_offset, scale);
         }
         //draw area cover
         if show_area{
             ctx.apply_pipeline(&self.pipeline_textured);
-            ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_AREA_ID]);                
-            for p in &world.area_touched{
+            ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_AREA_ID]);
+            for p in scene.area{
                 let offset = pos_to_xy(*p).into();
                 ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                     offset, world_offset, angle:0., scale
@@ -474,42 +523,82 @@ impl RenderDataBase {
                 ctx.draw(0, 6, 1);
             }
         }
-        
-        //Draw tracks
-        ctx.apply_pipeline(&self.pipeline_tracks);
-        ctx.apply_bindings(&tracks.bindings);
-        ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-            color:[1., 1., 1.], offset:[0.,0.], world_offset, angle:0., scale
-        }));
-        ctx.draw(0, tracks.vert_count as i32, 1);
-		
+
+        self.draw_tracks(ctx, tracks, world_offset, scale);
+
 		//Draw atoms
-        let atoms_slice = &float_world.atoms_xy[..];
-		self.draw_atoms(ctx, atoms_slice, camera);
-		
+		self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
+
         //Draw arms
+        let shown_arms = || scene.float_world.arms_xy.iter().enumerate()
+            .filter(|&(num, _)| scene.hidden != Some(PartId::Arm(num)));
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&self.shapes.arm_bindings);
-        for f_arm in float_world.arms_xy.iter() {
-            let color = [0., 0., 0.];
-            let offset = f_arm.pos.into();
-            let triangles_drawn = if f_arm.grabbing {6} else {3};
-            for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
-                let angle = f_arm.rot+rot_to_angle(r);
-                ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-                    color, offset, world_offset, angle, scale
-                }));
-                //Only whole lengths 1-3 have geometry, so a piston snaps halfway through its motion
-                let shown_len = f_arm.len.round().clamp(1., 3.) as i32;
-                ctx.draw((shown_len-1)*6, triangles_drawn, 1);
-            }
+        for (_, f_arm) in shown_arms() {
+            self.draw_arm(ctx, f_arm, world_offset, scale);
         }
         self.font.set_pipeline(ctx);
-        for (num, f_arm) in float_world.arms_xy.iter().enumerate() {
+        for (num, f_arm) in shown_arms() {
             let string = (num+1).to_string();
             self.font.render_text_centered(ctx, &string, [1., 1., 1.], f_arm.pos, world_offset, scale);
         }
     }
+    //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. `track` is its track lines.
+    pub fn draw_dragged_glyph(&self, ctx: &mut Context, camera: &CameraSetup, glyph: &Glyph,
+        polymer: Option<&Polymer>, track: Option<&TrackBindings>, extra: XYVec)
+    {
+        let scale = camera.scale(window::screen_size());
+        let world_offset: GFXPos = (camera.offset + extra).into();
+        let atoms = Self::glyph_atoms(glyph, polymer);
+        if !atoms.is_empty(){
+            self.draw_atoms(ctx, &atoms, world_offset, scale);
+        }
+        ctx.apply_pipeline(&self.pipeline_textured);
+        self.draw_glyph_cover(ctx, glyph, polymer, world_offset, scale);
+        self.font.set_pipeline(ctx);
+        self.draw_conduit_number(ctx, glyph, world_offset, scale);
+        if let Some(track) = track{
+            self.draw_tracks(ctx, track, world_offset, scale);
+        }
+    }
+    //Draws an arm being dragged (in its starting state), shifted by `extra` (world units) from its hex
+    pub fn draw_dragged_arm(&self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
+        let scale = camera.scale(window::screen_size());
+        let world_offset: GFXPos = (camera.offset + extra).into();
+        let f_arm = FloatArm{
+            pos: pos_to_xy(arm.pos),
+            rot: rot_to_angle(arm.rot),
+            len: arm.len as f32,
+            arm_type: arm.arm_type,
+            grabbing: arm.arm_type.is_wheel(),
+        };
+        ctx.apply_pipeline(&self.pipeline);
+        ctx.apply_bindings(&self.shapes.arm_bindings);
+        self.draw_arm(ctx, &f_arm, world_offset, scale);
+        self.font.set_pipeline(ctx);
+        self.font.render_text_centered(ctx, &(num+1).to_string(), [1., 1., 1.], f_arm.pos, world_offset, scale);
+    }
+    //Outlines each hex
+    pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: [f32; 3]){
+        let scale = camera.scale(window::screen_size());
+        let world_offset: GFXPos = camera.offset.into();
+        ctx.apply_pipeline(&self.pipeline);
+        ctx.apply_bindings(&self.shapes.hex_ring_bindings);
+        for &p in hexes{
+            ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
+                color, offset: pos_to_xy(p).into(), world_offset, angle: 0., scale
+            }));
+            ctx.draw(0, 36, 1);
+        }
+    }
+}
+//What to draw for the world: glyph data, plus the moving atoms and arms. `hidden` isn't drawn (it's being dragged).
+pub struct Scene<'a>{
+    pub glyphs: &'a [Glyph],
+    pub polymers: &'a FxHashMap<usize, Polymer>,
+    pub area: &'a FxHashSet<Pos>,
+    pub float_world: &'a FloatWorld,
+    pub hidden: Option<PartId>,
 }
 #[cfg(test)]
 mod tests {

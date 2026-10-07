@@ -440,6 +440,49 @@ impl Glyph {
         atom.rotate_connections(self.rot);
         atom
     }
+    //The hexes the glyph covers: its area, and what it can overlap.
+    //A repeating output covers its displayed polymer, so it needs the polymer data (or covers nothing).
+    pub fn footprint(&self, polymer: Option<&Polymer>) -> SmallVec<[Pos; 8]> {
+        use GlyphType::*;
+        let rel: &[(i32, i32)] = match &self.glyph_type {
+            Calcification | Equilibrium => &[(0, 0)],
+            Animismus => &[(0, 0), (1, 0), (0, 1), (1, -1)],
+            Projection | Bonding | Unbonding | Rejection | Duplication => &[(0, 0), (1, 0)],
+            Dispersion => &[(0, 0), (1, 0), (1, -1), (0, -1), (-1, 0)],
+            Unification => &[(0, 0), (0, 1), (-1, 1), (0, -1), (1, -1)],
+            Purification | TriplexBond => &[(0, 0), (1, 0), (0, 1)],
+            MultiBond => &[(0, 0), (1, 0), (0, -1), (-1, 1)],
+            Division => &[(0, 0), (1, 0), (-1, 0)],
+            Proliferation => &[(0, 0), (1, 0), (0, 1), (1, 1), (-1, 1), (1, -1)],
+            Disposal => &[(0, 0), (1, 0), (0, 1), (1, -1), (0, -1), (-1, 0), (-1, 1)],
+            Input(meta_pattern, _) | Output(meta_pattern, _, _) => {
+                return meta_pattern[0].iter().map(|a| self.reposition(a.pos)).collect();
+            }
+            OutputRepeating(..) => {
+                return polymer.map_or(SmallVec::new(), |p| p.display.iter().map(|a| a.pos).collect());
+            }
+            Track(hexes) | Conduit(hexes, _) => {
+                return hexes.iter().map(|&p| self.reposition(p)).collect();
+            }
+        };
+        rel.iter().map(|&(x, y)| self.reposition(Pos::new(x, y))).collect()
+    }
+    //Builds a repeating output's polymer data (None for other glyphs)
+    pub fn build_polymer(&self) -> Result<Option<Polymer>> {
+        let GlyphType::OutputRepeating(meta_pattern, output_count, _) = &self.glyph_type else {return Ok(None)};
+        let monomer: Vec<Atom> = meta_pattern[0].iter().map(|a| self.place_atom(a)).collect();
+        Ok(Some(Polymer::build(self.pos, &monomer, *output_count / POLYMER_REPETITIONS)?))
+    }
+    pub fn is_track(&self) -> bool {
+        matches!(self.glyph_type, GlyphType::Track(_))
+    }
+}
+
+//A part of the layout: an index into World::glyphs or World::arms
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PartId {
+    Glyph(usize),
+    Arm(usize),
 }
 
 #[derive(Debug, Clone)]
@@ -1227,30 +1270,63 @@ impl World {
 
     //The hexes a glyph covers: its area, and what it can overlap
     pub fn glyph_footprint(&self, idx: usize) -> SmallVec<[Pos; 8]> {
-        use GlyphType::*;
-        let glyph = &self.glyphs[idx];
-        let rel: &[(i32, i32)] = match &glyph.glyph_type {
-            Calcification | Equilibrium => &[(0, 0)],
-            Animismus => &[(0, 0), (1, 0), (0, 1), (1, -1)],
-            Projection | Bonding | Unbonding | Rejection | Duplication => &[(0, 0), (1, 0)],
-            Dispersion => &[(0, 0), (1, 0), (1, -1), (0, -1), (-1, 0)],
-            Unification => &[(0, 0), (0, 1), (-1, 1), (0, -1), (1, -1)],
-            Purification | TriplexBond => &[(0, 0), (1, 0), (0, 1)],
-            MultiBond => &[(0, 0), (1, 0), (0, -1), (-1, 1)],
-            Division => &[(0, 0), (1, 0), (-1, 0)],
-            Proliferation => &[(0, 0), (1, 0), (0, 1), (1, 1), (-1, 1), (1, -1)],
-            Disposal => &[(0, 0), (1, 0), (0, 1), (1, -1), (0, -1), (-1, 0), (-1, 1)],
-            Input(meta_pattern, _) | Output(meta_pattern, _, _) => {
-                return meta_pattern[0].iter().map(|a| glyph.reposition(a.pos)).collect();
+        self.glyphs[idx].footprint(self.polymers.get(&idx))
+    }
+    //Arms only cover their base hex
+    pub fn part_footprint(&self, part: PartId) -> SmallVec<[Pos; 8]> {
+        match part {
+            PartId::Glyph(i) => self.glyph_footprint(i),
+            PartId::Arm(i) => smallvec![self.arms[i].pos],
+        }
+    }
+    fn is_track_part(&self, part: PartId) -> bool {
+        matches!(part, PartId::Glyph(i) if self.glyphs[i].is_track())
+    }
+    //Parts sharing a hex overlap, except an arm on a track
+    fn parts_conflict(&self, a: PartId, b: PartId) -> bool {
+        match (a, b) {
+            (PartId::Arm(_), other) | (other, PartId::Arm(_)) if self.is_track_part(other) => false,
+            _ => a != b,
+        }
+    }
+    fn all_parts(&self) -> impl Iterator<Item=PartId> {
+        (0..self.glyphs.len()).map(PartId::Glyph).chain((0..self.arms.len()).map(PartId::Arm))
+    }
+    //The parts covering a hex, in drawing order from the top: arms (later first), then glyphs (later first)
+    pub fn parts_at(&self, hex: Pos) -> Vec<PartId> {
+        let arms = (0..self.arms.len()).rev().map(PartId::Arm);
+        let glyphs = (0..self.glyphs.len()).rev().map(PartId::Glyph);
+        arms.chain(glyphs).filter(|&part| self.part_footprint(part).contains(&hex)).collect()
+    }
+    //The hexes of `footprint` (belonging to `part`, which may have moved) that overlap any other part
+    pub fn overlaps_with_others(&self, part: PartId, footprint: &[Pos]) -> SmallVec<[Pos; 8]> {
+        let mut overlaps = SmallVec::new();
+        for other in self.all_parts() {
+            if !self.parts_conflict(part, other) {continue;}
+            let other_footprint = self.part_footprint(other);
+            for &hex in footprint {
+                if other_footprint.contains(&hex) && !overlaps.contains(&hex) {
+                    overlaps.push(hex);
+                }
             }
-            OutputRepeating(..) => {
-                return self.polymers[&idx].display.iter().map(|a| a.pos).collect();
+        }
+        overlaps
+    }
+    pub fn part_overlaps(&self, part: PartId) -> SmallVec<[Pos; 8]> {
+        self.overlaps_with_others(part, &self.part_footprint(part))
+    }
+    pub fn has_overlap(&self) -> bool {
+        let mut occupants: FxHashMap<Pos, SmallVec<[PartId; 2]>> = Default::default();
+        for part in self.all_parts() {
+            for hex in self.part_footprint(part) {
+                let here = occupants.entry(hex).or_default();
+                if here.iter().any(|&other| self.parts_conflict(part, other)) {
+                    return true;
+                }
+                here.push(part);
             }
-            Track(hexes) | Conduit(hexes, _) => {
-                return hexes.iter().map(|&p| glyph.reposition(p)).collect();
-            }
-        };
-        rel.iter().map(|&(x, y)| glyph.reposition(Pos::new(x, y))).collect()
+        }
+        false
     }
     fn initial_area(&mut self) {
         for idx in 0..self.glyphs.len() {
@@ -1728,6 +1804,18 @@ impl World {
         }
         Ok(())
     }
+    //Track movement for a set of glyphs (earlier tracks win where tracks overlap)
+    pub fn build_track_maps<'a>(glyphs: impl IntoIterator<Item=&'a Glyph>) -> Result<TrackMaps> {
+        let mut track_maps = TrackMaps::default();
+        for g in glyphs {
+            if let GlyphType::Track(track_data) = &g.glyph_type {
+                let hexes: Vec<Pos> = track_data.iter().map(|&p| g.reposition(p)).collect();
+                World::add_track(&mut track_maps, &hexes)?;
+            }
+        }
+        World::clean_track(&mut track_maps);
+        Ok(track_maps)
+    }
     fn clean_track(track_maps: &mut TrackMaps){
         //Remove {0,0} track offsets that were used to block track overlaps
         let pos_nil = Pos::new(0,0);
@@ -1954,17 +2042,11 @@ impl World {
                 Disposal | Equilibrium | Output(_, _,_)| OutputRepeating(_, _,_) | Input(_,_) | Conduit(_,_) => 0,
                 Track(v) => (v.len() as i32) * 5,
             };
-            if let OutputRepeating(meta_pattern, output_count, _) = &g.glyph_type {
-                let monomer: Vec<Atom> = meta_pattern[0].iter().map(|a| g.place_atom(a)).collect();
-                let polymer = Polymer::build(g.pos, &monomer, *output_count / POLYMER_REPETITIONS)?;
+            if let Some(polymer) = g.build_polymer()? {
                 world.polymers.insert(id, polymer);
             }
-            if let Track(track_data) = &g.glyph_type {
-                let hexes: Vec<Pos> = track_data.iter().map(|&p| g.reposition(p)).collect();
-                World::add_track(&mut world.track_maps, &hexes)?;
-            }
         }
-        World::clean_track(&mut world.track_maps);
+        world.track_maps = World::build_track_maps(&world.glyphs)?;
         for a in &mut world.arms {
             use ArmType::*;
             world.cost += match a.arm_type {
@@ -2020,6 +2102,13 @@ impl World {
         world.initial_area();
         world.timestep = world.get_first_timestep();
         Ok(world)
+    }
+    //The parts, ready to be set up again (the tapes are already normalized, which setup leaves as they are)
+    pub fn layout(&self) -> InitialWorld {
+        InitialWorld {
+            glyphs: self.glyphs.clone(),
+            arms: self.arms.iter().map(|a| Arm::new(a.pos, a.rot, a.len, a.arm_type, a.instruction_tape.clone())).collect(),
+        }
     }
     pub fn get_first_timestep(&self) -> u64{
         if self.arms.len() == 0 { return 0 }
