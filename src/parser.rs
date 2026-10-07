@@ -339,10 +339,10 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
         let arm_size = 0;
         let arm_index = 0;
         let instructions = Vec::new();
-        //Clone and return points to relative position (absolute position done in setup_sim/reposition_glyph)
+        //Glyph data is already relative, as in the file
         let (part_type,input_output_index,tracks,conduit ) = match &glyph.glyph_type{
             GlyphType::Track(track) => {
-                (TTrack, 0, Some(track.iter().map(|x|rotate(x - pos, -rot)).collect()), None)
+                (TTrack, 0, Some(track.clone()), None)
             }
             GlyphType::Input(_,id) => {
                 (TInput, *id, None, None)
@@ -354,7 +354,7 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
                 (TOutputRep, *id, None, None)
             }
             GlyphType::Conduit(conduit,id) => {
-                (TConduit, *id, None, Some((*id, conduit.iter().map(|x|rotate(x - pos, -rot)).collect())))
+                (TConduit, *id, None, Some((*id, conduit.clone())))
             }
             normal_glyph_type => {
                 (TGlyph(normal_glyph_type.clone()), 0, None, None)

@@ -380,20 +380,23 @@ impl RenderDataBase {
 
         //Draw input/output atoms
         let mut temp_atoms_vec:Vec<FloatAtom> = Vec::new();
-        for glyph in world.glyphs.iter(){
+        for (id, glyph) in world.glyphs.iter().enumerate(){
             use GlyphType::*;
             temp_atoms_vec.clear();
             match &glyph.glyph_type{
-                Input(atoms_meta,_)
-                | Output(atoms_meta,_,_) 
-                | OutputRepeating(atoms_meta,_,_)=> {
+                Input(atoms_meta,_) | Output(atoms_meta,_,_) => {
                     for atom in &atoms_meta[0]{
+                        temp_atoms_vec.push((&glyph.place_atom(atom)).into());
+                    }
+                },
+                OutputRepeating(..) => {
+                    for atom in &world.polymers[&id].display{
                         temp_atoms_vec.push(atom.into());
                     }
-					self.draw_atoms(ctx, &temp_atoms_vec, camera);
                 },
                 _ => continue,
             };
+            self.draw_atoms(ctx, &temp_atoms_vec, camera);
         }
         //Draw the Hex grid
         if camera.scale_base > 0.01{
@@ -418,15 +421,14 @@ impl RenderDataBase {
         }
         //Draw glyphs (including half-transparent cover for input/outputs)
         ctx.apply_pipeline(&self.pipeline_textured);
-        for glyph in world.glyphs.iter(){
+        for (id, glyph) in world.glyphs.iter().enumerate(){
             let angle = rot_to_angle(glyph.rot);
             use GlyphType::*;
             match &glyph.glyph_type{
-                Input(atoms_meta,_) | Output(atoms_meta,_,_) | OutputRepeating(atoms_meta,_,_)=> {
-                    let atoms = &atoms_meta[0];
+                Input(..) | Output(..) | OutputRepeating(..) => {
                     ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
-                    for atom in atoms{ //transparent cover
-                        let offset = pos_to_xy(atom.pos).into();
+                    for p in world.glyph_footprint(id){ //transparent cover
+                        let offset = pos_to_xy(p).into();
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                             offset, world_offset, angle, scale
                         }));
@@ -437,7 +439,7 @@ impl RenderDataBase {
                 Conduit(pos_vec,_) => {
                     ctx.apply_bindings(&self.shapes.texture_bindings[SHADE_INOUT_ID]);
                     for p in pos_vec{
-                        let offset = pos_to_xy(*p).into();
+                        let offset = pos_to_xy(glyph.reposition(*p)).into();
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
                             offset, world_offset, angle, scale
                         }));

@@ -311,12 +311,7 @@ mod polymer_tests {
         World::setup_sim(&InitialWorld { glyphs, arms: vec![] }).unwrap()
     }
     fn displayed(world: &World) -> Vec<Atom> {
-        for g in &world.glyphs {
-            if let GlyphType::OutputRepeating(pattern, _, _) = &g.glyph_type {
-                return pattern[0].clone();
-            }
-        }
-        panic!("no repeating output");
+        world.polymers.values().next().expect("no repeating output").display.clone()
     }
     fn at(atoms: &[Atom], x: i32, y: i32) -> &Atom {
         atoms.iter().find(|a| a.pos == Pos::new(x, y)).unwrap_or_else(|| panic!("no atom at {x},{y}"))
@@ -541,8 +536,8 @@ mod regression_tests {
         a.connections[1] = Bonds::NORMAL; //to an empty hex
         let world = run(vec![glyph(0, 0, 0, GlyphType::OutputRepeating(
             smallvec![vec![a, Atom::new(Pos::new(1, 0), RepeatingOutputMarker)]], 6, 0))], vec![], 0);
-        let GlyphType::OutputRepeating(shown, _, _) = &world.glyphs[0].glyph_type else {unreachable!()};
-        let markers: Vec<Pos> = shown[0].iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
+        let shown = &world.polymers[&0].display;
+        let markers: Vec<Pos> = shown.iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
         assert_eq!(markers, vec![Pos::new(6, 0)]);
     }
 
@@ -651,7 +646,8 @@ mod regression_tests {
         let (_, _, init) = round_trip(&world, "a");
         let loaded = World::setup_sim(&init).unwrap();
         let GlyphType::Track(hexes) = &loaded.glyphs[0].glyph_type else {unreachable!()};
-        assert_eq!(hexes, &vec![Pos::new(2, 2), Pos::new(3, 2)]);
+        let hexes: Vec<Pos> = hexes.iter().map(|&p| loaded.glyphs[0].reposition(p)).collect();
+        assert_eq!(hexes, vec![Pos::new(2, 2), Pos::new(3, 2)]);
     }
 }
 

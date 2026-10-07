@@ -368,10 +368,11 @@ impl Atom {
             molecule: MoleculeKey::null(),
         }
     }
-    //Compares everything except molecule membership
-    pub fn matches_pattern(&self, pattern: &Atom) -> bool {
-        self.pos == pattern.pos && self.atom_type == pattern.atom_type
-            && self.connections == pattern.connections && self.immutable_wheel == pattern.immutable_wheel
+    //Compares everything except molecule membership, against a pattern atom placed by the glyph
+    pub fn matches_pattern(&self, pattern: &Atom, glyph: &Glyph) -> bool {
+        self.pos == glyph.reposition(pattern.pos) && self.atom_type == pattern.atom_type
+            && self.immutable_wheel == pattern.immutable_wheel
+            && (0..6).all(|i| self.connections[normalize_dir(i + glyph.rot) as usize] == pattern.connections[i as usize])
     }
     pub fn rotate_connections(&mut self, r: Rot) {
         let mut new_connections = [Bonds::NO_BOND; 6];
@@ -398,7 +399,8 @@ pub enum ArmMovement{
 pub type AtomPattern = SmallVec<[Vec<Atom>;1]>;
 pub type InOutId = i32;
 pub type ConduitId = i32;
-//Note: pre-setup, AtomPatterns are local and must be offset/rotated. After, they are global.
+//All positions in a GlyphType (patterns, track and conduit hexes) are relative to the glyph,
+//as in the solution file. Glyph::reposition/place_atom give their absolute positions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GlyphType {
     Calcification, Animismus, Projection,
@@ -409,8 +411,7 @@ pub enum GlyphType {
     Track(Vec<Pos>), Conduit(Vec<Pos>, ConduitId),
     Input(AtomPattern, InOutId), Output(AtomPattern, i32, InOutId),
     OutputRepeating(AtomPattern, i32, InOutId),
-}//Warning: Currently these Pos are relative in InitialWorld/preprocess, and absolute for World/during processing
-//This should probably be made consistent
+}
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ArmType {
     PlainArm, DoubleArm, TripleArm, HexArm,
@@ -432,36 +433,12 @@ impl Glyph {
     pub fn reposition(&self, rel_pos: Pos) -> Pos {
         self.pos + rotate(rel_pos, self.rot)
     }
-    //returns true if it was a glyph that can be repositioned
-    pub fn reposition_pattern(&mut self) -> bool {
-        use GlyphType::*;
-        match &mut self.glyph_type {
-            Input(meta_pattern,_) 
-            | Output(meta_pattern, _,_) 
-            | OutputRepeating(meta_pattern, _,_)  => {
-                for pat in meta_pattern{
-                    for a in pat {
-                        a.pos = self.pos + rotate(a.pos, self.rot);
-                        a.rotate_connections(self.rot);
-                    }
-                }
-                true
-            }
-            Conduit(locs,_id) => {
-                let p = self.pos;
-                for a in locs.iter_mut() {
-                    *a = p + rotate(*a, self.rot);
-                }
-                true
-            }
-            Track(locs) => {
-                for a in locs {
-                    *a = self.pos + rotate(*a, self.rot);
-                }
-                true
-            }
-            _ => false,
-        }
+    //A pattern atom moved to its absolute position, with its bonds rotated to match
+    pub fn place_atom(&self, rel_atom: &Atom) -> Atom {
+        let mut atom = rel_atom.clone();
+        atom.pos = self.reposition(rel_atom.pos);
+        atom.rotate_connections(self.rot);
+        atom
     }
 }
 
@@ -549,6 +526,8 @@ pub struct Polymer {
     pub outputs_per_repetition: i32,
     //How many monomers have been validated so far
     pub validated: i32,
+    //The atoms to display (6 repetitions plus placeholders), which are also the output's area
+    pub display: Vec<Atom>,
 }
 fn gcd(mut a: i32, mut b: i32) -> i32 {
     while b != 0 {
@@ -559,10 +538,11 @@ fn gcd(mut a: i32, mut b: i32) -> i32 {
     a
 }
 impl Polymer {
-    //Returns the polymer data along with the atoms to display (6 repetitions plus placeholders).
+    //Builds the polymer data, including the atoms to display (6 repetitions plus placeholders).
+    //`raw` is the monomer in absolute positions.
     //- The marker can be anywhere: each repetition's origin goes to the previous repetition's marker.
     //- Like omsim, a placeholder goes where a bond from the 6th repetition reaches the 7th repetition.
-    pub fn build(origin: Pos, raw: &[Atom], outputs_per_repetition: i32) -> Result<(Polymer, Vec<Atom>)> {
+    pub fn build(origin: Pos, raw: &[Atom], outputs_per_repetition: i32) -> Result<Polymer> {
         use AtomType::RepeatingOutputMarker;
         let mut markers = raw.iter().filter(|a| a.atom_type == RepeatingOutputMarker);
         let marker = markers.next().ok_or_else(|| eyre!("Repeating atom marker expected but not found!"))?;
@@ -579,7 +559,7 @@ impl Polymer {
             monomer, second_monomer: Vec::new(),
             origin, center, dir_u, dir_v, monomer_width: 0,
             min_v: 0, row_min_u: Vec::new(), row_max_u: Vec::new(),
-            outputs_per_repetition, validated: 0,
+            outputs_per_repetition, validated: 0, display: Vec::new(),
         };
         polymer.monomer_width = polymer.polymer_pos(marker.pos).x;
         let n = polymer.monomer.len();
@@ -647,7 +627,8 @@ impl Polymer {
 
         let mut display = expanded;
         display.extend(placeholders.into_iter().map(|p| Atom::new(p, RepeatingOutputMarker)));
-        Ok((polymer, display))
+        polymer.display = display;
+        Ok(polymer)
     }
     fn widen_row(&mut self, v: i32, u: i32) {
         let row = (v - self.min_v) as usize;
@@ -1244,109 +1225,57 @@ impl World {
         Ok(())
     }
 
-    fn initial_area(&mut self) -> SimResult<()>{
+    //The hexes a glyph covers: its area, and what it can overlap
+    pub fn glyph_footprint(&self, idx: usize) -> SmallVec<[Pos; 8]> {
         use GlyphType::*;
-        for glyph in &mut self.glyphs {
-            let pos = glyph.pos; //primary position
-            let pos_bi = glyph.reposition(Pos::new(1, 0)); //position for all 2-sized glyphs
-            let pos_tri = glyph.reposition(Pos::new(0, 1)); //third (closely packed) position
-
-            let pos_ani = glyph.reposition(Pos::new(1, -1));
-
-            let pos_disp2 = glyph.reposition(Pos::new(1, -1));
-            let pos_disp3 = glyph.reposition(Pos::new(0, -1));
-            let pos_disp4 = glyph.reposition(Pos::new(-1, 0));
-
-            let pos_multi2 = glyph.reposition(Pos::new(0, -1));
-            let pos_multi3 = glyph.reposition(Pos::new(-1, 1));
-
-            let pos_unif2 = glyph.reposition(Pos::new(-1, 1));
-            let pos_unif3 = glyph.reposition(Pos::new(0, -1));
-            let pos_unif4 = glyph.reposition(Pos::new(1, -1));
-
-            let pos_div = glyph.reposition(Pos::new(-1, 0));
-
-            let pos_proQS = glyph.reposition(Pos::new(1, 1));
-            let pos_proM = glyph.reposition(Pos::new(-1, 1));
-            let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
-            fn add_all(area_set: &mut FxHashSet<Pos>,input: impl IntoIterator<Item=Pos>) -> SimResult<()>{
-                for p in input{
-                    area_set.insert(p);
-                    /*if !area_set.insert(p){
-                        return Err(SimError{error_str:"Overlap detected!", location:pos_to_xy(p)});
-                    }*/
-                }
-                Ok(())
+        let glyph = &self.glyphs[idx];
+        let rel: &[(i32, i32)] = match &glyph.glyph_type {
+            Calcification | Equilibrium => &[(0, 0)],
+            Animismus => &[(0, 0), (1, 0), (0, 1), (1, -1)],
+            Projection | Bonding | Unbonding | Rejection | Duplication => &[(0, 0), (1, 0)],
+            Dispersion => &[(0, 0), (1, 0), (1, -1), (0, -1), (-1, 0)],
+            Unification => &[(0, 0), (0, 1), (-1, 1), (0, -1), (1, -1)],
+            Purification | TriplexBond => &[(0, 0), (1, 0), (0, 1)],
+            MultiBond => &[(0, 0), (1, 0), (0, -1), (-1, 1)],
+            Division => &[(0, 0), (1, 0), (-1, 0)],
+            Proliferation => &[(0, 0), (1, 0), (0, 1), (1, 1), (-1, 1), (1, -1)],
+            Disposal => &[(0, 0), (1, 0), (0, 1), (1, -1), (0, -1), (-1, 0), (-1, 1)],
+            Input(meta_pattern, _) | Output(meta_pattern, _, _) => {
+                return meta_pattern[0].iter().map(|a| glyph.reposition(a.pos)).collect();
             }
-            match &glyph.glyph_type{
-                Calcification => {
-                    add_all(&mut self.area_touched,[pos])
-                }
-                Animismus => {
-                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_ani])
-                }
-                Projection | Bonding | Unbonding | Rejection | Duplication=> {
-                    add_all(&mut self.area_touched,[pos, pos_bi])
-                }
-                Dispersion => {
-                    add_all(&mut self.area_touched,[pos, pos_bi,pos_disp2,pos_disp3,pos_disp4])
-                }
-                Unification => {
-                    add_all(&mut self.area_touched,[pos, pos_tri,pos_unif2,pos_unif3,pos_unif4])
-                }
-                Purification | TriplexBond => {
-                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri])
-                }
-                MultiBond => {
-                    add_all(&mut self.area_touched,[pos, pos_bi,pos_multi2,pos_multi3])
-                }
-                Division => {
-                    add_all(&mut self.area_touched,[pos, pos_bi,pos_div])
-                }
-                Proliferation => {
-                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_proQS, pos_proM, pos_proO])
-                }
-                Input(meta_pattern,_) 
-                | Output(meta_pattern, _,_)
-                | OutputRepeating(meta_pattern, _,_)=> {
-                    let atom_points = &meta_pattern[0];
-                    add_all(&mut self.area_touched,atom_points.iter().map(|a|a.pos))
-                }
-                Track(pos_list) => {
-                    add_all(&mut self.area_touched,pos_list.iter().copied())
-                },
-                Disposal => {
-                    add_all(&mut self.area_touched,[pos, pos_bi, pos_tri, pos_ani, pos_disp3,pos_disp4,pos_unif2])
-                },
-                Conduit(conduit_hexes,_) => {
-                    add_all(&mut self.area_touched,conduit_hexes.iter().copied())
-                },
-                Equilibrium => {
-                    add_all(&mut self.area_touched,[pos])
-                }
-            }?;
+            OutputRepeating(..) => {
+                return self.polymers[&idx].display.iter().map(|a| a.pos).collect();
+            }
+            Track(hexes) | Conduit(hexes, _) => {
+                return hexes.iter().map(|&p| glyph.reposition(p)).collect();
+            }
+        };
+        rel.iter().map(|&(x, y)| glyph.reposition(Pos::new(x, y))).collect()
+    }
+    fn initial_area(&mut self) {
+        for idx in 0..self.glyphs.len() {
+            let footprint = self.glyph_footprint(idx);
+            self.area_touched.extend(footprint);
         }
         for arm in &self.arms {
             self.area_touched.insert(arm.pos);
         }
         self.mark_arm_area();
-        Ok(())
     }
     fn process_inputs(&mut self, motion: &mut WorldStepInfo) -> SimResult<()>{
         use GlyphType::*;
         for glyph in self.glyphs.iter_mut() {
             let atoms = &mut self.atoms;
-            match &mut glyph.glyph_type{
-                Input(meta_pattern,_) => {
-                    let atom_spawn_points = &meta_pattern[0];
-                    if atom_spawn_points.iter().all(|a| atoms.check_empty(motion,a.pos)){
-                        //The whole input is one molecule, even if it's disjoint
-                        atoms.create_molecule(atom_spawn_points.iter().cloned())?;
+            if let Input(meta_pattern,_) = &glyph.glyph_type{
+                let atom_spawn_points = &meta_pattern[0];
+                if atom_spawn_points.iter().all(|a| atoms.check_empty(motion, glyph.reposition(a.pos))){
+                    //The whole input is one molecule, even if it's disjoint
+                    atoms.create_molecule(atom_spawn_points.iter().map(|a| glyph.place_atom(a)))?;
+                    if let Input(meta_pattern,_) = &mut glyph.glyph_type{
                         let tmp = meta_pattern.remove(0);
                         meta_pattern.push(tmp);
                     }
                 }
-                _ => {}
             }
         }
         Ok(())
@@ -1354,16 +1283,16 @@ impl World {
     //Returns the molecule if it exactly matches the pattern (same atoms and bonds, nothing extra)
     //and none of its atoms are grabbed. Separate molecules can't stand in for one disjoint molecule,
     //and a disjoint molecule can't stand in for separate ones.
-    fn match_output(atoms: &WorldAtoms, motion: &WorldStepInfo, pattern: &[Atom]) -> Option<MoleculeKey> {
-        let &first_key = atoms.locs.get(&pattern.first()?.pos)?;
+    fn match_output(atoms: &WorldAtoms, motion: &WorldStepInfo, glyph: &Glyph, pattern: &[Atom]) -> Option<MoleculeKey> {
+        let &first_key = atoms.locs.get(&glyph.reposition(pattern.first()?.pos))?;
         let molecule_key = atoms.atom_map[first_key].molecule;
         if atoms.molecules[molecule_key].atoms.len() != pattern.len() {
             return None;
         }
         for a in pattern {
-            let &atom_key = atoms.locs.get(&a.pos)?;
+            let &atom_key = atoms.locs.get(&glyph.reposition(a.pos))?;
             let atom = &atoms.atom_map[atom_key];
-            if atom.molecule != molecule_key || !atom.matches_pattern(a) || motion.atoms.contains_key(atom_key) {
+            if atom.molecule != molecule_key || !atom.matches_pattern(a, glyph) || motion.atoms.contains_key(atom_key) {
                 return None;
             }
         }
@@ -1373,17 +1302,19 @@ impl World {
         use GlyphType::*;
         for (id, glyph) in self.glyphs.iter_mut().enumerate() {
             let atoms = &mut self.atoms;
-            match &mut glyph.glyph_type{
-                Output(meta_pattern, output_count,_) => {
-                    if let Some(molecule_key) = World::match_output(atoms, motion, &meta_pattern[0]) {
-                        atoms.take_molecule(molecule_key);
-                        if *output_count > 0{
-                            *output_count -= 1;
-                        }
-                        let tmp = meta_pattern.remove(0);
-                        meta_pattern.push(tmp);
+            if let Output(meta_pattern, ..) = &glyph.glyph_type{
+                if let Some(molecule_key) = World::match_output(atoms, motion, glyph, &meta_pattern[0]) {
+                    atoms.take_molecule(molecule_key);
+                    let Output(meta_pattern, output_count, _) = &mut glyph.glyph_type else {unreachable!()};
+                    if *output_count > 0{
+                        *output_count -= 1;
                     }
-                },
+                    let tmp = meta_pattern.remove(0);
+                    meta_pattern.push(tmp);
+                }
+                continue;
+            }
+            match &mut glyph.glyph_type{
                 OutputRepeating(_, output_count,_) => {
                     let polymer = self.polymers.get_mut(&id).expect("Polymer data not found!");
                     polymer.update(atoms);
@@ -1647,7 +1578,8 @@ impl World {
                 Conduit(atom_teleport,conduit_id) => {
                     if first_half {
                         let conduit_info = self.conduit_pairs.get_mut(conduit_id).expect("conduit info not found!");
-                        World::conduit_process(atoms, id, atom_teleport, glyph.pos, conduit_info, motion);
+                        let hexes: SmallVec<[Pos; 8]> = atom_teleport.iter().map(|&p| pos + rotate(p, rot as Rot)).collect();
+                        World::conduit_process(atoms, id, &hexes, pos, conduit_info, motion);
                     } else if motion.active_glyphs.front() == Some(&id){
                         while motion.active_glyphs.front() == Some(&id){
                             motion.active_glyphs.pop_front();
@@ -1663,7 +1595,7 @@ impl World {
         }
         Ok(())
     }
-    fn conduit_process(atoms: &mut WorldAtoms, glyph_id: usize, positions: &Vec<Pos>, origin: Pos, conduit_info: &mut ConduitInfo, motion: &mut WorldStepInfo){
+    fn conduit_process(atoms: &mut WorldAtoms, glyph_id: usize, positions: &[Pos], origin: Pos, conduit_info: &mut ConduitInfo, motion: &mut WorldStepInfo){
         let mut offset_pos = conduit_info.offset_pos;
         let mut offset_rot = conduit_info.offset_rot;
         if conduit_info.vecids.0 == glyph_id{
@@ -2011,7 +1943,7 @@ impl World {
             conduit_pairs: Default::default(),
             polymers: Default::default(),
         };
-        for (id, g) in world.glyphs.iter_mut().enumerate() {
+        for (id, g) in world.glyphs.iter().enumerate() {
             use GlyphType::*;
             world.cost += match &g.glyph_type {
                 Calcification | Bonding | Unbonding => 10,
@@ -2022,14 +1954,14 @@ impl World {
                 Disposal | Equilibrium | Output(_, _,_)| OutputRepeating(_, _,_) | Input(_,_) | Conduit(_,_) => 0,
                 Track(v) => (v.len() as i32) * 5,
             };
-            g.reposition_pattern(); //reposition input/output/conduits
-            if let OutputRepeating(meta_pattern, output_count, _) = &mut g.glyph_type {
-                let (polymer, display) = Polymer::build(g.pos, &meta_pattern[0], *output_count / POLYMER_REPETITIONS)?;
-                *meta_pattern = smallvec![display];
+            if let OutputRepeating(meta_pattern, output_count, _) = &g.glyph_type {
+                let monomer: Vec<Atom> = meta_pattern[0].iter().map(|a| g.place_atom(a)).collect();
+                let polymer = Polymer::build(g.pos, &monomer, *output_count / POLYMER_REPETITIONS)?;
                 world.polymers.insert(id, polymer);
             }
             if let Track(track_data) = &g.glyph_type {
-                World::add_track(&mut world.track_maps, track_data)?;
+                let hexes: Vec<Pos> = track_data.iter().map(|&p| g.reposition(p)).collect();
+                World::add_track(&mut world.track_maps, &hexes)?;
             }
         }
         World::clean_track(&mut world.track_maps);
@@ -2085,7 +2017,7 @@ impl World {
             }
         }
         ensure!(unfinished_conduit_count == 0,"Conduits not properly matched!");
-        world.initial_area()?;
+        world.initial_area();
         world.timestep = world.get_first_timestep();
         Ok(world)
     }
