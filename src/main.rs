@@ -2,6 +2,8 @@ mod parser;
 mod sim;
 #[cfg(test)]
 mod test;
+#[cfg(any(feature = "editor_ui",feature = "display_ui",test))]
+mod timeline;
 
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod render_library;

@@ -684,6 +684,19 @@ mod regression_tests {
         assert_eq!(type_at(&rebuilt, 0, 0), Some(Salt));
         assert_eq!(rebuilt.glyphs[0].glyph_type, world.glyphs[0].glyph_type);
     }
+
+    #[test]
+    fn halting_tapes_dont_set_loop_length() {
+        //A halting tape runs once, so it doesn't count toward the loop, however long it is
+        let mut world = run(vec![], vec![
+            arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise]),
+            arm(5, 0, ArmType::PlainArm, vec![RotateClockwise; 5].into_iter().chain([Halt]).collect())], 0);
+        assert_eq!(world.repeat_length, 2);
+        assert_eq!(world.min_repeat_length(), 2);
+        //Without its Halt, it loops
+        world.arms[1].instruction_tape.delete(5..6, false);
+        assert_eq!(world.min_repeat_length(), 5);
+    }
 }
 
 
@@ -829,5 +842,122 @@ mod track_tests {
         //Off the track, track moves do nothing
         assert_eq!(normalized(&[&[(0, 0), (1, 0)]], (5, 5), vec![Forward, Reset]),
             vec![Forward, Empty]);
+    }
+}
+
+//Moving the editor's cursor around and editing tapes must give the same worlds as simulating straight through
+mod timeline_tests {
+    use crate::sim::*;
+    use crate::timeline::*;
+    use smallvec::smallvec;
+    use Instr::*;
+
+    //An arm moving salt from an input at (0,0) to an output at (-1,1), `repeats` times per loop
+    fn mover(repeats: usize) -> InitialWorld {
+        let salt = |x, y| Atom::new(Pos::new(x, y), AtomType::Salt);
+        let glyphs = vec![
+            Glyph { pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Input(smallvec![vec![salt(0, 0)]], 0) },
+            Glyph { pos: Pos::new(-1, 1), rot: 0, glyph_type: GlyphType::Output(smallvec![vec![salt(0, 0)]], 1_000_000, 0) },
+        ];
+        let tape = [Grab, RotateCounterClockwise, Drop, RotateClockwise].repeat(repeats);
+        let arms = vec![Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape::new(0, tape))];
+        InitialWorld { glyphs, arms }
+    }
+    fn straight(init: &InitialWorld, steps: usize) -> World {
+        let mut world = World::setup_sim(init).unwrap();
+        let mut motion = WorldStepInfo::new();
+        for _ in 0..steps {
+            world.run_step(true, &mut motion).unwrap();
+        }
+        world
+    }
+    //What two worlds should agree on
+    fn summary(world: &World) -> (u64, Vec<(i32, i32, String)>, Vec<(Pos, Rot, i32, bool)>, usize, Vec<i32>) {
+        let mut atoms: Vec<_> = world.atoms.atom_map.values()
+            .map(|a| (a.pos.x, a.pos.y, format!("{:?}", a.atom_type))).collect();
+        atoms.sort();
+        let arms = world.arms.iter().map(|a| (a.pos, a.rot, a.len, a.grabbing)).collect();
+        let outputs = world.glyphs.iter().filter_map(|g| match g.glyph_type {
+            GlyphType::Output(_, count, _) => Some(count),
+            _ => None,
+        }).collect();
+        (world.timestep, atoms, arms, world.area_touched.len(), outputs)
+    }
+
+    #[test]
+    fn moving_back_matches_straight_run() {
+        let init = mover(1);
+        let mut timeline = Timeline::new(World::setup_sim(&init).unwrap(), true);
+        timeline.advance_to(300.).unwrap();
+        timeline.rewind(120);
+        assert!(timeline.time() <= 120.);
+        timeline.advance_to(150.5).unwrap();
+        timeline.rewind(140);
+        timeline.advance_to(299.6).unwrap();
+        timeline.advance_to(300.).unwrap();
+        assert_eq!(summary(timeline.curr()), summary(&straight(&init, 300)));
+    }
+
+    #[test]
+    fn coming_forward_again_reuses_checkpoints() {
+        let init = mover(1);
+        let mut timeline = Timeline::new(World::setup_sim(&init).unwrap(), true);
+        timeline.advance_to(300.).unwrap();
+        let checkpoints = timeline.checkpoint_steps();
+        timeline.rewind(120);
+        timeline.advance_to(300.).unwrap();
+        assert_eq!(timeline.checkpoint_steps(), checkpoints);
+        assert_eq!(summary(timeline.curr()), summary(&straight(&init, 300)));
+    }
+
+    #[test]
+    fn tape_edit_matches_fresh_setup() {
+        //Long enough that step 200 is the first time its instruction runs
+        let mut timeline = Timeline::new(World::setup_sim(&mover(100)).unwrap(), true);
+        timeline.advance_to(300.).unwrap();
+        //Skip one grab: the arm moves around empty for a loop
+        timeline.base_mut().arms[0].instruction_tape.insert(200, &[Empty], true);
+        assert!(timeline.program_changed(200));
+        assert!(timeline.checkpoint_steps().iter().all(|&step| step <= 200));
+        timeline.advance_to(300.).unwrap();
+        let fresh = straight(&timeline.base().layout(), 300);
+        assert_eq!(summary(timeline.curr()), summary(&fresh));
+        assert_ne!(summary(timeline.curr()), summary(&straight(&mover(100), 300)));
+    }
+
+    #[test]
+    fn edit_ahead_of_cursor_doesnt_move_it() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(100)).unwrap(), true);
+        timeline.advance_to(100.).unwrap();
+        timeline.base_mut().arms[0].instruction_tape.insert(250, &[Empty], true);
+        assert!(!timeline.program_changed(250));
+        assert_eq!(timeline.time(), 100.);
+        assert_eq!(timeline.curr().arms[0].instruction_tape.instructions, timeline.base().arms[0].instruction_tape.instructions);
+    }
+
+    #[test]
+    fn checkpoints_stay_few_and_dense_near_the_cursor() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(1)).unwrap(), false);
+        let end = 20_000;
+        timeline.advance_to(end as f64).unwrap();
+        let behind: Vec<u64> = timeline.checkpoint_steps().iter().rev().map(|&step| end - step).collect();
+        assert_eq!(behind.len(), MAX_CHECKPOINTS);
+        assert_eq!(behind[..2], [0, CHECKPOINT_SPACING]);
+        //Further back, they only get further apart
+        let gaps: Vec<u64> = behind.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).all(|g| g[0] <= g[1]), "gaps going back: {gaps:?}");
+        assert!(*behind.last().unwrap() > end/4, "oldest is only {} back", behind.last().unwrap());
+    }
+
+    #[test]
+    fn changing_the_first_timestep_starts_over() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(1)).unwrap(), true);
+        timeline.advance_to(100.).unwrap();
+        //A blank before the first instruction delays the whole tape
+        timeline.base_mut().arms[0].instruction_tape.insert(0, &[Empty], false);
+        assert!(timeline.program_changed(0));
+        assert!(timeline.checkpoint_steps().is_empty());
+        assert_eq!(timeline.curr().timestep, 1);
+        assert!(timeline.at_start());
     }
 }

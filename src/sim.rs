@@ -1833,11 +1833,10 @@ impl ResetState {
 //Setup stuff
 impl World {
     //modifies the original arm to have the new instructions
-    //returns the length of the tape (repetition size)
     fn normalize_instructions(
         original: &mut Arm,
         track_maps: &TrackMaps,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         use Instr::*;
         let old_instructions = &original.instruction_tape.instructions;
         let mut instructions = Vec::with_capacity(old_instructions.len() + 8);
@@ -1920,9 +1919,8 @@ impl World {
             };
         }
         instructions.shrink_to_fit();
-        let len = instructions.len();
         original.instruction_tape = Tape::new(original.instruction_tape.first, instructions);
-        Ok(len)
+        Ok(())
     }
 
     pub fn setup_sim(init: &InitialWorld) -> Result<Self> {
@@ -1963,12 +1961,9 @@ impl World {
                 DoubleArm | TripleArm | HexArm | VanBerlo | Ravari => 30,
                 Piston => 40,
             };
-            let instr_len = World::normalize_instructions(a, &world.track_maps)?;
+            World::normalize_instructions(a, &world.track_maps)?;
             world.instruction_count += a.instruction_tape.instructions.iter()
                 .filter(|&&a| !matches!(a, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32;
-            if world.repeat_length < instr_len && !a.instruction_tape.halts(){
-                world.repeat_length = instr_len;
-            }
             if a.arm_type == VanBerlo || a.arm_type == Ravari {
                 use AtomType::*;
                 a.grabbing = true;
@@ -1988,7 +1983,8 @@ impl World {
                 }
             }
         }
-        
+        world.repeat_length = world.min_repeat_length();
+
         world.input_variants = world.glyphs.iter().enumerate().filter_map(|(id, g)| match &g.glyph_type {
             GlyphType::Input(variants, _) if variants.len() > 1 => Some((id, variants.clone())),
             _ => None,
@@ -2032,6 +2028,11 @@ impl World {
     pub fn get_first_timestep(&self) -> u64{
         if self.arms.len() == 0 { return 0 }
         self.arms.iter().map(|a|a.instruction_tape.first as u64).fold(u64::MAX, std::cmp::min)
+    }
+    //The shortest loop that fits every looping tape (halting tapes run once, so they don't count)
+    pub fn min_repeat_length(&self) -> usize{
+        self.arms.iter().filter(|a| !a.instruction_tape.halts())
+            .map(|a| a.instruction_tape.instructions.len()).max().unwrap_or(0)
     }
     pub fn get_stats(&self) -> SolutionStats {
         let cycles = (self.timestep-self.get_first_timestep()) as i32;

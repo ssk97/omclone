@@ -1,5 +1,5 @@
 use miniquad::*;
-use crate::{sim::*, parser, render_sim::*, render_library::GFXPos};
+use crate::{sim::*, parser, render_sim::*, render_library::GFXPos, timeline::Timeline};
 use smallvec::{SmallVec, smallvec};
 use std::{io::BufReader, io::prelude::*};
 
@@ -78,7 +78,8 @@ struct PathInfo{
     solution: String,
 }
 enum RunState{
-    Manual(usize), FreeRun, Crashed(XYPos)
+    //Crashed holds the timestep it crashed in
+    Manual(usize), FreeRun, Crashed(usize)
 }
 
 //An edit to one part of the layout: it moves by `delta`, then rotates by `rot` around `pivot`.
@@ -279,15 +280,8 @@ impl Press{
     }
 }
 struct Loaded{
-    base_world: World,
-    curr_world: World,
-    backup_world: World,
-    curr_time: f64,
-    curr_substep: usize,
-    backup_step: u64,
-    substep_count: usize,
+    timeline: Timeline,
     float_world: FloatWorld,
-    saved_motions: WorldStepInfo,
 
     max_timestep: usize,
     camera: CameraSetup,
@@ -312,11 +306,6 @@ struct Loaded{
     dead_tracks: Vec<TrackBindings>,
 }
 impl Loaded{
-    //Arms can only be edited before anything has moved
-    fn at_first_step(&self) -> bool{
-        self.curr_world.timestep == self.base_world.timestep && self.curr_substep == 0
-            && self.curr_time <= self.curr_world.timestep as f64
-    }
     fn part_editable(&self, part: PartId) -> bool{
         self.part_lock(part).is_none()
     }
@@ -326,7 +315,7 @@ impl Loaded{
             Some("Editing is disabled")
         } else if matches!(self.run_state, RunState::FreeRun){
             Some("Editing is disabled while running")
-        } else if matches!(part, PartId::Arm(_)) && !self.at_first_step(){
+        } else if matches!(part, PartId::Arm(_)) && !self.timeline.at_start(){
             Some("Arms can only be edited at the initial timestep")
         } else {
             None
@@ -338,11 +327,11 @@ impl Loaded{
     }
     //Replaces the starting world after a part edit, then runs back to the shown timestep
     fn commit_world(&mut self, mut world: World){
-        world.repeat_length = world.repeat_length.max(self.base_world.repeat_length);
-        let target = self.curr_time.floor() as usize;
-        self.base_world = world;
+        world.repeat_length = world.repeat_length.max(self.timeline.base().repeat_length);
+        let target = self.timeline.time().floor() as usize;
+        self.timeline.replace_base(world);
         self.tracks_dirty = true;
-        self.reset_world();
+        self.clear_crash();
         self.try_set_target_time(target);
     }
     fn check_overlap(&self, overlaps: &[Pos]) -> std::result::Result<(), String>{
@@ -359,7 +348,7 @@ impl Loaded{
         if let Some(reason) = self.part_lock(edit.part){
             return Err(reason.to_owned());
         }
-        let world = World::setup_sim(&edited_layout(&self.base_world, edit)).map_err(|e| e.to_string())?;
+        let world = World::setup_sim(&edited_layout(self.timeline.base(), edit)).map_err(|e| e.to_string())?;
         self.check_overlap(&world.part_overlaps(edit.part))?;
         self.commit_world(world);
         Ok(())
@@ -382,7 +371,7 @@ impl Loaded{
         let press_xy = self.camera.screen_to_world(px, screen_size);
         let press_hex = xy_to_pos(press_xy);
         //Arms are picked where they are now (glyphs don't move)
-        let stack = self.curr_world.parts_at(press_hex);
+        let stack = self.timeline.curr().parts_at(press_hex);
         if stack.is_empty(){
             self.selection = None;
             self.stack_view = None;
@@ -457,7 +446,7 @@ impl Loaded{
                     (KeyCode::A, _) => drag.rot += 1,
                     (KeyCode::D, _) => drag.rot -= 1,
                     (_, PartId::Arm(i)) => {
-                        let arm = &self.base_world.arms[i];
+                        let arm = &self.timeline.base().arms[i];
                         let change = if keycode == KeyCode::W {1} else {-1};
                         if !arm.arm_type.is_wheel(){
                             drag.len = (arm.len + drag.len + change).clamp(1, 3) - arm.len;
@@ -471,7 +460,7 @@ impl Loaded{
         true
     }
     fn build_preview(&self, ctx: &mut dyn RenderingBackend, edit: PartEdit) -> Preview{
-        let layout = edited_layout(&self.base_world, &edit);
+        let layout = edited_layout(self.timeline.base(), &edit);
         let (polymer, track, landing) = match edit.part{
             PartId::Glyph(i) => {
                 let glyph = &layout.glyphs[i];
@@ -488,7 +477,7 @@ impl Loaded{
         let overlaps = match &world{
             Ok(world) => {
                 float_world.generate_static(world);
-                self.base_world.overlaps_with_others(edit.part, &landing)
+                self.timeline.base().overlaps_with_others(edit.part, &landing)
             }
             Err(_) => landing.clone(),
         };
@@ -503,7 +492,7 @@ impl Loaded{
             tracks.delete(ctx);
         }
         if self.tracks_dirty{
-            let old = std::mem::replace(&mut self.tracks, setup_tracks(ctx, &self.base_world.track_maps));
+            let old = std::mem::replace(&mut self.tracks, setup_tracks(ctx, &self.timeline.base().track_maps));
             old.delete(ctx);
             self.tracks_dirty = false;
         }
@@ -511,14 +500,14 @@ impl Loaded{
         let Some(drag) = &press.drag else {return};
         let edit = press.edit(drag);
         let part = edit.part;
-        let dragging_track = matches!(part, PartId::Glyph(i) if self.base_world.glyphs[i].is_track());
+        let dragging_track = matches!(part, PartId::Glyph(i) if self.timeline.base().glyphs[i].is_track());
         let scene_tracks_part = drag.scene_tracks.as_ref().map(|(p, _)| *p);
         let new_scene_tracks = if !dragging_track{
             None
         } else if scene_tracks_part == Some(part){
             return self.refresh_preview(ctx, edit);
         } else {
-            let others = self.base_world.glyphs.iter().enumerate()
+            let others = self.timeline.base().glyphs.iter().enumerate()
                 .filter(|&(i, _)| PartId::Glyph(i) != part).map(|(_, g)| g);
             Some((part, setup_tracks(ctx, &TrackMaps::build(others).unwrap_or_default())))
         };
@@ -549,20 +538,20 @@ impl Loaded{
             Some((press, drag, drag.preview.as_ref()?))
         });
         let Some((press, drag, preview)) = dragging else {
-            let world = &self.curr_world;
+            let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, polymers: &world.polymers, area: &world.area_touched,
                 float_world: &self.float_world, hidden: None};
             render.draw(ctx, &self.camera, &self.tracks, self.show_area, &scene);
             if let Some(part) = self.highlighted_part(){
-                render.draw_hex_rings(ctx, &self.camera, &self.curr_world.part_footprint(part), SELECT_COLOR);
+                render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
             return;
         };
         let part = preview.edit.part;
         //Before anything moves, show the world as it would start; otherwise keep showing the current step
         let (world, float_world) = match &preview.world{
-            Ok(world) if self.at_first_step() => (world, &preview.float_world),
-            _ => (&self.curr_world, &self.float_world),
+            Ok(world) if self.timeline.at_start() => (world, &preview.float_world),
+            _ => (self.timeline.curr(), &self.float_world),
         };
         let scene = Scene{glyphs: &world.glyphs, polymers: &world.polymers, area: &world.area_touched,
             float_world, hidden: Some(part)};
@@ -577,156 +566,62 @@ impl Loaded{
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.overlaps, OVERLAP_COLOR);
     }
-    //Brings the other worlds up to date after the arms (tapes, types) or loop length of base_world
-    //changed. `earliest_step` is the first timestep whose behavior may have changed.
+    //Updates the timeline after the tapes or loop length in its base changed.
+    //`earliest_step` is the first timestep whose behavior may have changed.
     fn apply_base_change(&mut self, earliest_step: usize){
-        let old_start = self.base_world.timestep;
-        let new_start = self.base_world.get_first_timestep();
-        if new_start != old_start{
-            //The other worlds started at the old first timestep, so none of them can be reused
-            self.base_world.timestep = new_start;
-            self.reset_world();
-            return;
-        }
-        let earliest_step = earliest_step as u64;
-        fn sync_arms(target: &mut World, base: &World){
-            target.repeat_length = base.repeat_length;
-            for (arm, base_arm) in target.arms.iter_mut().zip(&base.arms){
-                arm.instruction_tape = base_arm.instruction_tape.clone();
-                arm.arm_type = base_arm.arm_type;
-            }
-        }
-        //The backup is either still valid (it's from before earliest_step) or gets replaced by reset_world
-        sync_arms(&mut self.backup_world, &self.base_world);
-        if earliest_step <= self.curr_time as u64 || earliest_step < self.curr_world.timestep{
-            self.reset_to(earliest_step);
-        } else {
-            sync_arms(&mut self.curr_world, &self.base_world);
+        if self.timeline.program_changed(earliest_step as u64){
+            self.clear_crash();
         }
     }
     //Sets the loop length, returning the first timestep it can affect
     fn change_repeat_length(&mut self, length: usize) -> usize{
-        let old = self.base_world.repeat_length;
-        self.base_world.repeat_length = length;
+        let base = self.timeline.base_mut();
+        let old = base.repeat_length;
+        base.repeat_length = length;
         if self.max_timestep < length{
             self.max_timestep = length;
         }
         //Arms start looping at their first instruction plus the loop length
-        self.base_world.get_first_timestep() as usize + old.min(length)
+        self.timeline.base().get_first_timestep() as usize + old.min(length)
     }
-    fn reset_to(&mut self, reset_to:u64){
-        //The backup hasn't run its own timestep yet, so it's still valid for a change at backup_step
-        if self.backup_step <= reset_to{
-            self.reset_to_backup();
-        } else {
-            self.reset_world();
+    //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
+    fn clear_crash(&mut self){
+        if let RunState::Crashed(step) = self.run_state{
+            self.run_state = RunState::Manual(step);
         }
-    }
-    fn reset_world(&mut self) {
-        if let RunState::Crashed(_) = self.run_state{
-            self.run_state = RunState::Manual(self.curr_world.timestep as usize);
-        }
-        self.saved_motions.clear();
-        self.curr_world = self.base_world.clone();
-        self.curr_time = 0.;
-        self.substep_count = 8;
-        self.curr_substep = 0;
-        self.message = None;
-
-        self.backup_world = self.base_world.clone();
-        self.backup_step = 0;
-    }
-    fn reset_to_backup(&mut self){
-        if let RunState::Crashed(_) = self.run_state{
-            self.run_state = RunState::Manual(self.curr_world.timestep as usize);
-        }
-        self.saved_motions.clear();
-        self.curr_world = self.backup_world.clone();
-        self.curr_time = self.backup_step as f64;
-        self.substep_count = 8;
-        self.curr_substep = 0;
         self.message = None;
     }
     fn try_set_target_time(&mut self, target: usize){
-        if let RunState::Crashed(_) = self.run_state{
-            if self.curr_world.timestep as usize > target{
+        if let RunState::Crashed(step) = self.run_state{
+            if step > target{
                 self.run_state = RunState::Manual(target);
             }
         } else {
             self.run_state = RunState::Manual(target);
         }
     }
-    fn advance(&mut self, substep_time: &mut f64) -> SimResult<()>{
-        if self.curr_substep == 0{
-            let failcheck = self.curr_world.prepare_step(&mut self.saved_motions, self.show_area);
-            if failcheck.is_err(){
-                self.saved_motions.clear();
-                return failcheck;
-            }
-            self.substep_count = self.curr_world.substep_count(&self.saved_motions);
-            *substep_time = 1.0/(self.substep_count as f64);
-        }
-        self.curr_substep += 1;
-        if self.show_area && self.curr_substep < self.substep_count{
-            self.curr_world.collide_substep(&self.saved_motions, self.curr_substep, self.substep_count)?;
-        }
-        if self.curr_substep == self.substep_count{
-            self.curr_substep = 0;
-            self.curr_world.finalize_step(&mut self.saved_motions, self.show_area)?;
-        }
-        Ok(())
-    }
     fn update(&mut self){
-            let target_time = match self.run_state{
-                RunState::Manual(target_timestep) => {
-                    let target_timestep = target_timestep as f64;
-                    if target_timestep > self.curr_time+1.001{
-                        target_timestep
-                    } else {
-                        f64::min(self.curr_time+self.run_speed,target_timestep)
-                    }
-                },
-                RunState::FreeRun => self.curr_time+self.run_speed,
-                RunState::Crashed(_) => return,
-            };
-            if target_time < self.curr_time{
-                self.reset_to(target_time as u64);
-            } else { //If backup is too out-of-date, catch up
-                if self.curr_time as u64 >= self.backup_step+200 {
-                    self.reset_to_backup()
+        let time = self.timeline.time();
+        let target_time = match self.run_state{
+            RunState::Manual(target_timestep) => {
+                let target_timestep = target_timestep as f64;
+                if target_timestep > time+1.001{
+                    target_timestep
+                } else {
+                    f64::min(time+self.run_speed,target_timestep)
                 }
-            }
-
-            let mut substep_time = 1.0/(self.substep_count as f64);
-            let backup_target_timestep = (target_time.floor() as u64).max(100) - 100;
-            if self.curr_world.timestep < backup_target_timestep{
-                while self.curr_world.timestep < backup_target_timestep{
-                    let output = self.advance(&mut substep_time);
-                    if let Err(output) = output{
-                        self.run_state = RunState::Crashed(output.location);
-                        self.message = Some(output.to_string());
-                        self.curr_time = self.curr_world.timestep as f64+(substep_time*self.curr_substep as f64);
-                        return;
-                    }
-                }
-                self.backup_step = backup_target_timestep;
-                self.backup_world = self.curr_world.clone();
-                assert_eq!(self.curr_substep, 0);
-                assert_eq!(backup_target_timestep, self.curr_world.timestep);
-            }
-
-            let target_timestep = target_time.floor() as u64;
-            let target_substep = (target_time.fract()*self.substep_count as f64).floor() as usize;
-            while self.curr_world.timestep < target_timestep || (self.curr_world.timestep == target_timestep && self.curr_substep < target_substep){
-                let output = self.advance(&mut substep_time);
-                if let Err(output) = output{
-                    self.run_state = RunState::Crashed(output.location);
-                    self.message = Some(output.to_string());
-                    self.curr_time = self.curr_world.timestep as f64+(substep_time*self.curr_substep as f64);
-                    return;
-                }
-            }
-            self.curr_time = target_time;
+            },
+            RunState::FreeRun => time+self.run_speed,
+            RunState::Crashed(_) => return,
+        };
+        if target_time < time{
+            self.timeline.rewind(target_time as u64);
+            self.clear_crash();
+        }
+        if let Err(err) = self.timeline.advance_to(target_time){
+            self.run_state = RunState::Crashed(self.timeline.curr().timestep as usize);
+            self.message = Some(err.to_string());
+        }
     }
 }
 enum AppState{
@@ -778,29 +673,22 @@ impl MyMiniquadApp {
 		max_timestep += world.repeat_length*2+100;
 
         let float_world = FloatWorld::new();
-        let mut saved_motions = WorldStepInfo::new();
-        saved_motions.clear();
         let camera = CameraSetup::frame_center(&world, window::screen_size());
         let tracks = setup_tracks(self.mq_ctx.as_mut(), &world.track_maps);
         //A solution that already overlaps can keep doing so
         let allow_overlap = world.has_overlap();
+        //Also enables collision checks, so edits that collide are caught
+        let show_area = true;
         let new_loaded = Loaded{
-            base_world: world.clone(),
-            backup_world: world.clone(),
-            curr_world: world,
-            curr_time: 0.,
-            curr_substep: 0,
-            backup_step: 0,
-            substep_count: 8,
-            float_world,saved_motions,
+            timeline: Timeline::new(world, show_area),
+            float_world,
         
             max_timestep,camera,tracks,solution,
             message: None,
         
             tape_mode: false,
             run_state: RunState::Manual(0),
-            //Also enables collision checks, so edits that collide are caught
-            show_area: true,
+            show_area,
             run_speed: 0.05,
             popup_reload: false,
 
@@ -857,11 +745,12 @@ impl EventHandler for MyMiniquadApp {
     fn update(&mut self) {
         if let Loaded(loaded) = &mut self.app_state{
             loaded.update();
-            let display_portion = loaded.curr_time.fract() as f32;
-            if loaded.saved_motions.arms.is_empty(){
-                loaded.float_world.generate_static(&loaded.curr_world);
+            let timeline = &loaded.timeline;
+            let display_portion = timeline.time().fract() as f32;
+            if timeline.motion().arms.is_empty(){
+                loaded.float_world.generate_static(timeline.curr());
             } else {
-                loaded.float_world.regenerate(&loaded.curr_world, &loaded.saved_motions, display_portion);
+                loaded.float_world.regenerate(timeline.curr(), timeline.motion(), display_portion);
             }
         }
     }
@@ -891,7 +780,7 @@ impl EventHandler for MyMiniquadApp {
                 Loaded(loaded) => {
                     egui::Window::new("World loaded").default_pos((0.,0.)).show(egui_ctx, |ui| {
                         ui.style_mut().spacing.slider_width = 500.;
-                        let mut target_time = loaded.curr_time.floor() as usize;
+                        let mut target_time = loaded.timeline.time().floor() as usize;
                         if loaded.max_timestep < target_time{
                             loaded.max_timestep = target_time;
                         }
@@ -919,28 +808,27 @@ impl EventHandler for MyMiniquadApp {
                             if loaded.max_timestep < target_time{
                                 loaded.max_timestep = target_time;
                             }
-                            if target_time != loaded.curr_time.floor() as usize{
+                            if target_time != loaded.timeline.time().floor() as usize{
                                 loaded.try_set_target_time(target_time);
                             }
 
-                            let min_size = loaded.base_world.arms.iter()
-                                .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()));
+                            let min_size = loaded.timeline.base().min_repeat_length();
                             ui.label("Loop length:");
 
-                            let mut repeat_length = loaded.base_world.repeat_length;
+                            let mut repeat_length = loaded.timeline.base().repeat_length;
                             let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut repeat_length)
                                 .range(min_size..=usize::MAX));
-                            if repeat_length_response.changed() && repeat_length != loaded.base_world.repeat_length{
+                            if repeat_length_response.changed() && repeat_length != loaded.timeline.base().repeat_length{
                                 let earliest_step = loaded.change_repeat_length(repeat_length);
                                 loaded.apply_base_change(earliest_step);
                             }
                             ui.separator();
                             let area_check = ui.checkbox(&mut loaded.show_area, "Collide/Area");
+                            if area_check.changed() && loaded.timeline.set_mark_area(loaded.show_area){
+                                loaded.clear_crash();
+                            }
                             if loaded.show_area{
-                                if area_check.changed() {
-                                    loaded.reset_to(0);
-                                }
-                                ui.monospace(format!("{:5}",loaded.curr_world.area_touched.len()));
+                                ui.monospace(format!("{:5}",loaded.timeline.curr().area_touched.len()));
                             }
                             ui.separator();
                             ui.label("Speed:");
@@ -956,7 +844,7 @@ impl EventHandler for MyMiniquadApp {
                             if running_free{
                                 loaded.run_state = RunState::FreeRun;
                             } else if was_freerun{
-                                loaded.try_set_target_time(loaded.curr_time.ceil() as usize);
+                                loaded.try_set_target_time(loaded.timeline.time().ceil() as usize);
                             }
                         });
                     });
@@ -977,7 +865,7 @@ impl EventHandler for MyMiniquadApp {
 							ui.add(egui::DragValue::new(&mut loaded.camera.offset.y)
 								.speed(0.1));
                             if ui.button("Center").clicked(){
-                                loaded.camera = CameraSetup::frame_center(&loaded.base_world, screen_size);
+                                loaded.camera = CameraSetup::frame_center(loaded.timeline.base(), screen_size);
                             }
 						});
 						ui.horizontal(|ui|{
@@ -999,7 +887,7 @@ impl EventHandler for MyMiniquadApp {
                                     if !loaded.solution.solution_name.contains("omclone"){
                                         loaded.solution.solution_name += "(omclone)";
                                     }
-                                    let new_solution = parser::create_solution(&loaded.base_world,
+                                    let new_solution = parser::create_solution(loaded.timeline.base(),
                                         loaded.solution.puzzle_name.clone(),
                                         loaded.solution.solution_name.clone());
                                     //Serialize fully first so a failure doesn't leave a partial file
@@ -1039,17 +927,19 @@ impl EventHandler for MyMiniquadApp {
                                 #[cfg(feature = "editor_ui")]{
                                     ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode");
                                     ui.separator();
+                                    //The blanks these add or remove don't change what runs
                                     if ui.button("space ends").clicked() {
-                                        for a in &mut loaded.base_world.arms{
+                                        let base = loaded.timeline.base_mut();
+                                        for a in &mut base.arms{
                                             let instr = &mut a.instruction_tape;
-                                            for _ in instr.instructions.len()..loaded.base_world.repeat_length{
+                                            for _ in instr.instructions.len()..base.repeat_length{
                                                 a.instruction_tape.instructions.push(Instr::Empty);
                                             }
                                         }
                                     }
                                     ui.separator();
                                     if ui.button("clear ends").clicked() {
-                                        for a in &mut loaded.base_world.arms{
+                                        for a in &mut loaded.timeline.base_mut().arms{
                                             let instr = &mut a.instruction_tape;
                                             while instr.instructions.last() == Some(&Instr::Empty){
                                                 instr.instructions.pop();
@@ -1059,7 +949,9 @@ impl EventHandler for MyMiniquadApp {
                                     if ui.button("Optimize Pistons").clicked() {
                                         let mut pistons_added = 0;
                                         let mut pistons_removed = 0;
-                                        for a in &mut loaded.base_world.arms{
+                                        //Changed on a copy, so a failed setup leaves the solution as it was
+                                        let mut layout = loaded.timeline.base().layout();
+                                        for a in &mut layout.arms{
                                             if a.instruction_tape.instructions.contains(&Instr::Extend) || a.instruction_tape.instructions.contains(&Instr::Retract) {
                                                 if a.arm_type == ArmType::PlainArm {
                                                     a.arm_type = ArmType::Piston;
@@ -1073,7 +965,7 @@ impl EventHandler for MyMiniquadApp {
                                             }
                                         }
                                         if pistons_added + pistons_removed > 0 {
-                                            match World::setup_sim(&loaded.base_world.layout()) {
+                                            match World::setup_sim(&layout) {
                                                 Ok(world) => loaded.commit_world(world),
                                                 Err(err) => loaded.message = Some(err.to_string()),
                                             }
@@ -1083,7 +975,7 @@ impl EventHandler for MyMiniquadApp {
                                     ui.separator();
                                 }
                             });
-                            let curr_timestep = loaded.curr_time.floor() as usize;
+                            let curr_timestep = loaded.timeline.time().floor() as usize;
                             let end_spacing = loaded.max_timestep.saturating_sub(curr_timestep);
                             let marker = " ".repeat(curr_timestep+3)+"V"+&" ".repeat(end_spacing);
                             //+&(" ".repeat(loaded.max_timestep-loaded.curr_timestep));
@@ -1092,7 +984,7 @@ impl EventHandler for MyMiniquadApp {
                             egui::ScrollArea::horizontal().show(ui, |ui| {
                                 ui.add(egui::Label::new(egui::RichText::new(marker).monospace()).wrap_mode(egui::TextWrapMode::Extend));
                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                    for (a_num, a) in loaded.base_world.arms.iter_mut().enumerate(){
+                                    for (a_num, a) in loaded.timeline.base_mut().arms.iter_mut().enumerate(){
                                         let text = a.instruction_tape.to_string();
                                         let mut text_buf = TapeBuffer{
                                             tape_ref: &mut a.instruction_tape,
@@ -1121,14 +1013,14 @@ impl EventHandler for MyMiniquadApp {
                                 loaded.try_set_target_time(target);
                             }
                             if let Some(mut edit_step) = earliest_edit{
-                                let min_time = loaded.base_world.arms.iter()
+                                let base = loaded.timeline.base();
+                                let min_time = base.arms.iter()
                                     .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()+arm.instruction_tape.first));
                                 if loaded.max_timestep < min_time{
                                     loaded.max_timestep = min_time;
                                 }
-                                let min_loop = loaded.base_world.arms.iter()
-                                    .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()));
-                                if loaded.base_world.repeat_length < min_loop{
+                                let min_loop = base.min_repeat_length();
+                                if base.repeat_length < min_loop{
                                     edit_step = edit_step.min(loaded.change_repeat_length(min_loop));
                                 }
                                 loaded.apply_base_change(edit_step);
@@ -1143,7 +1035,7 @@ impl EventHandler for MyMiniquadApp {
                         let mut clicked = None;
                         match &loaded.stack_view {
                             Some(stack) => for &part in stack {
-                                if ui.selectable_label(highlighted == Some(part), part_label(&loaded.base_world, part)).clicked() {
+                                if ui.selectable_label(highlighted == Some(part), part_label(loaded.timeline.base(), part)).clicked() {
                                     clicked = Some(part);
                                 }
                             },
@@ -1156,7 +1048,7 @@ impl EventHandler for MyMiniquadApp {
                         match loaded.selection {
                             Some(part) => {
                                 let locked = loaded.part_lock(part);
-                                if let Some(edit) = part_fields(ui, &loaded.base_world, part, locked) {
+                                if let Some(edit) = part_fields(ui, loaded.timeline.base(), part, locked) {
                                     if let Err(err) = loaded.apply_edit(&edit) {
                                         loaded.message = Some(err);
                                     }
@@ -1166,7 +1058,7 @@ impl EventHandler for MyMiniquadApp {
                         }
                     });
                     if let Some(press) = &loaded.press {
-                        let label = part_label(&loaded.base_world, press.part());
+                        let label = part_label(loaded.timeline.base(), press.part());
                         let error = press.drag.as_ref().and_then(|d| d.preview.as_ref())
                             .and_then(|p| p.world.as_ref().err().cloned());
                         egui::Tooltip::always_open(egui_ctx.clone(), egui::LayerId::background(),
@@ -1178,8 +1070,7 @@ impl EventHandler for MyMiniquadApp {
                         });
                     }
                     /*egui::Window::new("debug").min_width(128.).show(egui_ctx, |ui|{
-                        ui.label(format!("curr time: {}",loaded.curr_time as u64));
-                        ui.label(format!("backup time: {}",loaded.backup_step));
+                        ui.label(format!("curr time: {}",loaded.timeline.time() as u64));
                     });*/
                     egui::Window::new("Reload?").open(&mut loaded.popup_reload).show(egui_ctx, |ui| {
                         #[cfg(not(target_arch = "wasm32"))]{
