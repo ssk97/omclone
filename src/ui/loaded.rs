@@ -136,40 +136,32 @@ impl Loaded{
             StepKind::Tapes => self.restore_tapes(world),
         }
     }
-    //Parts may be numbered differently afterwards, so nothing stays selected
+    //Parts may be numbered differently afterwards, so nothing stays selected, and the tapes' selection shrinks
+    //back to the caret
     fn restore_base(&mut self, world: World){
         self.replace_base(world);
         self.stack_view = None;
         self.select(None);
+        self.tape_sel.collapse();
     }
     //Puts back the tapes and loop length from a step that only changed those. The parts are the same, so the
     //selection stays, and only what follows the first changed timestep is simulated again.
     fn restore_tapes(&mut self, world: World){
+        let Some(earliest) = self.timeline.base_mut().restore_program(world) else {return};
         let loop_len = self.timeline.base().repeat_length;
-        let saved_loop_len = world.repeat_length;
-        let mut earliest = usize::MAX;
-        let base = self.timeline.base_mut();
-        debug_assert_eq!(base.arms.len(), world.arms.len());
-        for (arm, saved) in base.arms.iter_mut().zip(world.arms){
-            if let Some(step) = first_difference(&arm.instruction_tape, &saved.instruction_tape, loop_len){
-                earliest = earliest.min(step);
-            }
-            arm.instruction_tape = saved.instruction_tape;
+        if self.max_timestep < loop_len{
+            self.max_timestep = loop_len;
         }
-        if saved_loop_len != loop_len{
-            earliest = earliest.min(self.change_repeat_length(saved_loop_len));
-        }
-        if earliest != usize::MAX{
-            self.finish_tape_edit(earliest);
-        }
+        self.finish_tape_edit(earliest);
     }
-    //Keeps the starting world from before a tape edit, unless the edit continues the last one: more typing on the
-    //same arms, starting where the caret was left. `from` and `to` are the caret before and after the edit.
-    pub(super) fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, groupable: bool){
-        if !(groupable && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
+    //Keeps the starting world from before a tape edit, unless `joins` and the edit continues the last one: more
+    //typing on the same arms, starting where the caret was left. If `extends`, more typing can join this edit.
+    //`from` and `to` are the caret before and after the edit.
+    pub(super) fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool){
+        if !(joins && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
             self.history.record(self.timeline.base().clone(), StepKind::Tapes);
         }
-        self.tape_group = groupable.then_some((arms, to));
+        self.tape_group = extends.then_some((arms, to));
     }
     //Updates everything that depends on the tapes after they changed, starting from timestep `earliest`
     pub(super) fn finish_tape_edit(&mut self, mut earliest: usize){
@@ -200,14 +192,10 @@ impl Loaded{
     }
     //Sets the loop length, returning the first timestep it can affect
     pub(super) fn change_repeat_length(&mut self, length: usize) -> usize{
-        let base = self.timeline.base_mut();
-        let old = base.repeat_length;
-        base.repeat_length = length;
         if self.max_timestep < length{
             self.max_timestep = length;
         }
-        //Arms start looping at their first instruction plus the loop length
-        self.timeline.base().get_first_timestep() as usize + old.min(length)
+        self.timeline.base_mut().set_repeat_length(length)
     }
     //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
     pub(super) fn clear_crash(&mut self){

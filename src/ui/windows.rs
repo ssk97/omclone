@@ -233,7 +233,7 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
         }
         ui.horizontal( |ui| {
             #[cfg(feature = "editor_ui")]{
-                ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode").on_hover_text("The Insert key toggles it");
+                ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode").on_hover_text("The Insert key toggles it while typing in the tapes");
                 ui.separator();
                 //The blanks these add or remove don't change what runs
                 if ui.button("space ends").clicked() {

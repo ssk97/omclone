@@ -171,6 +171,25 @@ impl Tape {
     pub fn end(&self) -> usize {
         self.first + self.instructions.len()
     }
+    //The instruction at an absolute timestep, before the tape loops
+    pub fn cell(&self, step: usize) -> Instr {
+        step.checked_sub(self.first).and_then(|i| self.instructions.get(i)).copied().unwrap_or(Instr::Empty)
+    }
+    //The first timestep at which two versions of a tape can act differently, if they differ, given the loop length
+    pub fn first_difference(&self, other: &Tape, loop_len: usize) -> Option<usize> {
+        if self.first == other.first && self.instructions == other.instructions {
+            return None;
+        }
+        let (end_a, end_b) = (self.end(), other.end());
+        let start = self.first.min(other.first);
+        //Tapes that only differ in blanks at the end act the same, so that's where they differ
+        let mut step = (start..end_a.max(end_b)).find(|&i| self.cell(i) != other.cell(i)).unwrap_or(end_a.min(end_b));
+        //A tape that halts runs on past the loop, instead of starting over
+        if self.halts() != other.halts() {
+            step = step.min(start + loop_len);
+        }
+        Some(step)
+    }
     pub fn get(&self, timestep: usize, loop_len: usize) -> Instr {
         use Instr::Empty;
         if timestep >= self.first{
@@ -2063,6 +2082,31 @@ impl World {
     pub fn min_repeat_length(&self) -> usize{
         self.arms.iter().filter(|a| !a.instruction_tape.halts())
             .map(|a| a.instruction_tape.instructions.len()).max().unwrap_or(0)
+    }
+    //Sets the loop length, returning the first timestep it can affect
+    pub fn set_repeat_length(&mut self, length: usize) -> usize{
+        let old = self.repeat_length;
+        self.repeat_length = length;
+        //Arms start looping at their first instruction plus the loop length
+        self.get_first_timestep() as usize + old.min(length)
+    }
+    //Puts back the tapes and loop length from `saved`, a version of this world with the same parts.
+    //Returns the first timestep that can act differently, if anything changed.
+    pub fn restore_program(&mut self, saved: World) -> Option<usize>{
+        let loop_len = self.repeat_length;
+        debug_assert_eq!(self.arms.len(), saved.arms.len());
+        let mut earliest = None;
+        for (arm, saved) in self.arms.iter_mut().zip(saved.arms){
+            if let Some(step) = arm.instruction_tape.first_difference(&saved.instruction_tape, loop_len){
+                earliest = Some(earliest.map_or(step, |e: usize| e.min(step)));
+            }
+            arm.instruction_tape = saved.instruction_tape;
+        }
+        if saved.repeat_length != loop_len{
+            let step = self.set_repeat_length(saved.repeat_length);
+            earliest = Some(earliest.map_or(step, |e| e.min(step)));
+        }
+        earliest
     }
     pub fn get_stats(&self) -> SolutionStats {
         let cycles = (self.timestep-self.get_first_timestep()) as i32;

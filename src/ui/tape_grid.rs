@@ -2,7 +2,7 @@
 //timeline's target timestep, so picking a cell picks a time, and typing writes instructions there.
 use super::*;
 use core::ops::Range;
-use egui::{pos2, vec2, Align2, Color32, Pos2, Rect, Sense, Stroke, StrokeKind};
+use egui::{pos2, vec2, Align2, Color32, Pos2, Rangef, Rect, Sense, Stroke, StrokeKind};
 
 fn grid_id() -> egui::Id{
     egui::Id::new("tape_grid")
@@ -34,7 +34,7 @@ impl TapeSelection{
         let anchor = self.anchor_step.unwrap_or(self.caret);
         anchor.min(self.caret)..anchor.max(self.caret)
     }
-    fn collapse(&mut self){
+    pub(super) fn collapse(&mut self){
         self.anchor_arm = self.arm;
         self.anchor_step = None;
     }
@@ -46,10 +46,6 @@ pub(super) enum TapeOp{
     Write(Vec<Vec<Instr>>),
     //Deletes the selected timesteps, or else the one before or at the caret
     EraseBack, EraseForward,
-}
-//The instruction at an absolute timestep, before the tape loops
-fn cell(tape: &Tape, step: usize) -> Instr{
-    step.checked_sub(tape.first).and_then(|i| tape.instructions.get(i)).copied().unwrap_or(Instr::Empty)
 }
 //Where the longest of these arms' tapes ends
 pub(super) fn longest_tape(arms: &[Arm]) -> usize{
@@ -94,35 +90,22 @@ pub(super) fn apply_op(tapes: &mut [Tape], steps: Range<usize>, op: &TapeOp, ove
         }
     }
 }
-//The first timestep at which two versions of a tape can act differently, if they differ, given the loop length
-pub(super) fn first_difference(a: &Tape, b: &Tape, loop_len: usize) -> Option<usize>{
-    if a.first == b.first && a.instructions == b.instructions{
-        return None;
-    }
-    let (end_a, end_b) = (a.end(), b.end());
-    let start = a.first.min(b.first);
-    //Tapes that only differ in blanks at the end act the same, so that's where they differ
-    let mut step = (start..end_a.max(end_b)).find(|&i| cell(a, i) != cell(b, i)).unwrap_or(end_a.min(end_b));
-    //A tape that halts runs on past the loop, instead of starting over
-    if a.halts() != b.halts(){
-        step = step.min(start + loop_len);
-    }
-    Some(step)
-}
-//The selected block as text, a line per arm
-fn block_text(world: &World, arms: Range<usize>, steps: Range<usize>) -> String{
-    world.arms[arms].iter()
-        .map(|a| steps.clone().map(|i| cell(&a.instruction_tape, i).to_char()).collect::<String>())
+//The timesteps `steps` of these tapes as text, a line per tape
+fn block_text<'a>(tapes: impl Iterator<Item = &'a Tape>, steps: Range<usize>) -> String{
+    tapes.map(|t| steps.clone().map(|i| t.cell(i).to_char()).collect::<String>())
         .collect::<Vec<_>>().join("\n")
 }
-//Typed or pasted text as lines of instructions, dropping anything that isn't one
-fn text_lines(text: &str) -> Vec<Vec<Instr>>{
-    text.trim_end_matches(|c| c == '\r' || c == '\n').split('\n')
-        .map(|line| line.chars().filter_map(|c| Instr::from_char(c.to_ascii_lowercase())).collect())
+//Typed or pasted text as lines of instructions. Typing skips anything that isn't one, but in pasted text it's a
+//blank, so the lines stay lined up.
+fn text_lines(text: &str, pasted: bool) -> Vec<Vec<Instr>>{
+    text.trim_end_matches(['\r', '\n']).split('\n')
+        .map(|line| line.trim_end_matches('\r').chars()
+            .filter_map(|c| Instr::from_char(c.to_ascii_lowercase()).or(pasted.then_some(Instr::Empty)))
+            .collect())
         .collect()
 }
 
-//Moves the caret, which moves the timeline there
+//Moves the caret, which moves the timeline there (unless it crashed before there)
 fn move_caret(loaded: &mut Loaded, step: usize){
     loaded.tape_sel.caret = step;
     loaded.try_set_target_time(step);
@@ -138,14 +121,15 @@ fn select_step(loaded: &mut Loaded, step: usize, extend: bool){
     move_caret(loaded, step);
 }
 //Applies an edit to the selected tapes, keeping it for undo, then moves the caret past it.
-//Single typed instructions and erases can join the undo step of the edit before.
-fn edit(loaded: &mut Loaded, op: TapeOp, groupable: bool){
+//When `typing` (a typed instruction or an erase), more typing can join its undo step, and it joins the step
+//before unless it replaces a selection.
+fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
     if !EDITOR_ENABLED{
         return;
     }
     let sel = &loaded.tape_sel;
     let (steps, from, selected) = (sel.steps(), sel.caret, sel.arms());
-    let groupable = groupable && steps.is_empty();
+    let joins = typing && steps.is_empty();
     let arms = match &op{
         TapeOp::Write(lines) if lines.len() > 1 => {
             selected.start..(selected.start + lines.len()).min(loaded.timeline.base().arms.len())
@@ -156,18 +140,18 @@ fn edit(loaded: &mut Loaded, op: TapeOp, groupable: bool){
     let mut tapes: Vec<Tape> = base.arms[arms.clone()].iter().map(|a| a.instruction_tape.clone()).collect();
     let Some(caret) = apply_op(&mut tapes, steps, &op, loaded.tape_mode) else {return};
     let earliest = arms.clone().zip(&tapes)
-        .filter_map(|(i, tape)| first_difference(&base.arms[i].instruction_tape, tape, base.repeat_length))
+        .filter_map(|(i, tape)| base.arms[i].instruction_tape.first_difference(tape, base.repeat_length))
         .min();
     match earliest{
         Some(earliest) => {
-            loaded.record_tape_edit(arms.clone(), from, caret, groupable);
+            loaded.record_tape_edit(arms.clone(), from, caret, joins, typing);
             for (i, tape) in arms.clone().zip(tapes){
                 loaded.timeline.base_mut().arms[i].instruction_tape = tape;
             }
             loaded.finish_tape_edit(earliest);
         }
         //Nothing changed (like a blank typed past the end), but the caret still moves on
-        None => if groupable && loaded.tape_group == Some((arms.clone(), from)){
+        None => if joins && loaded.tape_group == Some((arms.clone(), from)){
             loaded.tape_group = Some((arms.clone(), caret));
         }
     }
@@ -182,15 +166,19 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
     use egui::{Event, Key};
     let arm_count = loaded.timeline.base().arms.len();
     match event{
-        //egui-miniquad pastes as Text, but other backends send Paste
-        Event::Text(text) | Event::Paste(text) =>
-            edit(loaded, TapeOp::Write(text_lines(text)), matches!(event, Event::Text(_)) && text.chars().count() == 1),
+        //Typing gives a character at a time. egui-miniquad pastes as Text too (other backends send Paste), so a
+        //one-character paste counts as typing.
+        Event::Text(text) | Event::Paste(text) => {
+            let typed = text.chars().count() == 1;
+            edit(loaded, TapeOp::Write(text_lines(text, !typed)), typed);
+        }
         Event::Copy | Event::Cut => {
             let sel = &loaded.tape_sel;
             if sel.steps().is_empty(){
                 return;
             }
-            ui.ctx().copy_text(block_text(loaded.timeline.base(), sel.arms(), sel.steps()));
+            let tapes = loaded.timeline.base().arms[sel.arms()].iter().map(|a| &a.instruction_tape);
+            ui.ctx().copy_text(block_text(tapes, sel.steps()));
             if matches!(event, Event::Cut){
                 edit(loaded, TapeOp::EraseForward, false);
             }
@@ -223,6 +211,9 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
                     (sel.anchor_arm, sel.arm, sel.anchor_step) = (0, arm_count-1, Some(0));
                     move_caret(loaded, end);
                 }
+                //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it
+                Key::Z if modifiers.command => if modifiers.shift {loaded.redo()} else {loaded.undo()},
+                Key::Y if modifiers.command => loaded.redo(),
                 Key::Backspace => edit(loaded, TapeOp::EraseBack, true),
                 Key::Delete => edit(loaded, TapeOp::EraseForward, true),
                 Key::Insert => loaded.tape_mode = !loaded.tape_mode,
@@ -246,11 +237,13 @@ struct Layout{
     origin: Pos2,
     view: Rect,
     cell: egui::Vec2,
+    //The digits in the arm numbers, which the gutter fits
+    digits: usize,
     gutter: f32,
     ruler: f32,
     ruler_below: f32,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Hit{
     Cell(usize, usize), Ruler(usize), Gutter(usize)
 }
@@ -269,14 +262,16 @@ impl Layout{
         let index = |offset: f32, size: f32, count: usize| ((offset / size).max(0.) as usize).min(count-1);
         (index(pos.y - self.origin.y - self.ruler, self.cell.y, arms), index(pos.x - self.origin.x - self.gutter, self.cell.x, steps))
     }
-    fn hit(&self, pos: Pos2, arms: usize, steps: usize) -> Hit{
+    //What's at `pos`. The corners where the rulers meet the arm numbers have nothing.
+    fn hit(&self, pos: Pos2, arms: usize, steps: usize) -> Option<Hit>{
         let (arm, step) = self.cell_at(pos, arms, steps);
-        if pos.y < self.view.min.y + self.ruler || pos.y >= self.view.max.y - self.ruler_below{
-            Hit::Ruler(step)
-        } else if pos.x < self.view.min.x + self.gutter{
-            Hit::Gutter(arm)
-        } else {
-            Hit::Cell(arm, step)
+        let on_ruler = pos.y < self.view.min.y + self.ruler || pos.y >= self.view.max.y - self.ruler_below;
+        let on_gutter = pos.x < self.view.min.x + self.gutter;
+        match (on_ruler, on_gutter){
+            (true, true) => None,
+            (true, false) => Some(Hit::Ruler(step)),
+            (false, true) => Some(Hit::Gutter(arm)),
+            (false, false) => Some(Hit::Cell(arm, step)),
         }
     }
     //Which of `count` rows or columns of `size`, the first starting at `start`, are within the view's span `view`
@@ -354,13 +349,16 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
     if arm_count == 0{
         return ui.weak("No arms").rect.height();
     }
-    //Something else, like the timeline slider or running, can move the caret
-    let caret = loaded.cursor_step();
+    //Something else, like the timeline slider or running, can move the caret. A crash only stops the timeline
+    //short of the caret, which stays where it is, so typing past the crash carries on in order.
+    let time = loaded.cursor_step();
+    let crashed = matches!(loaded.run_state, RunState::Crashed(_));
     let sel = &mut loaded.tape_sel;
-    if caret != sel.caret{
-        sel.caret = caret;
+    if time != sel.caret && !(crashed && sel.caret > time){
+        sel.caret = time;
         sel.anchor_step = None;
     }
+    let caret = sel.caret;
     sel.arm = sel.arm.min(arm_count-1);
     sel.anchor_arm = sel.anchor_arm.min(arm_count-1);
 
@@ -376,27 +374,27 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
     let step_count = loaded.max_timestep.max(longest_tape(&loaded.timeline.base().arms)).max(caret) + 16;
 
     let size = vec2(gutter + step_count as f32 * cell.x, ruler + arm_count as f32 * cell.y + ruler_below);
-    //A wheel notch scrolls one arm, or sideways one ruler tick, smoothly. Partial notches from trackpads and
-    //free-spinning wheels scroll part of the way. egui scrolls `line_scroll_speed` per line, and wheels give a line per
-    //notch on Windows (see mouse_wheel_event) and Linux, but miniquad multiplies macOS wheel mice by 10, and browsers
-    //report around 100 pixels a notch.
-    let lines_per_notch = if cfg!(target_os = "macos") {10.} else if cfg!(target_arch = "wasm32") {100.} else {1.};
+    //A wheel notch, which is a line (see mouse_wheel_event), scrolls one arm, or sideways one ruler tick, smoothly.
+    //Partial notches from trackpads and free-spinning wheels scroll part of the way. egui scrolls
+    //`line_scroll_speed` per line, so this undoes that.
     let line_speed = ui.ctx().options(|o| o.input_options.line_scroll_speed);
-    let per_line = vec2(5. * cell.x, cell.y) / (line_speed * lines_per_notch);
+    let per_line = vec2(5. * cell.x, cell.y) / line_speed;
     egui::ScrollArea::both().auto_shrink([false, true]).wheel_scroll_multiplier(per_line).show_viewport(ui, |ui, viewport| {
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let response = ui.interact(rect, grid_id(), Sense::click_and_drag());
         //The viewport can be larger than the grid (it's sized before the scroll area shrinks to fit), and the
         //rulers and arm numbers have to stay on the grid
         let view = viewport.translate(rect.min.to_vec2()).intersect(rect);
-        let layout = Layout{origin: rect.min, view, cell, gutter, ruler, ruler_below};
+        let layout = Layout{origin: rect.min, view, cell, digits, gutter, ruler, ruler_below};
 
         let (pointer, pressed, down, shift, pressed_anywhere) = ui.input(|i|
             (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(), i.modifiers.shift, i.pointer.any_pressed()));
         if let Some(pos) = pointer{
             if pressed && response.is_pointer_button_down_on(){
                 response.request_focus();
-                press(loaded, layout.hit(pos, arm_count, step_count), shift);
+                if let Some(hit) = layout.hit(pos, arm_count, step_count){
+                    press(loaded, hit, shift);
+                }
             } else if down && response.is_pointer_button_down_on(){
                 let (arm, step) = layout.cell_at(pos, arm_count, step_count);
                 drag(loaded, arm, step);
@@ -418,12 +416,15 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             }
         }
 
+        //Only along the way the caret moved, so running doesn't pull the view back to the caret's arm
         let sel = &mut loaded.tape_sel;
-        if (sel.arm, sel.caret) != sel.shown{
+        let (arm_moved, step_moved) = (sel.arm != sel.shown.0, sel.caret != sel.shown.1);
+        if arm_moved || step_moved{
             sel.shown = (sel.arm, sel.caret);
             //Clear of the arm numbers and the timestep rulers, which cover the grid's edges
-            ui.scroll_to_rect(Rect::from_min_max(pos2(layout.x(sel.caret) - gutter, layout.y(sel.arm) - ruler),
-                pos2(layout.x(sel.caret + 1), layout.y(sel.arm + 1) + ruler_below)), None);
+            let x = if step_moved {Rangef::new(layout.x(sel.caret) - gutter, layout.x(sel.caret + 1))} else {view.x_range()};
+            let y = if arm_moved {Rangef::new(layout.y(sel.arm) - ruler, layout.y(sel.arm + 1) + ruler_below)} else {view.y_range()};
+            ui.scroll_to_rect(Rect::from_x_y_ranges(x, y), None);
         }
         paint(ui, loaded, &layout, step_count, &font, &small, response.has_focus());
     });
@@ -512,12 +513,11 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
     paint_ruler(Rect::from_min_max(pos2(view.min.x, view.max.y - layout.ruler_below), view.max), false);
     let gutter = Rect::from_min_size(view.min, vec2(layout.gutter, view.height()));
     painter.rect_filled(gutter, 0., fill);
-    let digits = arm_count.to_string().len().max(2);
     let selected_arms = sel.arms();
     for arm in arms{
         let color = if selected_arms.contains(&arm) {text_color} else {visuals.weak_text_color()};
         painter.text(pos2(gutter.max.x - 5., layout.cell_rect(arm, 0).center().y), Align2::RIGHT_CENTER,
-            format!("{:0digits$}", arm + 1), font.clone(), color);
+            format!("{:0width$}", arm + 1, width = layout.digits), font.clone(), color);
     }
     painter.vline(gutter.max.x, gutter.y_range(), border);
     painter.rect_filled(Rect::from_min_size(view.min, vec2(layout.gutter, layout.ruler)), 0., fill);
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn pasted_lines_stay_aligned() {
-        let lines = text_lines("d \r\n  f\n");
+        let lines = text_lines("d \r\n  f\n", true);
         assert_eq!(lines, vec![vec![RotateClockwise, Empty], vec![Empty, Empty, Grab]]);
         let mut tapes = [tape(0, vec![Extend]), tape(0, vec![Extend])];
         assert_eq!(apply_op(&mut tapes, 0..0, &TapeOp::Write(lines), false), Some(3));
@@ -599,21 +599,31 @@ mod tests {
         assert_tape(&tapes[1], 2, &[Grab, Extend]);
 
         let mut world_tapes = vec![tape(1, vec![RotateClockwise, Grab]), tape(0, vec![Extend])];
-        let text = world_tapes.iter().map(|t| (0..4).map(|i| cell(t, i).to_char()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        let text = block_text(world_tapes.iter(), 0..4);
         assert_eq!(text, " df \nw   ");
-        assert_eq!(apply_op(&mut world_tapes, 0..0, &TapeOp::Write(text_lines(&text)), true), Some(4));
+        assert_eq!(apply_op(&mut world_tapes, 0..0, &TapeOp::Write(text_lines(&text, true)), true), Some(4));
         assert_tape(&world_tapes[0], 1, &[RotateClockwise, Grab]);
     }
 
     #[test]
-    fn differences_start_at_the_first_changed_step() {
-        let a = tape(2, vec![RotateClockwise, Grab, Drop]);
-        assert_eq!(first_difference(&a, &a.clone(), 10), None);
-        assert_eq!(first_difference(&a, &tape(2, vec![RotateClockwise, Extend, Drop]), 10), Some(3));
-        assert_eq!(first_difference(&a, &tape(1, vec![Extend, RotateClockwise, Grab, Drop]), 10), Some(1));
-        //Only blanks at the end differ
-        assert_eq!(first_difference(&a, &tape(2, vec![RotateClockwise, Grab, Drop, Empty]), 10), Some(5));
-        //Halting changes what happens once the loop would start over
-        assert_eq!(first_difference(&a, &tape(2, vec![RotateClockwise, Grab, Drop, Empty, Empty, Halt]), 4), Some(6));
+    fn pasted_unknown_characters_are_blanks() {
+        //So the lines after them stay lined up
+        assert_eq!(text_lines("d.f\nBx", true), vec![vec![RotateClockwise, Empty, Grab], vec![Halt, Empty]]);
+        //Typing one isn't a blank
+        assert_eq!(text_lines("z", false), vec![Vec::<Instr>::new()]);
+        assert_eq!(text_lines("D", false), vec![vec![RotateClockwise]]);
+    }
+
+    #[test]
+    fn ruler_and_gutter_corners_hit_nothing() {
+        let layout = Layout{origin: pos2(0., 0.), view: Rect::from_min_max(pos2(0., 0.), pos2(200., 100.)),
+            cell: vec2(10., 20.), digits: 2, gutter: 30., ruler: 20., ruler_below: 25.};
+        let hit = |x, y| layout.hit(pos2(x, y), 10, 50);
+        assert_eq!(hit(5., 5.), None);
+        assert_eq!(hit(5., 90.), None);
+        assert_eq!(hit(55., 5.), Some(Hit::Ruler(2)));
+        assert_eq!(hit(55., 90.), Some(Hit::Ruler(2)));
+        assert_eq!(hit(5., 50.), Some(Hit::Gutter(1)));
+        assert_eq!(hit(55., 50.), Some(Hit::Cell(1, 2)));
     }
 }

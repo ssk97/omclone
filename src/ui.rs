@@ -20,7 +20,7 @@ mod windows;
 use board::*;
 use layout_edit::*;
 use loaded::{Loaded, RunState};
-use tape_grid::{TapeSelection, first_difference, longest_tape};
+use tape_grid::{TapeSelection, longest_tape};
 use undo::UndoHistory;
 use windows::PathText;
 
@@ -235,9 +235,11 @@ impl EventHandler for MyMiniquadApp {
     }
 
     fn mouse_wheel_event(&mut self, dx: f32, dy: f32) {
-        //miniquad gives Windows wheel movement in its raw units, 120 per notch, but egui takes it as lines
-        let notch = if cfg!(windows) {120.} else {1.};
-        self.egui_mq.mouse_wheel_event(dx / notch, dy / notch);
+        //egui takes wheel movement as lines, a notch each. miniquad gives them on Linux, but Windows' raw units are
+        //120 a notch, miniquad multiplies macOS wheel mice by 10, and browsers report around 100 pixels a notch.
+        let per_line = if cfg!(windows) {120.} else if cfg!(target_os = "macos") {10.}
+            else if cfg!(target_arch = "wasm32") {100.} else {1.};
+        self.egui_mq.mouse_wheel_event(dx / per_line, dy / per_line);
         if let Loaded(loaded) = &mut self.app_state{
             //While a part is held, the wheel picks between the parts under it
             if loaded.wheel(dy){
@@ -326,10 +328,10 @@ impl EventHandler for MyMiniquadApp {
     ) {
         self.keymods = keymods;
         if let Loaded(loaded) = &mut self.app_state{
-            //Typing in a text box or the tapes takes priority over the part hotkeys, though undo works in the tapes
+            //Typing in a text box or the tapes takes priority over the part hotkeys. The tapes handle undo
+            //themselves, so it happens in order with the keys typed before it.
             let ctx = self.egui_mq.egui_ctx();
-            let undo_key = (keymods.ctrl || keymods.logo) && matches!(keycode, KeyCode::Z | KeyCode::Y);
-            let typing = ctx.text_edit_focused() || (tape_grid::has_focus(ctx) && !undo_key);
+            let typing = ctx.text_edit_focused() || tape_grid::has_focus(ctx);
             if !typing && loaded.handle_key(keycode, keymods){
                 return;
             }

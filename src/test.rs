@@ -474,6 +474,18 @@ mod tape_edit_tests {
         t.insert(1, &[], false);
         assert_tape(&t, 3, &[Grab]);
     }
+
+    #[test]
+    fn differences_start_at_the_first_changed_step() {
+        let a = tape(2, vec![RotateClockwise, Grab, Drop]);
+        assert_eq!(a.first_difference(&a.clone(), 10), None);
+        assert_eq!(a.first_difference(&tape(2, vec![RotateClockwise, Extend, Drop]), 10), Some(3));
+        assert_eq!(a.first_difference(&tape(1, vec![Extend, RotateClockwise, Grab, Drop]), 10), Some(1));
+        //Only blanks at the end differ
+        assert_eq!(a.first_difference(&tape(2, vec![RotateClockwise, Grab, Drop, Empty]), 10), Some(5));
+        //Halting changes what happens once the loop would start over
+        assert_eq!(a.first_difference(&tape(2, vec![RotateClockwise, Grab, Drop, Empty, Empty, Halt]), 4), Some(6));
+    }
 }
 
 //Repeat blocks, wheels, polymers, and the solution file format
@@ -1033,6 +1045,28 @@ mod timeline_tests {
         let fresh = straight(&timeline.base().layout(), 300);
         assert_eq!(summary(timeline.curr()), summary(&fresh));
         assert_ne!(summary(timeline.curr()), summary(&straight(&mover(100), 300)));
+    }
+
+    //Undoing a tapes-only edit puts back the old program, re-simulating only from where it acts differently
+    #[test]
+    fn restored_program_matches_fresh_setup() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(100)).unwrap(), true);
+        let saved = timeline.base().clone();
+        timeline.base_mut().arms[0].instruction_tape.insert(200, &[Empty], false);
+        let longer = timeline.base().min_repeat_length() + 3;
+        let earliest = timeline.base_mut().set_repeat_length(longer).min(200);
+        timeline.program_changed(earliest as u64);
+        timeline.advance_to(450.).unwrap();
+
+        let earliest = timeline.base_mut().restore_program(saved.clone()).unwrap();
+        assert_eq!(earliest, 200);
+        timeline.program_changed(earliest as u64);
+        assert!(timeline.checkpoint_steps().iter().all(|&step| step <= 200));
+        timeline.advance_to(450.).unwrap();
+        assert_eq!(summary(timeline.curr()), summary(&straight(&saved.layout(), 450)));
+        assert_eq!(timeline.base().repeat_length, saved.repeat_length);
+        //Nothing left to put back
+        assert_eq!(timeline.base_mut().restore_program(saved), None);
     }
 
     #[test]
