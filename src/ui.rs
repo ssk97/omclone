@@ -47,6 +47,8 @@ pub struct MyMiniquadApp {
     dragging: Option<GFXPos>,
     //Where the right button went down, to tell a click from panning
     right_press: Option<(f32, f32)>,
+    //The last mouse position, which the wheel zooms around
+    mouse: (f32, f32),
     //As of the last key event
     keymods: KeyMods,
 }
@@ -55,7 +57,7 @@ impl MyMiniquadApp {
     pub fn new() -> Self {
         let mut mq_ctx = window::new_rendering_backend();
         let render_data = RenderDataBase::new(mq_ctx.as_mut());
-        let (base_str, puzzle_str, solution_str) = get_default_path_strs();
+        let (base_str, puzzle_str, solution_str) = omclone::default_paths();
         let base = String::from(base_str);
         let puzzle = String::from(puzzle_str);
         let solution = String::from(solution_str);
@@ -65,7 +67,7 @@ impl MyMiniquadApp {
         Self {
             mq_ctx, egui_mq,
             render_data,app_state,unloaded_info,
-            extra_message:None, dragging: None, right_press: None, keymods: KeyMods::default(),
+            extra_message:None, dragging: None, right_press: None, mouse: (0., 0.), keymods: KeyMods::default(),
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -81,17 +83,24 @@ impl MyMiniquadApp {
         let world = World::setup_sim(&init)?;
         max_timestep += world.repeat_length*2+100;
 
-        let camera = CameraSetup::frame_center(&world, window::screen_size());
-        let tracks = setup_tracks(self.mq_ctx.as_mut(), &world.track_maps);
-        self.set_app_state(Loaded(Loaded::new(world, solution, max_timestep, camera, tracks)));
+        let camera = CameraSetup::frame_center(&world, logical_screen_size());
+        self.app_state = Loaded(Loaded::new(world, solution, max_timestep, camera));
         Ok(())
     }
-    //Replaces the app state, freeing the rendering data of a solution that was loaded
-    fn set_app_state(&mut self, state: AppState){
-        if let Loaded(old) = std::mem::replace(&mut self.app_state, state){
-            old.delete_gfx(self.mq_ctx.as_mut());
-        }
+    //A solution names its puzzle by the puzzle's file name, which loading doesn't check
+    #[cfg(not(target_arch = "wasm32"))]
+    fn puzzle_mismatch(&self) -> Option<String>{
+        let Loaded(loaded) = &self.app_state else {return None};
+        let wanted = &loaded.solution.puzzle_name;
+        let file = Path::new(&self.unloaded_info.puzzle).file_stem()?.to_string_lossy();
+        (!file.eq_ignore_ascii_case(wanted)).then(||
+            format!("The solution is for puzzle \"{wanted}\", but the puzzle file is \"{file}\". Check that they match."))
     }
+}
+//A mouse position in logical pixels (see logical_screen_size)
+fn logical(x: f32, y: f32) -> (f32, f32){
+    let dpi = window::dpi_scale();
+    (x/dpi, y/dpi)
 }
 
 
@@ -131,6 +140,7 @@ impl EventHandler for MyMiniquadApp {
     fn update(&mut self) {
         if let Loaded(loaded) = &mut self.app_state{
             loaded.update();
+            loaded.refresh_preview();
             let timeline = &loaded.timeline;
             let display_portion = timeline.time().fract() as f32;
             if timeline.motion().arms.is_empty(){
@@ -145,14 +155,13 @@ impl EventHandler for MyMiniquadApp {
         let ctx = self.mq_ctx.as_mut();
         ctx.clear(Some((1., 1., 1., 1.)), None, None);
         ctx.begin_default_pass(PassAction::clear_color(0.5, 0.5, 0.5, 1.0));
-        if let Loaded(loaded) = &mut self.app_state{
-            loaded.refresh_part_gfx(ctx);
-            loaded.draw_world(&self.render_data, ctx);
+        if let Loaded(loaded) = &self.app_state{
+            loaded.draw_world(&mut self.render_data, ctx);
         }
         ctx.end_render_pass();
         
         let mut do_loading = AppStateUpdate::NoChange;
-        let screen_size = window::screen_size();
+        let screen_size = logical_screen_size();
         self.egui_mq.run(ctx, |_mq_ctx, egui_ctx|{
             windows::message_window(egui_ctx, "app_message", &mut self.extra_message);
             match &mut self.app_state{
@@ -179,10 +188,11 @@ impl EventHandler for MyMiniquadApp {
         match do_loading{
             AppStateUpdate::NoChange => {},
             AppStateUpdate::ResetHome => {
-                self.set_app_state(NotLoaded);
+                self.app_state = NotLoaded;
             }
             AppStateUpdate::Load => {
-                let mut do_load = || -> Result<()>{
+                //Loads, returning a warning if there's something to check
+                let mut do_load = || -> Result<Option<String>>{
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         let dat = &self.unloaded_info;
@@ -191,7 +201,7 @@ impl EventHandler for MyMiniquadApp {
                         let solution_path = base_path.join(&dat.solution);
                         let f_sol = File::open(&solution_path)?;
                         self.load(f_puzzle, f_sol)?;
-                        Ok(())
+                        Ok(self.puzzle_mismatch())
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -202,18 +212,19 @@ impl EventHandler for MyMiniquadApp {
                         let name = JS_SOLUTION_NAME.lock().unwrap().take();
                         self.unloaded_info.solution = name.unwrap_or(String::from("omclone.solution"));
                         self.load(f_puzzle.as_slice(), f_sol.as_slice())?;
-                        Ok(())
+                        Ok(None)
                     }
                 };
 
-                if let Err(err)= do_load(){
-                    self.extra_message = Some(err.to_string());
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        *JS_SOLUTION_INPUT.lock().unwrap() = None;
+                match do_load(){
+                    Err(err) => {
+                        self.extra_message = Some(err.to_string());
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            *JS_SOLUTION_INPUT.lock().unwrap() = None;
+                        }
                     }
-                } else {
-                    self.extra_message = None;
+                    Ok(warning) => self.extra_message = warning,
                 }
             }
         }
@@ -224,13 +235,15 @@ impl EventHandler for MyMiniquadApp {
 
     fn mouse_motion_event(&mut self, x: f32, y: f32) {
         self.egui_mq.mouse_motion_event( x, y);
+        let (x, y) = logical(x, y);
+        self.mouse = (x, y);
         if let Loaded(loaded) = &mut self.app_state{
             if let Some(drag_last) = &mut self.dragging{
                 loaded.camera.pan_pixels(x-drag_last[0], y-drag_last[1]);
                 *drag_last = [x,y];
             }
             let over_ui = self.egui_mq.egui_ctx().is_pointer_over_egui();
-            loaded.pointer_moved((x, y), window::screen_size(), over_ui);
+            loaded.pointer_moved((x, y), logical_screen_size(), over_ui);
         }
     }
 
@@ -248,13 +261,7 @@ impl EventHandler for MyMiniquadApp {
         }
         if !self.egui_mq.egui_ctx().is_pointer_over_egui(){
             if let Loaded(loaded) = &mut self.app_state{
-                let cam = &mut loaded.camera;
-                if dy.is_sign_negative() && cam.scale_base > 0.002{
-                    cam.scale_base *= 0.9;
-                }
-                if dy.is_sign_positive() && cam.scale_base < 0.2{
-                    cam.scale_base *= 1.1;
-                }
+                loaded.camera.zoom_at(self.mouse, logical_screen_size(), dy / per_line);
             }
         }
     }
@@ -266,6 +273,7 @@ impl EventHandler for MyMiniquadApp {
         y: f32,
     ) {
         self.egui_mq.mouse_button_down_event(mb, x, y);
+        let (x, y) = logical(x, y);
         if !self.egui_mq.egui_ctx().is_pointer_over_egui(){
             match mb {
                 MouseButton::Right | MouseButton::Middle => {
@@ -275,7 +283,7 @@ impl EventHandler for MyMiniquadApp {
                     }
                 }
                 MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
-                    loaded.press((x, y), window::screen_size(), self.keymods);
+                    loaded.press((x, y), logical_screen_size(), self.keymods);
                 },
                 _ => {}
             }
@@ -289,6 +297,7 @@ impl EventHandler for MyMiniquadApp {
         y: f32,
     ) {
         self.egui_mq.mouse_button_up_event(mb, x, y);
+        let (x, y) = logical(x, y);
         match mb {
             MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
                 loaded.release();
@@ -313,7 +322,7 @@ impl EventHandler for MyMiniquadApp {
         //Hotkeys for a held part aren't typed anywhere
         if let Loaded(loaded) = &self.app_state{
             let ctx = self.egui_mq.egui_ctx();
-            if loaded.press.is_some() && !ctx.text_edit_focused() && !tape_grid::has_focus(ctx){
+            if loaded.tool.press().is_some() && !ctx.text_edit_focused() && !tape_grid::has_focus(ctx){
                 return;
             }
         }

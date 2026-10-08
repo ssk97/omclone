@@ -119,12 +119,12 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
 
             let mut repeat_length = loaded.timeline.base().repeat_length;
             //Typed lengths apply on Enter, since each change re-simulates
-            let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut repeat_length)
+            let lock = loaded.edit_lock();
+            let repeat_length_response = ui.add_enabled(lock.is_none(), egui::DragValue::new(&mut repeat_length)
                 .range(min_size..=MAX_TIMESTEP_FIELD.max(min_size)).clamp_existing_to_range(false)
                 .update_while_editing(false));
-            if repeat_length_response.changed() && repeat_length != loaded.timeline.base().repeat_length{
-                let earliest_step = loaded.change_repeat_length(repeat_length);
-                loaded.apply_base_change(earliest_step);
+            if locked_hover(repeat_length_response, lock).changed() && repeat_length != loaded.timeline.base().repeat_length{
+                loaded.edit_repeat_length(repeat_length);
             }
             ui.separator();
             let area_check = ui.checkbox(&mut loaded.show_area, "Collide/Area");
@@ -168,7 +168,7 @@ pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, scree
         });
         ui.horizontal(|ui|{
             ui.label("zoom:");
-            ui.add(egui::Slider::new(&mut loaded.camera.scale_base,0.002 ..= 0.2)
+            ui.add(egui::Slider::new(&mut loaded.camera.scale_base,ZOOM_RANGE)
                 .logarithmic(true));
         });
     });
@@ -202,7 +202,10 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
                     Ok(())
                 });
                 loaded.message = Some(match saved {
-                    Ok(()) => String::from("Saved!"),
+                    Ok(()) => {
+                        loaded.dirty = false;
+                        String::from("Saved!")
+                    }
                     Err(err) => format!("Save failed: {err}"),
                 });
             }
@@ -211,6 +214,9 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
                 loaded.popup_reload = true;
             }
         });
+        if loaded.dirty{
+            ui.weak("Unsaved changes");
+        }
     });
 }
 //`extra_message` reports what "Optimize Pistons" changed
@@ -235,25 +241,6 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
             #[cfg(feature = "editor_ui")]{
                 ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode").on_hover_text("The Insert key toggles it while typing in the tapes");
                 ui.separator();
-                //The blanks these add or remove don't change what runs
-                if ui.button("space ends").clicked() {
-                    let base = loaded.timeline.base_mut();
-                    for a in &mut base.arms{
-                        let instr = &mut a.instruction_tape;
-                        for _ in instr.instructions.len()..base.repeat_length{
-                            a.instruction_tape.instructions.push(Instr::Empty);
-                        }
-                    }
-                }
-                ui.separator();
-                if ui.button("clear ends").clicked() {
-                    for a in &mut loaded.timeline.base_mut().arms{
-                        let instr = &mut a.instruction_tape;
-                        while instr.instructions.last() == Some(&Instr::Empty){
-                            instr.instructions.pop();
-                        }
-                    }
-                }
                 let lock = loaded.edit_lock();
                 let optimize = ui.add_enabled(lock.is_none(), egui::Button::new("Optimize Pistons"));
                 if locked_hover(optimize, lock).clicked() {
@@ -400,7 +387,7 @@ fn track_section(ui: &mut egui::Ui, loaded: &mut Loaded, glyph: usize){
     let mut finished = false;
     ui.add_enabled_ui(lock.is_none(), |ui| {
         ui.horizontal(|ui| {
-            let current = loaded.track_mode.as_ref().filter(|m| m.glyph == Some(glyph)).map(|m| m.tool);
+            let current = loaded.tool.track_mode().filter(|m| m.glyph == Some(glyph)).map(|m| m.tool);
             for (tool, label) in [(TrackTool::AddFront, "Add to front"), (TrackTool::AddBack, "Add to back"),
                 (TrackTool::Remove, "Remove hexes")]
             {
@@ -464,7 +451,7 @@ fn add_part_menu(ui: &mut egui::Ui, loaded: &mut Loaded){
                     new_part_button(ui, loaded, NewPart::Glyph(glyph_type));
                 }
             });
-            let drawing = loaded.track_mode.as_ref().is_some_and(|m| m.glyph.is_none());
+            let drawing = loaded.tool.track_mode().is_some_and(|m| m.glyph.is_none());
             let track = ui.selectable_label(drawing, "Track").on_hover_text("Click the board to start it, and drag to draw it");
             if track.clicked(){
                 if drawing {loaded.end_track_mode()} else {loaded.start_new_track()}
@@ -475,16 +462,16 @@ fn add_part_menu(ui: &mut egui::Ui, loaded: &mut Loaded){
     locked_hover(menu.response, lock);
 }
 fn new_part_button(ui: &mut egui::Ui, loaded: &mut Loaded, part: NewPart){
-    let placing = loaded.placing.as_ref().is_some_and(|p| p.part == part);
+    let placing = loaded.tool.placing().is_some_and(|p| p.part == part);
     if ui.selectable_label(placing, part.name()).clicked(){
-        if placing {loaded.placing = None} else {loaded.start_placing(part)}
+        if placing {loaded.end_tool()} else {loaded.start_placing(part)}
         ui.close();
     }
 }
 //What the mouse is doing on the board: the part picked from the stack under it, or the part or tool it's using
 pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
     let base = loaded.timeline.base();
-    let (title, note) = if let Some(press) = &loaded.press {
+    let (title, note) = if let Some(press) = loaded.tool.press() {
         let copy = if press.duplicate {", copying"} else {""};
         let title = format!("{} ({}/{}){copy}", part_label(base, press.part()), press.cand+1, press.stack.len());
         //Why it isn't moving, unless nothing can be edited anyway
@@ -492,7 +479,7 @@ pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
         (title, lock.map(str::to_owned))
     } else if loaded.pointer_over_ui {
         return;
-    } else if let Some(mode) = &loaded.track_mode {
+    } else if let Some(mode) = loaded.tool.track_mode() {
         let title = match mode.glyph{
             None => String::from("Click to start a new track, then drag to draw it"),
             Some(i) => {
@@ -505,12 +492,12 @@ pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
             }
         };
         (title, Some(String::from("Esc or right-click to finish")))
-    } else if let Some(placing) = &loaded.placing {
+    } else if let Some(placing) = loaded.tool.placing() {
         (format!("Placing {}", placing.part.name()), Some(String::from("Shift+click to place more; Esc or right-click to stop")))
     } else {
         return;
     };
-    let refusal = loaded.stroke.as_ref().and_then(|s| s.refusal).map(str::to_owned);
+    let refusal = loaded.tool.stroke().and_then(|s| s.refusal).map(str::to_owned);
     let error = loaded.preview.as_ref().and_then(|p| p.world.as_ref().err().cloned()).or(refusal);
     egui::Tooltip::always_open(egui_ctx.clone(), egui::LayerId::background(),
         egui::Id::new("part_stack_tooltip"), egui::PopupAnchor::Pointer).show(|ui| {
@@ -525,7 +512,11 @@ pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
 }
 pub(super) fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
+    let dirty = loaded.dirty;
     egui::Window::new("Reload?").open(&mut loaded.popup_reload).show(egui_ctx, |ui| {
+        if dirty{
+            ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes will be lost");
+        }
         #[cfg(not(target_arch = "wasm32"))]{
             if ui.button("Reload current").clicked() {
                 do_loading = AppStateUpdate::Load;

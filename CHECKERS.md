@@ -55,9 +55,9 @@ The Habitability Detector puzzle file and the built `.js`/`.wasm` outputs were n
   ```
 - **A `bindgen` feature** pulled in the optional dependencies `wasm-bindgen`, `web-sys` and
   `console_error_panic_hook`. Nothing else used them, so they were removed along with the checkers.
-- **Crate layout.** Each checker file was its own crate root and declared `mod parser; mod sim;` itself, the
-  same way `main.rs` and `benchmark.rs` do. `sim.rs` uses `include_str!("default_paths.txt")`, so
-  `src/default_paths.txt` must exist for any crate that includes `sim`.
+- **Crate layout.** Each checker file was its own crate root and declared `mod parser; mod sim;` itself.
+  Since then, `src/lib.rs` has made `sim`, `parser` and `timeline` a library that the binaries `use`
+  (`use omclone::{parser, sim};`), so a new checker should do that instead.
 - **The puzzle was compiled in** with `include_bytes!("../<name>.puzzle")` from the repo root. `*.puzzle` is
   in `.gitignore`, so the file had to be force-added (CX) or was left uncommitted (Habitability).
 
@@ -148,14 +148,13 @@ let stats = world.get_stats();
 2. **Choose a front end.**
    - **Native command line (simplest).** Add a `[[bin]]` with a feature in `required-features`, like
      `omclone_benchmark`. Unlike `[lib]`, `required-features` works for binaries. Read the puzzle and
-     solution paths from the arguments, or use `get_default_path_strs()`. No JS toolchain is needed.
+     solution paths from the arguments, or use `omclone::default_paths()`. No JS toolchain is needed.
    - **Inside the app.** Add a window to the existing UI. It works natively and in the existing web build
      with no new tooling, but a long sweep has to be split across frames (a few variants per `update()`)
      so the UI doesn't freeze.
-   - **Standalone web page, as before.** Restore the `bindgen` feature and dependencies and a `cdylib`
-     target, and build with `wasm-pack`. Rather than another commented-out `[lib]`, consider making a
-     library crate that exposes `sim` and `parser` (for example `src/lib.rs` with `pub mod sim; pub mod
-     parser;`, or a workspace member). Then each checker can be its own small crate that depends on it.
+   - **Standalone web page, as before.** Restore the `bindgen` dependencies and build with `wasm-pack`. The
+     package's one `[lib]` is now the `omclone` library (`src/lib.rs`), so make the checker its own small
+     crate (a workspace member, say) with a `cdylib` target that depends on `omclone`.
 3. **The puzzle file.** Either load it at runtime, or compile it in with `include_bytes!` and force-add it
    (`git add -f`), since `*.puzzle` is gitignored.
 4. **Results to report.** Show per-variant pass/fail with the failing step and error message, and the

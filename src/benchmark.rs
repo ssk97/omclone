@@ -1,5 +1,4 @@
-mod parser;
-mod sim;
+use omclone::{parser, sim};
 
 #[cfg(feature = "color-eyre")]
 use color_eyre::{install, eyre::Result};
@@ -13,7 +12,7 @@ fn main() -> Result<()> {
     std::env::set_var("RUST_BACKTRACE", "full");
     install()?;
 
-    let (base_str, puzzle_str, solution_str) = sim::get_default_path_strs();
+    let (base_str, puzzle_str, solution_str) = omclone::default_paths();
     let base_path = Path::new(base_str);
     let f_puzzle = File::open(base_path.join(puzzle_str))?;
     let puzzle = parser::parse_puzzle(&mut BufReader::new(f_puzzle))?;

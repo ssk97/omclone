@@ -1,4 +1,4 @@
-//Conversions between hex coordinates and world coordinates.
+//Hex positions and rotations, and conversions between hex coordinates and world coordinates.
 //Hex: axial Pos, +x is to the right and +y is up and to the right.
 //World: XYPos with 2 units between adjacent hex centers (a hex's inner radius is 1), y up.
 //Angles: radians, counterclockwise. A Rot of 1 is 60 degrees counterclockwise.
@@ -63,10 +63,54 @@ pub fn hex_line(a: Pos, b: Pos) -> Vec<Pos> {
     }).collect()
 }
 
+pub fn normalize_dir(r: Rot) -> Rot {
+    return r.rem_euclid(6);
+}
+
+pub fn pos_to_rot(input: Pos) -> Option<Rot> {
+    match (input.x, input.y) {
+        ( 1, 0) => Some(0),
+        ( 0, 1) => Some(1),
+        (-1, 1) => Some(2),
+        (-1, 0) => Some(3),
+        ( 0,-1) => Some(4),
+        ( 1,-1) => Some(5),
+        _ => None,
+    }
+}
+pub fn rot_dist_to_pos(n: i32, angle: Rot) -> Pos {
+    match normalize_dir(angle) {
+        0 => Pos::new( n, 0),
+        1 => Pos::new( 0, n),
+        2 => Pos::new(-n, n),
+        3 => Pos::new(-n, 0),
+        4 => Pos::new( 0,-n),
+        5 => Pos::new( n,-n),
+        _ => panic!("Invalid Rotation"),
+    }
+}
+pub fn rot_to_pos(angle: Rot) -> Pos {
+    rot_dist_to_pos(1, angle)
+}
+pub fn rotate(pos: Pos, angle: Rot) -> Pos {
+    match normalize_dir(angle) {
+        0 => pos, //  ( pos.x      ,       pos.y)
+        1 => Pos::new(      -pos.y , pos.x+pos.y),
+        2 => Pos::new(-pos.x-pos.y , pos.x      ),
+        3 => Pos::new(-pos.x       ,      -pos.y),
+        4 => Pos::new(       pos.y ,-pos.x-pos.y),
+        5 => Pos::new( pos.x+pos.y ,-pos.x      ),
+        _ => panic!("Invalid Rotation"),
+    }
+}
+
+pub fn rotate_around(pos: Pos, angle: Rot, pivot: Pos) -> Pos {
+    rotate(pos - pivot, angle) + pivot
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sim::rotate;
 
     #[test]
     fn xy_round_trip() {
@@ -110,6 +154,15 @@ mod tests {
                     assert!((rotated - expected).norm() < 1e-4, "{p:?} rotated by {r}: {rotated:?} != {expected:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn rotation_tests() {
+        for r in 0..6 {
+            assert_eq!(rot_dist_to_pos(1, r), rotate(Pos::new(1, 0), r));
+            assert_eq!(rot_dist_to_pos(2, r), rotate(Pos::new(2, 0), r));
+            assert_eq!(rotate(Pos::new(3, 1), r + 1), rotate(Pos::new(-1, 4), r));
         }
     }
 }

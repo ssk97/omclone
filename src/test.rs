@@ -476,6 +476,19 @@ mod tape_edit_tests {
     }
 
     #[test]
+    fn blanks_left_at_the_end_are_dropped() {
+        //Blanking the last instruction no longer holds the loop as long
+        let mut t = tape(1, vec![RotateClockwise, Grab, Extend]);
+        t.delete(3..4, true);
+        assert_tape(&t, 1, &[RotateClockwise, Grab]);
+        //Nor does writing blanks past the end
+        t.insert(5, &[Empty, Empty], true);
+        assert_tape(&t, 1, &[RotateClockwise, Grab]);
+        t.insert(5, &[Drop, Empty], false);
+        assert_tape(&t, 1, &[RotateClockwise, Grab, Empty, Empty, Drop]);
+    }
+
+    #[test]
     fn differences_start_at_the_first_changed_step() {
         let a = tape(2, vec![RotateClockwise, Grab, Drop]);
         assert_eq!(a.first_difference(&a.clone(), 10), None);
@@ -567,6 +580,18 @@ mod regression_tests {
     }
 
     #[test]
+    fn proliferation_only_copies_metals() {
+        let input = |x: i32, y: i32, atom_type: AtomType, id: i32|
+            glyph(x, y, 0, GlyphType::Input(smallvec![vec![Atom::new(Pos::new(0, 0), atom_type)]], id));
+        //The metal goes at (-1,1), quicksilver at (1,1), and the copy comes out at (1,-1)
+        let with = |source: AtomType| run(vec![glyph(0, 0, 0, GlyphType::Proliferation),
+            input(-1, 1, source, 0), input(1, 1, Quicksilver, 1)], vec![], 1);
+        assert_eq!(type_at(&with(Lead), 1, -1), Some(Lead));
+        assert_eq!(type_at(&with(Salt), 1, -1), None);
+        assert_eq!(type_at(&with(Quicksilver), 1, -1), None);
+    }
+
+    #[test]
     fn dangling_bond_without_next_monomer_gets_no_placeholder() {
         let mut a = Atom::new(Pos::new(0, 0), Salt);
         a.connections[0] = Bonds::NORMAL; //to the next monomer
@@ -643,7 +668,7 @@ mod regression_tests {
 
     #[test]
     fn saved_loop_length_ignores_blank_padding() {
-        //Trailing blanks (like from "space ends") aren't saved, so they can't hold the loop length
+        //Trailing blanks (like a final Reset with nothing to undo) aren't saved, so they can't hold the loop length
         let mut world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
         world.repeat_length = 5;
         world.arms[0].instruction_tape.instructions.resize(5, Empty);

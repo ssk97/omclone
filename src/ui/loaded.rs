@@ -17,9 +17,10 @@ pub(super) struct Loaded{
 
     pub(super) max_timestep: usize,
     pub(super) camera: CameraSetup,
-    pub(super) tracks: TrackBindings,
     pub(super) solution: parser::FullSolution,
     pub(super) message: Option<String>,
+    //The solution changed since it was loaded or saved
+    pub(super) dirty: bool,
 
     pub(super) tape_mode: bool,
     pub(super) tape_sel: TapeSelection,
@@ -35,25 +36,17 @@ pub(super) struct Loaded{
     //The parts at the hex last pressed, top first
     pub(super) stack_view: Option<Vec<PartId>>,
     pub(super) allow_overlap: bool,
-    pub(super) press: Option<Press>,
-    pub(super) placing: Option<Placing>,
-    pub(super) track_mode: Option<TrackMode>,
-    pub(super) stroke: Option<TrackStroke>,
+    pub(super) tool: BoardTool,
     pub(super) allow_gaps: bool,
     pub(super) path_text: Option<PathText>,
     //Whatever the mouse would change now, drawn in place, and the tracks other than one it changes
     pub(super) preview: Option<Preview>,
-    pub(super) scene_tracks: Option<(usize, TrackBindings)>,
+    pub(super) scene_tracks: Option<(usize, TrackMaps)>,
     pub(super) pointer_over_ui: bool,
     pub(super) history: UndoHistory<World, StepKind>,
-    pub(super) tracks_dirty: bool,
-    //Track buffers to free once the rendering context is available
-    pub(super) dead_tracks: Vec<TrackBindings>,
 }
 impl Loaded{
-    pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup,
-        tracks: TrackBindings) -> Self
-    {
+    pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup) -> Self{
         //A solution that already overlaps can keep doing so
         let allow_overlap = world.has_overlap();
         //Also enables collision checks, so edits that collide are caught
@@ -62,8 +55,9 @@ impl Loaded{
             timeline: Timeline::new(world, show_area),
             float_world: FloatWorld::new(),
 
-            max_timestep,camera,tracks,solution,
+            max_timestep,camera,solution,
             message: None,
+            dirty: false,
 
             tape_mode: false,
             tape_sel: TapeSelection::default(),
@@ -76,18 +70,13 @@ impl Loaded{
             selection: None,
             stack_view: None,
             allow_overlap,
-            press: None,
-            placing: None,
-            track_mode: None,
-            stroke: None,
+            tool: BoardTool::Select(None),
             allow_gaps: false,
             path_text: None,
             preview: None,
             scene_tracks: None,
             pointer_over_ui: false,
             history: UndoHistory::new(),
-            tracks_dirty: false,
-            dead_tracks: Vec::new(),
         }
     }
     //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
@@ -102,13 +91,13 @@ impl Loaded{
         self.drop_preview();
         let target = self.timeline.time().floor() as usize;
         self.timeline.replace_base(world);
-        self.tracks_dirty = true;
+        self.dirty = true;
         self.clear_crash();
         self.try_set_target_time(target);
     }
     //Why undo and redo can't be used right now, if they can't
     pub(super) fn history_lock(&self) -> Option<&'static str>{
-        if self.press.is_some() || self.stroke.is_some(){
+        if self.tool.press().is_some() || self.tool.stroke().is_some(){
             Some("Release the mouse button first")
         } else {
             self.edit_lock()
@@ -186,6 +175,7 @@ impl Loaded{
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.
     pub(super) fn apply_base_change(&mut self, earliest_step: usize){
+        self.dirty = true;
         if self.timeline.program_changed(earliest_step as u64){
             self.clear_crash();
         }
@@ -196,6 +186,13 @@ impl Loaded{
             self.max_timestep = length;
         }
         self.timeline.base_mut().set_repeat_length(length)
+    }
+    //Sets the loop length as an edit of its own, which can be undone
+    pub(super) fn edit_repeat_length(&mut self, length: usize){
+        self.history.record(self.timeline.base().clone(), StepKind::Tapes);
+        self.tape_group = None;
+        let earliest_step = self.change_repeat_length(length);
+        self.apply_base_change(earliest_step);
     }
     //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
     pub(super) fn clear_crash(&mut self){
@@ -235,5 +232,35 @@ impl Loaded{
             self.run_state = RunState::Crashed(self.timeline.curr().timestep as usize);
             self.message = Some(err.to_string());
         }
+    }
+}
+
+#[cfg(all(test, feature = "editor_ui"))]
+impl Loaded{
+    //A solution with these parts, as if just loaded, with the board's origin in the middle of the screen
+    pub(super) fn for_test(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Self{
+        let world = World::setup_sim(&InitialWorld{glyphs, arms}).unwrap();
+        let solution = parser::create_solution(&world, String::new(), String::new());
+        Loaded::new(world, solution, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
+    }
+}
+
+#[cfg(all(test, feature = "editor_ui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_length_edits_can_be_undone() {
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::RotateClockwise; 2]));
+        let mut loaded = Loaded::for_test(vec![], vec![arm]);
+        assert_eq!(loaded.timeline.base().repeat_length, 2);
+        assert!(!loaded.dirty, "nothing has changed yet");
+        loaded.edit_repeat_length(5);
+        assert_eq!(loaded.timeline.base().repeat_length, 5);
+        assert!(loaded.dirty);
+        loaded.undo();
+        assert_eq!(loaded.timeline.base().repeat_length, 2);
+        loaded.redo();
+        assert_eq!(loaded.timeline.base().repeat_length, 5);
     }
 }

@@ -42,37 +42,17 @@ fn setup_arms(ctx: &mut dyn RenderingBackend) -> Bindings{
     }
 }
 
-pub struct TrackBindings{
-    bindings: Bindings,
-    vert_count: usize,
-}
-impl TrackBindings{
-    pub fn delete(self, ctx: &mut dyn RenderingBackend){
-        for &buffer in &self.bindings.vertex_buffers{
-            ctx.delete_buffer(buffer);
-        }
-        ctx.delete_buffer(self.bindings.index_buffer);
-    }
-}
-pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> TrackBindings{
-    let mut verts_vec:Vec<GFXPos> = Vec::new();
-    let mut index_vec:Vec<u16> = Vec::new();
-    let mut curr_index = 0;
-    let mut add_from = |track: &TrackMap| {
-        for (&from, &offset) in track{
+//The tracks as line segments (pairs of vertices): from each hex halfway to where Forward and Back move an arm.
+//A hex no track leads to or from (like a one-hex track) gets a small star, so it can be seen.
+pub fn track_lines(tracks: &TrackMaps) -> Vec<GFXPos>{
+    let mut verts = Vec::new();
+    for map in [&tracks.plus, &tracks.minus]{
+        for (&from, &offset) in map{
             let xy = pos_to_xy(from);
-            verts_vec.push(xy.into());
-            index_vec.push(curr_index);
-            curr_index += 1;
-            let outer_pos = xy + pos_to_xy_vec(offset)*0.5;
-            verts_vec.push(outer_pos.into());
-            index_vec.push(curr_index);
-            curr_index += 1;
+            verts.push(xy.into());
+            verts.push((xy + pos_to_xy_vec(offset)*0.5).into());
         }
-    };
-    add_from(&tracks.plus);
-    add_from(&tracks.minus);
-    //A hex no track leads to or from (like a one-hex track) gets a small star, so it can be seen
+    }
     for &hex in tracks.paths.iter().flat_map(|p| &p.hexes){
         if tracks.plus.contains_key(&hex) || tracks.minus.contains_key(&hex){
             continue;
@@ -80,23 +60,39 @@ pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> Track
         let xy = pos_to_xy(hex);
         for r in 0..3{
             let arm = pos_to_xy_vec(rot_to_pos(r))*0.2;
-            for end in [xy + arm, xy - arm]{
-                verts_vec.push(end.into());
-                index_vec.push(curr_index);
-                curr_index += 1;
-            }
+            verts.push((xy + arm).into());
+            verts.push((xy - arm).into());
         }
     }
-
-    let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&verts_vec));
-    let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&index_vec));
-    TrackBindings{
-        bindings: Bindings {
-            vertex_buffers: vec![vb],
-            index_buffer,
-            images: vec![],
-        },
-        vert_count: index_vec.len()
+    verts
+}
+//Lines that can change every frame, drawn from a buffer that grows when they need more room
+struct LineBuffer{
+    bindings: Bindings,
+    capacity: usize,
+    count: usize,
+}
+impl LineBuffer{
+    //As many vertices as 16-bit indices can reach (WebGL1 may not have 32-bit ones)
+    const MAX_VERTS: usize = u16::MAX as usize + 1;
+    fn new(ctx: &mut dyn RenderingBackend, capacity: usize) -> Self{
+        let vb = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Stream, BufferSource::empty::<GFXPos>(capacity));
+        let indices: Vec<u16> = (0..capacity).map(|i| i as u16).collect();
+        let index_buffer = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&indices));
+        LineBuffer{bindings: Bindings{vertex_buffers: vec![vb], index_buffer, images: vec![]}, capacity, count: 0}
+    }
+    //Replaces the lines. Any past MAX_VERTS aren't drawn.
+    fn set(&mut self, ctx: &mut dyn RenderingBackend, verts: &[GFXPos]){
+        let verts = &verts[..verts.len().min(Self::MAX_VERTS)];
+        if verts.len() > self.capacity{
+            ctx.delete_buffer(self.bindings.vertex_buffers[0]);
+            ctx.delete_buffer(self.bindings.index_buffer);
+            *self = LineBuffer::new(ctx, verts.len().next_power_of_two().min(Self::MAX_VERTS));
+        }
+        if !verts.is_empty(){
+            ctx.buffer_update(self.bindings.vertex_buffers[0], BufferSource::slice(verts));
+        }
+        self.count = verts.len();
     }
 }
 
@@ -201,6 +197,15 @@ struct ShapeStore{
 }
 //scale_base is in units of (SCALE_REF_PX/2) pixels per world unit, independent of window size
 const SCALE_REF_PX: f32 = 1000.;
+//How far the camera zooms out and in (scale_base)
+pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.002..=0.2;
+//The window size in logical pixels. The camera and the board's mouse positions use these, so the board looks
+//the same at any display scale.
+pub fn logical_screen_size() -> (f32, f32){
+    let (w, h) = window::screen_size();
+    let dpi = window::dpi_scale();
+    (w/dpi, h/dpi)
+}
 pub struct CameraSetup{
     pub scale_base: f32,
     pub offset: XYVec,
@@ -223,6 +228,14 @@ impl CameraSetup{
         let ndc_x = px.0/screen_size.0*2. - 1.;
         let ndc_y = 1. - px.1/screen_size.1*2.;
         XYPos::new(ndc_x/scale.0, ndc_y/scale.1) - self.offset
+    }
+    //Zooms in by `notches` of the mouse wheel (out if negative), keeping the world position under the pixel `px`
+    //where it is. A view already outside ZOOM_RANGE can still move back into it.
+    pub fn zoom_at(&mut self, px: (f32, f32), screen_size: (f32, f32), notches: f32) {
+        let before = self.screen_to_world(px, screen_size);
+        let (min, max) = (ZOOM_RANGE.start().min(self.scale_base), ZOOM_RANGE.end().max(self.scale_base));
+        self.scale_base = (self.scale_base*1.1f32.powf(notches)).clamp(min, max);
+        self.offset += self.screen_to_world(px, screen_size) - before;
     }
     pub fn frame_center(world: &World, screen_size:(f32,f32)) -> Self{
         let pos_list = world.glyphs.iter().map(|x| pos_to_xy(x.pos));
@@ -254,7 +267,10 @@ pub struct RenderDataBase {
     pipeline_textured: Pipeline,
     pipeline_tracks: Pipeline,
     shapes: ShapeStore,
-    font: FontStorage
+    font: FontStorage,
+    //The board's tracks, and a track being dragged or reshaped
+    scene_tracks: LineBuffer,
+    dragged_track: LineBuffer,
 }
 
 impl RenderDataBase {
@@ -331,9 +347,11 @@ impl RenderDataBase {
         };
         
         let font = FontStorage::new(ctx);
+        let scene_tracks = LineBuffer::new(ctx, 1024);
+        let dragged_track = LineBuffer::new(ctx, 256);
 
         Self {
-            pipeline,pipeline_textured,pipeline_tracks,shapes,font
+            pipeline,pipeline_textured,pipeline_tracks,shapes,font,scene_tracks,dragged_track
         }
     }
 }
@@ -455,13 +473,16 @@ impl RenderDataBase {
             self.font.render_text_centered(ctx, &id.to_string(), [1., 1., 1.], offset, world_offset, scale);
         }
     }
-    fn draw_tracks(&self, ctx: &mut Context, tracks: &TrackBindings, world_offset: GFXPos, scale: (f32, f32)){
+    fn draw_lines(&self, ctx: &mut Context, lines: &LineBuffer, world_offset: GFXPos, scale: (f32, f32)){
+        if lines.count == 0{
+            return;
+        }
         ctx.apply_pipeline(&self.pipeline_tracks);
-        ctx.apply_bindings(&tracks.bindings);
+        ctx.apply_bindings(&lines.bindings);
         ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
             color:[1., 1., 1.], offset:[0.,0.], world_offset, angle:0., scale
         }));
-        ctx.draw(0, tracks.vert_count as i32, 1);
+        ctx.draw(0, lines.count as i32, 1);
     }
     //Basic pipeline with the arm bindings
     fn draw_arm(&self, ctx: &mut Context, f_arm: &FloatArm, world_offset: GFXPos, scale: (f32, f32)){
@@ -479,10 +500,8 @@ impl RenderDataBase {
         }
     }
     //note: assumes ctx is in the middle of a render pass
-    pub fn draw(&self, ctx: &mut Context, camera: &CameraSetup, tracks: &TrackBindings,
-         show_area: bool, scene: &Scene)
-    {
-        let scale = camera.scale(window::screen_size());
+    pub fn draw(&mut self, ctx: &mut Context, camera: &CameraSetup, show_area: bool, scene: &Scene){
+        let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         let shown_glyphs = || scene.glyphs.iter().enumerate()
             .filter(|&(id, _)| scene.hidden != Some(PartId::Glyph(id)));
@@ -538,7 +557,8 @@ impl RenderDataBase {
             }
         }
 
-        self.draw_tracks(ctx, tracks, world_offset, scale);
+        self.scene_tracks.set(ctx, &track_lines(scene.tracks));
+        self.draw_lines(ctx, &self.scene_tracks, world_offset, scale);
 
 		//Draw atoms
 		self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
@@ -557,11 +577,11 @@ impl RenderDataBase {
             self.font.render_text_centered(ctx, &string, [1., 1., 1.], f_arm.pos, world_offset, scale);
         }
     }
-    //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. `track` is its track lines.
-    pub fn draw_dragged_glyph(&self, ctx: &mut Context, camera: &CameraSetup, glyph: &Glyph,
-        polymer: Option<&Polymer>, track: Option<&TrackBindings>, extra: XYVec)
+    //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. `track` is its own track data.
+    pub fn draw_dragged_glyph(&mut self, ctx: &mut Context, camera: &CameraSetup, glyph: &Glyph,
+        polymer: Option<&Polymer>, track: Option<&TrackMaps>, extra: XYVec)
     {
-        let scale = camera.scale(window::screen_size());
+        let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = (camera.offset + extra).into();
         let atoms = Self::glyph_atoms(glyph, polymer);
         if !atoms.is_empty(){
@@ -572,12 +592,13 @@ impl RenderDataBase {
         self.font.set_pipeline(ctx);
         self.draw_conduit_number(ctx, glyph, world_offset, scale);
         if let Some(track) = track{
-            self.draw_tracks(ctx, track, world_offset, scale);
+            self.dragged_track.set(ctx, &track_lines(track));
+            self.draw_lines(ctx, &self.dragged_track, world_offset, scale);
         }
     }
     //Draws an arm being dragged (in its starting state), shifted by `extra` (world units) from its hex
     pub fn draw_dragged_arm(&self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
-        let scale = camera.scale(window::screen_size());
+        let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = (camera.offset + extra).into();
         let f_arm = FloatArm{
             pos: pos_to_xy(arm.pos),
@@ -594,7 +615,7 @@ impl RenderDataBase {
     }
     //Outlines each hex
     pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: [f32; 3]){
-        let scale = camera.scale(window::screen_size());
+        let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&self.shapes.hex_ring_bindings);
@@ -609,6 +630,7 @@ impl RenderDataBase {
 //What to draw for the world: glyph data, plus the moving atoms and arms. `hidden` isn't drawn (it's being dragged).
 pub struct Scene<'a>{
     pub glyphs: &'a [Glyph],
+    pub tracks: &'a TrackMaps,
     pub polymers: &'a FxHashMap<usize, Polymer>,
     pub area: &'a FxHashSet<Pos>,
     pub float_world: &'a FloatWorld,
@@ -629,6 +651,33 @@ mod tests {
             let back = camera.screen_to_world(px, screen_size);
             assert!((back - world).norm() < 1e-3, "{world:?} -> {px:?} -> {back:?}");
         }
+    }
+    #[test]
+    fn track_lines_cover_each_move_and_lone_hexes() {
+        let track = |path: &[(i32, i32)]| Glyph{pos: Pos::zeros(), rot: 0,
+            glyph_type: GlyphType::Track(path.iter().map(|&(x, y)| Pos::new(x, y)).collect())};
+        let lines = |path: &[(i32, i32)]| track_lines(&TrackMaps::build([&track(path)]).unwrap()).len();
+        //A segment for each move either way: a loop moves on from every hex, a line not past either end
+        assert_eq!(lines(&[(0, 0), (1, 0), (0, 1)]), 2*2*3);
+        assert_eq!(lines(&[(0, 0), (1, 0), (2, 0)]), 2*2*2);
+        //A lone hex gets a three-line star
+        assert_eq!(lines(&[(5, 5)]), 2*3);
+    }
+    #[test]
+    fn zoom_keeps_the_point_under_the_cursor() {
+        let mut camera = CameraSetup { scale_base: 0.03, offset: XYVec::new(1.5, -2.) };
+        let screen_size = (1280., 720.);
+        let px = (900., 150.);
+        let under = camera.screen_to_world(px, screen_size);
+        camera.zoom_at(px, screen_size, 2.5);
+        assert!(camera.scale_base > 0.03);
+        let moved = camera.screen_to_world(px, screen_size);
+        assert!((moved - under).norm() < 1e-3, "{under:?} != {moved:?}");
+        camera.zoom_at(px, screen_size, 1000.);
+        assert_eq!(camera.scale_base, *ZOOM_RANGE.end());
+        camera.scale_base = 1.;
+        camera.zoom_at(px, screen_size, 1.);
+        assert_eq!(camera.scale_base, 1., "zooming in further from outside the range does nothing");
     }
     #[test]
     fn pan_follows_cursor() {

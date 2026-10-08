@@ -65,12 +65,7 @@ pub(super) fn apply_op(tapes: &mut [Tape], steps: Range<usize>, op: &TapeOp, ove
                 let mut line = lines[if lines.len() == 1 {0} else {i}].clone();
                 line.resize(width, Instr::Empty);
                 tape.delete(steps.clone(), overwrite);
-                //Blanks past the tape's end don't change what runs, but they'd make the loop longer
-                let end = tape.end();
-                let keep = if overwrite {end.saturating_sub(steps.start)} else if steps.start < end {width} else {0};
-                while line.len() > keep && line.last() == Some(&Instr::Empty){
-                    line.pop();
-                }
+                //Blanks that end up past the tape's end are dropped by the tape
                 tape.insert(steps.start, &line, overwrite);
             }
             Some(steps.start + width)

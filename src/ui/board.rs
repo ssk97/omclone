@@ -9,6 +9,32 @@ pub(super) enum EditKind{
     //Moving, rotating, resizing, or changing an arm's type
     Move, Delete, Duplicate, Reorder,
 }
+//What the left mouse button does on the board
+pub(super) enum BoardTool{
+    //Clicking picks parts, and dragging one moves it. Holds the press while the button is down.
+    Select(Option<Press>),
+    //Clicking places a new part
+    Place(Placing),
+    //Clicking and dragging reshape a track. Holds the stroke while the button is down.
+    Track(TrackMode, Option<TrackStroke>),
+}
+impl BoardTool{
+    pub(super) fn press(&self) -> Option<&Press>{
+        match self {BoardTool::Select(press) => press.as_ref(), _ => None}
+    }
+    fn press_mut(&mut self) -> Option<&mut Press>{
+        match self {BoardTool::Select(press) => press.as_mut(), _ => None}
+    }
+    pub(super) fn placing(&self) -> Option<&Placing>{
+        match self {BoardTool::Place(placing) => Some(placing), _ => None}
+    }
+    pub(super) fn track_mode(&self) -> Option<&TrackMode>{
+        match self {BoardTool::Track(mode, _) => Some(mode), _ => None}
+    }
+    pub(super) fn stroke(&self) -> Option<&TrackStroke>{
+        match self {BoardTool::Track(_, stroke) => stroke.as_ref(), _ => None}
+    }
+}
 //The left mouse button is held on the board
 pub(super) struct Press{
     press_px: (f32, f32),
@@ -60,7 +86,7 @@ pub(super) struct Preview{
     pub(super) world: std::result::Result<World, String>,
     float_world: FloatWorld,
     polymer: Option<Polymer>,
-    track: Option<TrackBindings>,
+    track: Option<TrackMaps>,
     landing: SmallVec<[Pos; 8]>,
     overlaps: SmallVec<[Pos; 8]>,
 }
@@ -125,17 +151,18 @@ impl Loaded{
     }
     //Why the held part can't be dragged, if it can't
     pub(super) fn press_lock(&self) -> Option<&'static str>{
-        let press = self.press.as_ref()?;
+        let press = self.tool.press()?;
         self.part_lock(press.part(), press.kind())
     }
     //The part to outline: the candidate while the mouse is held, otherwise the selection
     pub(super) fn highlighted_part(&self) -> Option<PartId>{
-        self.press.as_ref().map(|p| p.part()).or(self.selection)
+        self.tool.press().map(|p| p.part()).or(self.selection)
     }
-    //A track mode ends when anything else is selected
+    //A track tool ends when anything but its track is selected (a new track has none yet, so it keeps on
+    //when nothing is selected)
     pub(super) fn select(&mut self, part: Option<PartId>){
         self.selection = part;
-        if self.track_mode.as_ref().is_some_and(|m| m.glyph.map(PartId::Glyph) != part){
+        if self.tool.track_mode().is_some_and(|m| m.glyph.map(PartId::Glyph) != part){
             self.end_track_mode();
         }
     }
@@ -167,47 +194,47 @@ impl Loaded{
         Ok(())
     }
     pub(super) fn cancel_press(&mut self){
-        self.press = None;
+        if let BoardTool::Select(press) = &mut self.tool{
+            *press = None;
+        }
     }
     pub(super) fn start_placing(&mut self, part: NewPart){
-        self.cancel_press();
-        self.end_track_mode();
-        self.placing = Some(Placing{part, rot: 0, len: 1, cursor_xy: None});
+        self.tool = BoardTool::Place(Placing{part, rot: 0, len: 1, cursor_xy: None});
     }
     pub(super) fn start_new_track(&mut self){
-        self.cancel_press();
-        self.placing = None;
         self.select(None);
-        self.track_mode = Some(TrackMode{glyph: None, tool: TrackTool::AddBack});
+        self.tool = BoardTool::Track(TrackMode{glyph: None, tool: TrackTool::AddBack}, None);
     }
     //Sets (or with None, ends) the board tool for reshaping the track
     pub(super) fn set_track_tool(&mut self, glyph: usize, tool: Option<TrackTool>){
-        self.cancel_press();
-        self.placing = None;
-        self.end_track_mode();
-        self.track_mode = tool.map(|tool| TrackMode{glyph: Some(glyph), tool});
+        self.tool = match tool{
+            Some(tool) => BoardTool::Track(TrackMode{glyph: Some(glyph), tool}, None),
+            None => BoardTool::Select(None),
+        };
     }
     pub(super) fn end_track_mode(&mut self){
-        self.track_mode = None;
-        self.stroke = None;
+        if matches!(self.tool, BoardTool::Track(..)){
+            self.tool = BoardTool::Select(None);
+        }
+    }
+    //Goes back to picking parts, putting away the part being placed or ending the track mode
+    pub(super) fn end_tool(&mut self){
+        if !matches!(self.tool, BoardTool::Select(_)){
+            self.tool = BoardTool::Select(None);
+        }
     }
     //A right-click (without panning) puts away the part being placed or ends the track mode
     pub(super) fn right_click(&mut self){
-        if self.placing.is_some(){
-            self.placing = None;
-        } else {
-            self.end_track_mode();
-        }
+        self.end_tool();
     }
     pub(super) fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
         self.cancel_press();
         let press_xy = self.camera.screen_to_world(px, screen_size);
         let press_hex = xy_to_pos(press_xy);
-        if self.placing.is_some(){
-            return self.place(press_hex, keymods.shift);
-        }
-        if self.track_mode.is_some(){
-            return self.start_stroke(press_hex);
+        match self.tool{
+            BoardTool::Place(_) => return self.place(press_hex, keymods.shift),
+            BoardTool::Track(..) => return self.start_stroke(press_hex),
+            BoardTool::Select(_) => {}
         }
         //Arms are picked where they are now (glyphs don't move)
         let stack = self.timeline.curr().parts_at(press_hex);
@@ -218,20 +245,20 @@ impl Loaded{
         }
         let cand = self.selection.and_then(|s| stack.iter().position(|&p| p == s)).unwrap_or(0);
         self.stack_view = Some(stack.clone());
-        self.press = Some(Press{press_px: px, press_xy, press_hex, stack, cand, wheel_accum: 0.,
-            duplicate: keymods.ctrl || keymods.logo, drag: None});
+        self.tool = BoardTool::Select(Some(Press{press_px: px, press_xy, press_hex, stack, cand, wheel_accum: 0.,
+            duplicate: keymods.ctrl || keymods.logo, drag: None}));
     }
     //Puts the part on the cursor down; with `keep`, another stays on the cursor
     fn place(&mut self, hex: Pos, keep: bool){
-        let Some(placing) = &self.placing else {return};
+        let Some(placing) = self.tool.placing() else {return};
         let edit = LayoutEdit::Add{part: placing.part.clone(), pos: hex, rot: placing.rot, len: placing.len};
         match self.apply_edit(&edit){
-            Ok(()) => if !keep {self.placing = None},
+            Ok(()) => if !keep {self.end_tool()},
             Err(err) => self.message = Some(err),
         }
     }
     fn start_stroke(&mut self, hex: Pos){
-        let Some(mode) = &self.track_mode else {return};
+        let Some(mode) = self.tool.track_mode() else {return};
         let mut stroke = match mode.glyph{
             Some(i) => TrackStroke{path: track_path(self.timeline.base(), i), added: 0, last_hex: hex, refusal: None},
             //A new track starts where it's pressed
@@ -244,11 +271,20 @@ impl Loaded{
             }
         };
         self.stroke_hex(&mut stroke, hex);
-        self.stroke = Some(stroke);
+        self.put_stroke(stroke);
+    }
+    //The stroke in progress, taken out of the track tool to work on it
+    fn take_stroke(&mut self) -> Option<TrackStroke>{
+        match &mut self.tool {BoardTool::Track(_, stroke) => stroke.take(), _ => None}
+    }
+    fn put_stroke(&mut self, stroke: TrackStroke){
+        if let BoardTool::Track(_, slot) = &mut self.tool{
+            *slot = Some(stroke);
+        }
     }
     //Applies the track tool to a hex the stroke entered
     fn stroke_hex(&self, stroke: &mut TrackStroke, hex: Pos){
-        let Some(mode) = &self.track_mode else {return};
+        let Some(mode) = self.tool.track_mode() else {return};
         let blocked = mode.tool != TrackTool::Remove && !self.allow_overlap && !stroke.path.contains(&hex)
             && !self.timeline.base().track_overlaps(mode.glyph, &[hex]).is_empty();
         let result = if blocked{
@@ -259,8 +295,8 @@ impl Loaded{
         stroke.refusal = result.err();
     }
     fn finish_stroke(&mut self){
-        let Some(stroke) = self.stroke.take() else {return};
-        let Some(glyph) = self.track_mode.as_ref().map(|m| m.glyph) else {return};
+        let Some(stroke) = self.take_stroke() else {return};
+        let Some(glyph) = self.tool.track_mode().map(|m| m.glyph) else {return};
         if glyph.is_some_and(|i| track_path(self.timeline.base(), i) == stroke.path){
             return;
         }
@@ -268,7 +304,7 @@ impl Loaded{
             //A new track keeps being drawn
             Ok(()) => if glyph.is_none(){
                 let new = self.timeline.base().glyphs.len()-1;
-                self.track_mode = Some(TrackMode{glyph: Some(new), tool: TrackTool::AddBack});
+                self.tool = BoardTool::Track(TrackMode{glyph: Some(new), tool: TrackTool::AddBack}, None);
             }
             Err(err) => self.message = Some(err),
         }
@@ -276,10 +312,10 @@ impl Loaded{
     pub(super) fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
         let cursor_xy = self.camera.screen_to_world(px, screen_size);
         self.pointer_over_ui = over_ui;
-        if let Some(placing) = &mut self.placing{
+        if let BoardTool::Place(placing) = &mut self.tool{
             placing.cursor_xy = (!over_ui).then_some(cursor_xy);
         }
-        if let Some(mut stroke) = self.stroke.take(){
+        if let Some(mut stroke) = self.take_stroke(){
             //Fast movements skip hexes, so go through each one on the way
             let hex = xy_to_pos(cursor_xy);
             if hex != stroke.last_hex{
@@ -291,10 +327,10 @@ impl Loaded{
                 }
                 stroke.last_hex = hex;
             }
-            self.stroke = Some(stroke);
+            self.put_stroke(stroke);
         }
-        let draggable = self.press.is_some() && self.press_lock().is_none();
-        let Some(press) = &mut self.press else {return};
+        let draggable = self.tool.press().is_some() && self.press_lock().is_none();
+        let Some(press) = self.tool.press_mut() else {return};
         match &mut press.drag{
             Some(drag) => drag.cursor_xy = cursor_xy,
             None => {
@@ -308,10 +344,10 @@ impl Loaded{
     //Picks another part from the stack. A drag carries over to it (keeping the offset) if it can be edited;
     //otherwise the drag ends, and starts again on the next mouse movement once an editable part is picked.
     fn cycle(&mut self, step: i32){
-        let Some(press) = &mut self.press else {return};
+        let Some(press) = self.tool.press_mut() else {return};
         press.cand = (press.cand as i32 + step).rem_euclid(press.stack.len() as i32) as usize;
         let locked = self.press_lock().is_some();
-        let Some(press) = &mut self.press else {return};
+        let Some(press) = self.tool.press_mut() else {return};
         if locked{
             press.drag = None;
         } else if let Some(drag) = &mut press.drag{
@@ -320,10 +356,12 @@ impl Loaded{
         }
     }
     pub(super) fn release(&mut self){
-        if self.stroke.is_some(){
-            return self.finish_stroke();
-        }
-        let Some(press) = self.press.take() else {return};
+        let press = match &mut self.tool{
+            BoardTool::Select(press) => press.take(),
+            BoardTool::Track(..) => return self.finish_stroke(),
+            BoardTool::Place(_) => None,
+        };
+        let Some(press) = press else {return};
         self.select(Some(press.part()));
         if let Some(drag) = &press.drag{
             if let Err(err) = self.apply_edit(&press.edit(drag)){
@@ -333,7 +371,7 @@ impl Loaded{
     }
     //Returns true if the wheel was used to pick a part (rather than zoom)
     pub(super) fn wheel(&mut self, dy: f32) -> bool{
-        let Some(press) = &mut self.press else {return false};
+        let Some(press) = self.tool.press_mut() else {return false};
         press.wheel_accum += dy;
         //Steps once per notch, but trackpads send many small movements
         if press.wheel_accum.abs() >= 1.{
@@ -360,20 +398,15 @@ impl Loaded{
                     self.message = Some(err);
                 }
             }
+            //Lets go of one thing at a time: the press or stroke, then the part being placed or the track mode
             KeyCode::Escape => {
-                if self.press.is_some(){
-                    self.cancel_press();
-                } else if self.stroke.is_some(){
-                    self.stroke = None;
-                } else if self.placing.is_some(){
-                    self.placing = None;
-                } else if self.track_mode.is_some(){
-                    self.end_track_mode();
-                } else {
-                    return false;
-                }
+                self.tool = match std::mem::replace(&mut self.tool, BoardTool::Select(None)){
+                    BoardTool::Select(None) => return false,
+                    BoardTool::Track(mode, Some(_)) => BoardTool::Track(mode, None),
+                    _ => BoardTool::Select(None),
+                };
             }
-            KeyCode::Tab if self.press.is_some() => self.cycle(if keymods.shift {-1} else {1}),
+            KeyCode::Tab if self.tool.press().is_some() => self.cycle(if keymods.shift {-1} else {1}),
             KeyCode::A | KeyCode::D | KeyCode::W | KeyCode::S => return self.turn_or_resize(keycode),
             _ => return false,
         }
@@ -383,14 +416,14 @@ impl Loaded{
     fn turn_or_resize(&mut self, keycode: KeyCode) -> bool{
         let turn = match keycode {KeyCode::A => 1, KeyCode::D => -1, _ => 0};
         let grow = match keycode {KeyCode::W => 1, KeyCode::S => -1, _ => 0};
-        if let Some(placing) = &mut self.placing{
+        if let BoardTool::Place(placing) = &mut self.tool{
             placing.rot = (placing.rot + turn) % 6;
             if let NewPart::Arm(arm_type) = placing.part{
                 placing.len = arm_type.clamp_len(placing.len + grow);
             }
             return true;
         }
-        let Some(press) = &mut self.press else {return false};
+        let Some(press) = self.tool.press_mut() else {return false};
         let part = press.part();
         let Some(drag) = &mut press.drag else {return false};
         drag.rot += turn;
@@ -402,25 +435,27 @@ impl Loaded{
     }
     //The edit the mouse would make now, and how far from its hex the moving part is drawn
     fn pending_edit(&self) -> Option<(LayoutEdit, XYVec)>{
-        if let Some(stroke) = &self.stroke{
-            let glyph = self.track_mode.as_ref()?.glyph;
-            return Some((LayoutEdit::SetTrack{glyph, path: stroke.path.clone()}, XYVec::zeros()));
+        match &self.tool{
+            BoardTool::Track(mode, Some(stroke)) =>
+                Some((LayoutEdit::SetTrack{glyph: mode.glyph, path: stroke.path.clone()}, XYVec::zeros())),
+            BoardTool::Select(Some(press)) => {
+                let drag = press.drag.as_ref()?;
+                Some((press.edit(drag), press.drag_offset(drag)))
+            }
+            BoardTool::Place(placing) => {
+                let cursor_xy = placing.cursor_xy?;
+                let hex = xy_to_pos(cursor_xy);
+                let edit = LayoutEdit::Add{part: placing.part.clone(), pos: hex, rot: placing.rot, len: placing.len};
+                Some((edit, cursor_xy - pos_to_xy(hex)))
+            }
+            BoardTool::Select(None) | BoardTool::Track(_, None) => None,
         }
-        if let Some(press) = &self.press{
-            let drag = press.drag.as_ref()?;
-            return Some((press.edit(drag), press.drag_offset(drag)));
-        }
-        let placing = self.placing.as_ref()?;
-        let cursor_xy = placing.cursor_xy?;
-        let hex = xy_to_pos(cursor_xy);
-        let edit = LayoutEdit::Add{part: placing.part.clone(), pos: hex, rot: placing.rot, len: placing.len};
-        Some((edit, cursor_xy - pos_to_xy(hex)))
     }
     //The hexes the track mode can work on (as the stroke has the path so far): the end being added to,
     //or the hexes that can be removed
     fn track_hexes_being_edited(&self) -> Vec<Pos>{
-        let Some(mode) = &self.track_mode else {return Vec::new()};
-        let path = match (&self.stroke, mode.glyph){
+        let BoardTool::Track(mode, stroke) = &self.tool else {return Vec::new()};
+        let path = match (stroke, mode.glyph){
             (Some(stroke), _) => stroke.path.clone(),
             (None, Some(glyph)) => track_path(self.timeline.base(), glyph),
             (None, None) => return Vec::new(),
@@ -443,15 +478,14 @@ impl Loaded{
             _ => None,
         }
     }
-    fn build_preview(&self, ctx: &mut dyn RenderingBackend, edit: LayoutEdit) -> Preview{
+    fn build_preview(&self, edit: LayoutEdit) -> Preview{
         let (layout, part) = edit.apply(self.timeline.base());
         let part = part.expect("a pending edit places or changes a part");
         let (polymer, track, landing) = match part{
             PartId::Glyph(i) => {
                 let glyph = &layout.glyphs[i];
                 let polymer = glyph.build_polymer().ok().flatten();
-                let track = glyph.is_track().then(||
-                    setup_tracks(ctx, &TrackMaps::build([glyph]).unwrap_or_default()));
+                let track = glyph.is_track().then(|| TrackMaps::build([glyph]).unwrap_or_default());
                 let landing = glyph.footprint(polymer.as_ref());
                 (polymer, track, landing)
             }
@@ -469,30 +503,20 @@ impl Loaded{
         Preview{edit, part, layout, world, float_world, polymer, track, landing, overlaps}
     }
     pub(super) fn drop_preview(&mut self){
-        if let Some(track) = self.preview.take().and_then(|p| p.track){
-            self.dead_tracks.push(track);
-        }
-        if let Some((_, tracks)) = self.scene_tracks.take(){
-            self.dead_tracks.push(tracks);
-        }
+        self.preview = None;
+        self.scene_tracks = None;
     }
-    //Updates rendering data for part edits (needs the rendering context)
-    pub(super) fn refresh_part_gfx(&mut self, ctx: &mut dyn RenderingBackend){
+    //Keeps the preview of the pending edit up to date
+    pub(super) fn refresh_preview(&mut self){
         if matches!(self.run_state, RunState::FreeRun){
-            //Nothing can be edited while running
-            if self.press.as_ref().is_some_and(|p| p.drag.is_some()){
-                self.cancel_press();
+            //Nothing can be edited while running, though parts can still be picked
+            if let BoardTool::Select(press) = &mut self.tool{
+                if press.as_ref().is_some_and(|p| p.drag.is_some()){
+                    *press = None;
+                }
+            } else {
+                self.tool = BoardTool::Select(None);
             }
-            self.placing = None;
-            self.end_track_mode();
-        }
-        for tracks in self.dead_tracks.drain(..){
-            tracks.delete(ctx);
-        }
-        if self.tracks_dirty{
-            let old = std::mem::replace(&mut self.tracks, setup_tracks(ctx, &self.timeline.base().track_maps));
-            old.delete(ctx);
-            self.tracks_dirty = false;
         }
         let Some((edit, _)) = self.pending_edit() else {
             return self.drop_preview();
@@ -500,40 +524,26 @@ impl Loaded{
         //Every track except the changed one, which is drawn with the preview
         let changed = self.changed_track(&edit);
         if self.scene_tracks.as_ref().map(|(i, _)| *i) != changed{
-            let new = changed.map(|i| {
+            self.scene_tracks = changed.map(|i| {
                 let others = self.timeline.base().glyphs.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, g)| g);
-                (i, setup_tracks(ctx, &TrackMaps::build(others).unwrap_or_default()))
+                (i, TrackMaps::build(others).unwrap_or_default())
             });
-            if let Some((_, old)) = std::mem::replace(&mut self.scene_tracks, new){
-                self.dead_tracks.push(old);
-            }
         }
         if self.preview.as_ref().is_some_and(|p| p.edit == edit){
             return;
         }
-        let preview = self.build_preview(ctx, edit);
-        if let Some(track) = self.preview.replace(preview).and_then(|p| p.track){
-            self.dead_tracks.push(track);
-        }
+        self.preview = Some(self.build_preview(edit));
     }
-    //Frees all rendering data, once the solution is no longer shown
-    pub(super) fn delete_gfx(mut self, ctx: &mut dyn RenderingBackend){
-        self.drop_preview();
-        self.tracks.delete(ctx);
-        for tracks in self.dead_tracks{
-            tracks.delete(ctx);
-        }
-    }
-    pub(super) fn draw_world(&self, render: &RenderDataBase, ctx: &mut Context){
+    pub(super) fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const SELECT_COLOR: [f32; 3] = [0., 0.8, 1.];
         const OVERLAP_COLOR: [f32; 3] = [1., 0.1, 0.1];
         const TRACK_TOOL_COLOR: [f32; 3] = [1., 0.75, 0.];
         let track_hexes = self.track_hexes_being_edited();
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
             let world = self.timeline.curr();
-            let scene = Scene{glyphs: &world.glyphs, polymers: &world.polymers, area: &world.area_touched,
-                float_world: &self.float_world, hidden: None};
-            render.draw(ctx, &self.camera, &self.tracks, self.show_area, &scene);
+            let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
+                area: &world.area_touched, float_world: &self.float_world, hidden: None};
+            render.draw(ctx, &self.camera, self.show_area, &scene);
             if let Some(part) = self.highlighted_part(){
                 render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
@@ -547,10 +557,11 @@ impl Loaded{
             Ok(world) if self.timeline.at_start() => (world, &preview.float_world),
             _ => (self.timeline.curr(), &self.float_world),
         };
-        let scene = Scene{glyphs: &world.glyphs, polymers: &world.polymers, area: &world.area_touched,
+        //Tracks are drawn as they are now, except a track being changed, which is drawn with the preview
+        let tracks = self.scene_tracks.as_ref().map_or(&self.timeline.base().track_maps, |(_, t)| t);
+        let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, area: &world.area_touched,
             float_world, hidden: Some(part)};
-        let tracks = self.scene_tracks.as_ref().map_or(&self.tracks, |(_, t)| t);
-        render.draw(ctx, &self.camera, tracks, self.show_area, &scene);
+        render.draw(ctx, &self.camera, self.show_area, &scene);
         match part{
             PartId::Glyph(i) => render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[i],
                 preview.polymer.as_ref(), preview.track.as_ref(), extra),
@@ -559,5 +570,110 @@ impl Loaded{
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.overlaps, OVERLAP_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &track_hexes, TRACK_TOOL_COLOR);
+    }
+}
+
+//These edit the board, which needs the editor
+#[cfg(all(test, feature = "editor_ui"))]
+mod tests {
+    use super::*;
+
+    const SCREEN: (f32, f32) = (1000., 800.);
+    //The pixel at a hex's center
+    fn px(loaded: &Loaded, x: i32, y: i32) -> (f32, f32){
+        let scale = loaded.camera.scale(SCREEN);
+        let world = pos_to_xy(Pos::new(x, y)) + loaded.camera.offset;
+        ((world.x*scale.0 + 1.)/2.*SCREEN.0, (1. - world.y*scale.1)/2.*SCREEN.1)
+    }
+    fn press(loaded: &mut Loaded, x: i32, y: i32, keymods: KeyMods){
+        let at = px(loaded, x, y);
+        loaded.press(at, SCREEN, keymods);
+    }
+    fn move_to(loaded: &mut Loaded, x: i32, y: i32){
+        let at = px(loaded, x, y);
+        loaded.pointer_moved(at, SCREEN, false);
+    }
+    fn bonder(x: i32, y: i32) -> Glyph{
+        Glyph{pos: Pos::new(x, y), rot: 0, glyph_type: GlyphType::Bonding}
+    }
+    const SHIFT: KeyMods = KeyMods{shift: true, ctrl: false, alt: false, logo: false};
+
+    #[test]
+    fn dragging_a_glyph_moves_it() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        press(&mut loaded, 0, 0, KeyMods::default());
+        assert_eq!(loaded.tool.press().map(Press::part), Some(PartId::Glyph(0)));
+        move_to(&mut loaded, 3, 0);
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(3, 0));
+        assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+        assert!(loaded.dirty && loaded.history.can_undo());
+    }
+
+    #[test]
+    fn running_cancels_a_drag_but_not_a_press() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        press(&mut loaded, 0, 0, KeyMods::default());
+        loaded.run_state = RunState::FreeRun;
+        loaded.refresh_preview();
+        assert!(loaded.tool.press().is_some());
+        loaded.run_state = RunState::Manual(0);
+        move_to(&mut loaded, 3, 0);
+        loaded.run_state = RunState::FreeRun;
+        loaded.refresh_preview();
+        assert!(loaded.tool.press().is_none());
+    }
+
+    #[test]
+    fn shift_keeps_placing_and_right_click_stops() {
+        let mut loaded = Loaded::for_test(vec![], vec![]);
+        loaded.start_placing(NewPart::Glyph(GlyphType::Calcification));
+        press(&mut loaded, 2, 0, SHIFT);
+        assert!(loaded.tool.placing().is_some());
+        press(&mut loaded, 4, 0, KeyMods::default());
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+        let placed: Vec<Pos> = loaded.timeline.base().glyphs.iter().map(|g| g.pos).collect();
+        assert_eq!(placed, vec![Pos::new(2, 0), Pos::new(4, 0)]);
+
+        loaded.start_placing(NewPart::Arm(ArmType::PlainArm));
+        loaded.right_click();
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+    }
+
+    #[test]
+    fn a_new_track_keeps_drawing_after_its_first_stroke() {
+        let mut loaded = Loaded::for_test(vec![], vec![]);
+        loaded.start_new_track();
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 2, 0);
+        loaded.release();
+        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
+        assert!(matches!(&loaded.tool, BoardTool::Track(TrackMode{glyph: Some(0), tool: TrackTool::AddBack}, None)));
+    }
+
+    #[test]
+    fn escape_lets_go_of_one_thing_at_a_time() {
+        let mut loaded = Loaded::for_test(vec![], vec![]);
+        loaded.start_new_track();
+        press(&mut loaded, 0, 0, KeyMods::default());
+        assert!(loaded.tool.stroke().is_some());
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        assert!(loaded.tool.stroke().is_none() && loaded.tool.track_mode().is_some());
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+        assert!(!loaded.handle_key(KeyCode::Escape, KeyMods::default()), "nothing left for Esc to do");
+        assert!(loaded.timeline.base().glyphs.is_empty(), "the stroke was dropped, not applied");
+    }
+
+    #[test]
+    fn selecting_another_part_ends_the_track_tool() {
+        let track = Glyph{pos: Pos::new(0, 2), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), track], vec![]);
+        loaded.set_track_tool(1, Some(TrackTool::AddBack));
+        loaded.select(Some(PartId::Glyph(1)));
+        assert!(loaded.tool.track_mode().is_some(), "selecting its own track keeps it");
+        loaded.select(Some(PartId::Glyph(0)));
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
     }
 }

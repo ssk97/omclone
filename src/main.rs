@@ -1,9 +1,4 @@
-mod parser;
-mod sim;
-#[cfg(test)]
-mod test;
-#[cfg(any(feature = "editor_ui",feature = "display_ui",test))]
-mod timeline;
+use omclone::{parser, sim, timeline};
 
 #[cfg(any(feature = "editor_ui",feature = "display_ui",))]
 mod render_library;
@@ -27,6 +22,11 @@ fn main() -> Result< () >{
 
     use miniquad::*;
     let conf = conf::Conf{
+        window_title: String::from("omclone"),
+        window_width: 1600,
+        window_height: 900,
+        //Sharp text on scaled displays. The board works in logical pixels, so it looks the same either way.
+        high_dpi: true,
         fullscreen: false,
         .. Default::default()
     };
