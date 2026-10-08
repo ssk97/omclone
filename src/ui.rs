@@ -14,13 +14,13 @@ use simple_eyre::eyre::Result;
 mod board;
 mod layout_edit;
 mod loaded;
-mod tape_buffer;
+mod tape_grid;
 mod undo;
 mod windows;
 use board::*;
 use layout_edit::*;
 use loaded::{Loaded, RunState};
-use tape_buffer::*;
+use tape_grid::{TapeSelection, first_difference, longest_tape};
 use undo::UndoHistory;
 use windows::PathText;
 
@@ -235,7 +235,9 @@ impl EventHandler for MyMiniquadApp {
     }
 
     fn mouse_wheel_event(&mut self, dx: f32, dy: f32) {
-        self.egui_mq.mouse_wheel_event(dx, dy);
+        //miniquad gives Windows wheel movement in its raw units, 120 per notch, but egui takes it as lines
+        let notch = if cfg!(windows) {120.} else {1.};
+        self.egui_mq.mouse_wheel_event(dx / notch, dy / notch);
         if let Loaded(loaded) = &mut self.app_state{
             //While a part is held, the wheel picks between the parts under it
             if loaded.wheel(dy){
@@ -308,7 +310,8 @@ impl EventHandler for MyMiniquadApp {
     ) {
         //Hotkeys for a held part aren't typed anywhere
         if let Loaded(loaded) = &self.app_state{
-            if loaded.press.is_some() && !self.egui_mq.egui_ctx().text_edit_focused(){
+            let ctx = self.egui_mq.egui_ctx();
+            if loaded.press.is_some() && !ctx.text_edit_focused() && !tape_grid::has_focus(ctx){
                 return;
             }
         }
@@ -323,8 +326,11 @@ impl EventHandler for MyMiniquadApp {
     ) {
         self.keymods = keymods;
         if let Loaded(loaded) = &mut self.app_state{
-            //Typing in a tape takes priority over the part hotkeys
-            if !self.egui_mq.egui_ctx().text_edit_focused() && loaded.handle_key(keycode, keymods){
+            //Typing in a text box or the tapes takes priority over the part hotkeys, though undo works in the tapes
+            let ctx = self.egui_mq.egui_ctx();
+            let undo_key = (keymods.ctrl || keymods.logo) && matches!(keycode, KeyCode::Z | KeyCode::Y);
+            let typing = ctx.text_edit_focused() || (tape_grid::has_focus(ctx) && !undo_key);
+            if !typing && loaded.handle_key(keycode, keymods){
                 return;
             }
         }

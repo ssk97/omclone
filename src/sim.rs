@@ -167,10 +167,9 @@ impl Tape {
     pub fn halts(&self) -> bool {
         self.halts
     }
-    pub fn clear(&mut self) {
-        self.instructions.clear();
-        self.first = 0;
-        self.halts = false;
+    //The timestep just after the last instruction, before the tape loops
+    pub fn end(&self) -> usize {
+        self.first + self.instructions.len()
     }
     pub fn get(&self, timestep: usize, loop_len: usize) -> Instr {
         use Instr::Empty;

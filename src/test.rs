@@ -413,7 +413,7 @@ mod polymer_tests {
     }
 }
 
-//Instruction tape editing, as done by the editor's tape text boxes
+//Instruction tape editing, as done by the editor's tape grid
 mod tape_edit_tests {
     use crate::sim::*;
     use Instr::*;

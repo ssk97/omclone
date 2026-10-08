@@ -1,9 +1,15 @@
 //The loaded solution: its timeline and the editor state around it
 use super::*;
+use std::ops::Range;
 
 pub(super) enum RunState{
     //Crashed holds the timestep it crashed in
     Manual(usize), FreeRun, Crashed(usize)
+}
+//What an undo step changed: tapes-only steps can be undone without re-simulating from the start
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum StepKind{
+    Layout, Tapes
 }
 pub(super) struct Loaded{
     pub(super) timeline: Timeline,
@@ -16,6 +22,9 @@ pub(super) struct Loaded{
     pub(super) message: Option<String>,
 
     pub(super) tape_mode: bool,
+    pub(super) tape_sel: TapeSelection,
+    //The arms and caret timestep after the last tape edit, while more typing there joins its undo step
+    pub(super) tape_group: Option<(Range<usize>, usize)>,
     pub(super) run_state: RunState,
     pub(super) show_area: bool,
     pub(super) run_speed: f64,
@@ -36,7 +45,7 @@ pub(super) struct Loaded{
     pub(super) preview: Option<Preview>,
     pub(super) scene_tracks: Option<(usize, TrackBindings)>,
     pub(super) pointer_over_ui: bool,
-    pub(super) history: UndoHistory<World>,
+    pub(super) history: UndoHistory<World, StepKind>,
     pub(super) tracks_dirty: bool,
     //Track buffers to free once the rendering context is available
     pub(super) dead_tracks: Vec<TrackBindings>,
@@ -57,6 +66,8 @@ impl Loaded{
             message: None,
 
             tape_mode: false,
+            tape_sel: TapeSelection::default(),
+            tape_group: None,
             run_state: RunState::Manual(0),
             show_area,
             run_speed: 0.05,
@@ -82,7 +93,8 @@ impl Loaded{
     //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
     pub(super) fn commit_world(&mut self, mut world: World){
         world.repeat_length = world.repeat_length.max(self.timeline.base().repeat_length);
-        self.history.record(self.timeline.base().clone());
+        self.history.record(self.timeline.base().clone(), StepKind::Layout);
+        self.tape_group = None;
         self.replace_base(world);
     }
     fn replace_base(&mut self, world: World){
@@ -102,26 +114,82 @@ impl Loaded{
             self.edit_lock()
         }
     }
-    //Goes back to the starting world (with its tapes) from before the last layout edit
+    //Goes back to the starting world (with its tapes) from before the last edit
     pub(super) fn undo(&mut self){
         if self.history_lock().is_some() || !self.history.can_undo(){
             return;
         }
-        let previous = self.history.undo(self.timeline.base().clone()).unwrap();
-        self.restore_base(previous);
+        let (previous, kind) = self.history.undo(self.timeline.base().clone()).unwrap();
+        self.restore(previous, kind);
     }
     pub(super) fn redo(&mut self){
         if self.history_lock().is_some() || !self.history.can_redo(){
             return;
         }
-        let next = self.history.redo(self.timeline.base().clone()).unwrap();
-        self.restore_base(next);
+        let (next, kind) = self.history.redo(self.timeline.base().clone()).unwrap();
+        self.restore(next, kind);
+    }
+    fn restore(&mut self, world: World, kind: StepKind){
+        self.tape_group = None;
+        match kind{
+            StepKind::Layout => self.restore_base(world),
+            StepKind::Tapes => self.restore_tapes(world),
+        }
     }
     //Parts may be numbered differently afterwards, so nothing stays selected
     fn restore_base(&mut self, world: World){
         self.replace_base(world);
         self.stack_view = None;
         self.select(None);
+    }
+    //Puts back the tapes and loop length from a step that only changed those. The parts are the same, so the
+    //selection stays, and only what follows the first changed timestep is simulated again.
+    fn restore_tapes(&mut self, world: World){
+        let loop_len = self.timeline.base().repeat_length;
+        let saved_loop_len = world.repeat_length;
+        let mut earliest = usize::MAX;
+        let base = self.timeline.base_mut();
+        debug_assert_eq!(base.arms.len(), world.arms.len());
+        for (arm, saved) in base.arms.iter_mut().zip(world.arms){
+            if let Some(step) = first_difference(&arm.instruction_tape, &saved.instruction_tape, loop_len){
+                earliest = earliest.min(step);
+            }
+            arm.instruction_tape = saved.instruction_tape;
+        }
+        if saved_loop_len != loop_len{
+            earliest = earliest.min(self.change_repeat_length(saved_loop_len));
+        }
+        if earliest != usize::MAX{
+            self.finish_tape_edit(earliest);
+        }
+    }
+    //Keeps the starting world from before a tape edit, unless the edit continues the last one: more typing on the
+    //same arms, starting where the caret was left. `from` and `to` are the caret before and after the edit.
+    pub(super) fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, groupable: bool){
+        if !(groupable && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
+            self.history.record(self.timeline.base().clone(), StepKind::Tapes);
+        }
+        self.tape_group = groupable.then_some((arms, to));
+    }
+    //Updates everything that depends on the tapes after they changed, starting from timestep `earliest`
+    pub(super) fn finish_tape_edit(&mut self, mut earliest: usize){
+        let base = self.timeline.base();
+        let longest = longest_tape(&base.arms);
+        if self.max_timestep < longest{
+            self.max_timestep = longest;
+        }
+        let min_loop = base.min_repeat_length();
+        if base.repeat_length < min_loop{
+            earliest = earliest.min(self.change_repeat_length(min_loop));
+        }
+        self.apply_base_change(earliest);
+    }
+    //The timestep the tape caret is at: where the timeline is headed, or where it is
+    pub(super) fn cursor_step(&self) -> usize{
+        match self.run_state{
+            RunState::Manual(target) => target,
+            RunState::FreeRun | RunState::Crashed(_) => self.timeline.time().floor() as usize,
+        }
     }
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.

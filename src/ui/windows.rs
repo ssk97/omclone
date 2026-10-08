@@ -75,7 +75,7 @@ pub(super) fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut O
     }
 }
 //The largest max timestep or loop length that can be entered. It's far beyond real solutions, and keeps
-//the space-padded timestep markers in arms_window from getting huge.
+//the tape grid in arms_window from getting huge.
 const MAX_TIMESTEP_FIELD: usize = 1_000_000;
 pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     egui::Window::new("World loaded").default_pos((0.,0.)).show(egui_ctx, |ui| {
@@ -220,13 +220,20 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
     #[cfg(not(feature = "editor_ui"))]{
         arm_window = arm_window.default_open(false);
     }
-    arm_window.default_width(600.).show(egui_ctx, |ui| {
+    //It can be made shorter than the tapes, which then scroll, but not taller.
+    //The height that fits them is measured as the window is drawn, so it applies from the next frame.
+    let fit_id = egui::Id::new("arms_window_fit_height");
+    if let Some(height) = egui_ctx.data(|d| d.get_temp::<f32>(fit_id)){
+        arm_window = arm_window.max_height(height);
+    }
+    let shown = arm_window.default_width(600.).show(egui_ctx, |ui| {
+        let top = ui.min_rect().top();
         #[cfg(not(feature = "editor_ui"))]{
             ui.label("Editing Disabled");
         }
         ui.horizontal( |ui| {
             #[cfg(feature = "editor_ui")]{
-                ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode");
+                ui.checkbox(&mut loaded.tape_mode, "Tape/overwrite mode").on_hover_text("The Insert key toggles it");
                 ui.separator();
                 //The blanks these add or remove don't change what runs
                 if ui.button("space ends").clicked() {
@@ -278,57 +285,15 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                 ui.separator();
             }
         });
-        let curr_timestep = loaded.timeline.time().floor() as usize;
-        let end_spacing = loaded.max_timestep.saturating_sub(curr_timestep);
-        let marker = " ".repeat(curr_timestep+3)+"V"+&" ".repeat(end_spacing);
-        //+&(" ".repeat(loaded.max_timestep-loaded.curr_timestep));
-        let mut earliest_edit = None;
-        let mut target_time = None;
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.add(egui::Label::new(egui::RichText::new(marker).monospace()).wrap_mode(egui::TextWrapMode::Extend));
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (a_num, a) in loaded.timeline.base_mut().arms.iter_mut().enumerate(){
-                    let text = a.instruction_tape.to_string();
-                    let mut text_buf = TapeBuffer{
-                        tape_ref: &mut a.instruction_tape,
-                        earliest_edit: &mut earliest_edit,
-                        tape_mode: loaded.tape_mode,
-                        held_str: text,
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{:02}",a_num+1));
-                        let mut line_edit = egui::TextEdit::singleline(&mut text_buf)
-                        .code_editor().desired_width(f32::INFINITY);
-                        #[cfg(not(feature = "editor_ui"))]{
-                            line_edit = line_edit.interactive(false);
-                        }
-                        let text_output = line_edit.show(ui);
-                        if let Some(cursor) = text_output.cursor_range{
-                            target_time = Some(cursor.primary.index.0);
-                        }
-                    });
-                }
-                let marker2 = " ".repeat(curr_timestep+3)+"^";
-                ui.add(egui::Label::new(egui::RichText::new(marker2).monospace()));
-            });
-        });
-        if let Some(target) = target_time {
-            loaded.try_set_target_time(target);
-        }
-        if let Some(mut edit_step) = earliest_edit{
-            let base = loaded.timeline.base();
-            let min_time = base.arms.iter()
-                .fold(0, |val, arm| usize::max(val, arm.instruction_tape.instructions.len()+arm.instruction_tape.first));
-            if loaded.max_timestep < min_time{
-                loaded.max_timestep = min_time;
-            }
-            let min_loop = base.min_repeat_length();
-            if base.repeat_length < min_loop{
-                edit_step = edit_step.min(loaded.change_repeat_length(min_loop));
-            }
-            loaded.apply_base_change(edit_step);
-        }
+        let grid_top = ui.cursor().top();
+        let grid_height = tape_grid::tape_grid(ui, loaded);
+        //Where the content would end with every arm showing, and the frame's margin below it
+        (grid_top + grid_height - top, top, egui::Frame::window(ui.style()).total_margin().bottom)
     });
+    if let Some(egui::InnerResponse{inner: Some((content, top, margin)), response}) = shown{
+        let fit = (top - response.rect.top() + content + margin).ceil();
+        egui_ctx.data_mut(|d| d.insert_temp(fit_id, fit));
+    }
 }
 //Shows the reason a disabled control can't be used
 fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Response{
