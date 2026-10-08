@@ -9,6 +9,8 @@ use nalgebra::{Point2, Vector2};
 pub const SQRT3: f32 = 1.7320508;
 pub type XYPos = Point2<f32>;
 pub type XYVec = Vector2<f32>;
+//The editor can't place anything further out than this, so positions stay far from overflowing
+pub const MAX_COORD: i32 = 1 << 20;
 
 pub fn pos_to_xy(input: Pos) -> XYPos {
     XYPos::origin() + pos_to_xy_vec(input)

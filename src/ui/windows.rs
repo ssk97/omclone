@@ -6,6 +6,11 @@ extern "C" {
     fn save_file(filedata: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
 }
 
+//A number that's typed in rather than dragged, applied once on Enter or when the field loses focus
+//(each change is a layout edit). Only typed values are clamped to `range`, not the value shown.
+fn typed_number<N: egui::emath::Numeric>(value: &mut N, range: std::ops::RangeInclusive<N>) -> egui::DragValue<'_>{
+    egui::DragValue::new(value).range(range).clamp_existing_to_range(false).speed(0.).update_while_editing(false)
+}
 //The selected part's fields, returning an edit if one was changed
 //`locked` explains why the fields can't be edited, if they can't
 fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&str>) -> Option<PartEdit>{
@@ -15,7 +20,8 @@ fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&s
     }
     let editable = locked.is_none();
     let (pos, rot) = match part{
-        PartId::Glyph(i) => (world.glyphs[i].pos, world.glyphs[i].rot),
+        //Only a glyph's rotation mod 6 matters (an arm's is kept within -5..=5, like omsim)
+        PartId::Glyph(i) => (world.glyphs[i].pos, normalize_dir(world.glyphs[i].rot)),
         PartId::Arm(i) => (world.arms[i].pos, world.arms[i].rot),
     };
     let is_track = matches!(part, PartId::Glyph(i) if world.glyphs[i].is_track());
@@ -25,13 +31,13 @@ fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&s
         let (mut x, mut y, mut r) = (pos.x, pos.y, rot);
         ui.horizontal(|ui| {
             ui.label("x:");
-            ui.add(egui::DragValue::new(&mut x).speed(0.05));
+            ui.add(typed_number(&mut x, -MAX_COORD..=MAX_COORD));
             ui.label("y:");
-            ui.add(egui::DragValue::new(&mut y).speed(0.05));
-            //Track rotation isn't stored (the path rotates instead), so it's only changed by dragging
+            ui.add(typed_number(&mut y, -MAX_COORD..=MAX_COORD));
+            //Track rotation isn't stored (the path rotates instead), so it's only turned while dragging it on the board
             if !is_track{
                 ui.label("rot:");
-                ui.add(egui::DragValue::new(&mut r).speed(0.05));
+                ui.add(typed_number(&mut r, -5..=5));
             }
         });
         edit.delta = Pos::new(x, y) - pos;
@@ -41,7 +47,7 @@ fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&s
             ui.horizontal(|ui| {
                 let mut len = arm.len;
                 ui.label("length:");
-                ui.add_enabled(!arm.arm_type.is_wheel(), egui::DragValue::new(&mut len).range(ARM_LENGTHS).speed(0.05));
+                ui.add_enabled(!arm.arm_type.is_wheel(), typed_number(&mut len, ARM_LENGTHS));
                 edit.len = len - arm.len;
                 let mut arm_type = arm.arm_type;
                 egui::ComboBox::from_id_salt("arm_type").selected_text(arm_type_name(arm_type)).show_ui(ui, |ui| {
@@ -68,6 +74,9 @@ pub(super) fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut O
         if !opened {*message = None;}
     }
 }
+//The largest max timestep or loop length that can be entered. It's far beyond real solutions, and keeps
+//the space-padded timestep markers in arms_window from getting huge.
+const MAX_TIMESTEP_FIELD: usize = 1_000_000;
 pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     egui::Window::new("World loaded").default_pos((0.,0.)).show(egui_ctx, |ui| {
         ui.style_mut().spacing.slider_width = 500.;
@@ -93,7 +102,9 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
                 target_time += 1;
             }
             ui.label("Max Timestep:");
+            //Running or long tapes can take it past the limit, which only applies to changing it here
             ui.add(egui::DragValue::new(&mut loaded.max_timestep)
+                .range(0..=MAX_TIMESTEP_FIELD).clamp_existing_to_range(false)
                 .speed(0.1));
             ui.separator();
             if loaded.max_timestep < target_time{
@@ -107,8 +118,10 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             ui.label("Loop length:");
 
             let mut repeat_length = loaded.timeline.base().repeat_length;
+            //Typed lengths apply on Enter, since each change re-simulates
             let repeat_length_response = ui.add_enabled(EDITOR_ENABLED, egui::DragValue::new(&mut repeat_length)
-                .range(min_size..=usize::MAX));
+                .range(min_size..=MAX_TIMESTEP_FIELD.max(min_size)).clamp_existing_to_range(false)
+                .update_while_editing(false));
             if repeat_length_response.changed() && repeat_length != loaded.timeline.base().repeat_length{
                 let earliest_step = loaded.change_repeat_length(repeat_length);
                 loaded.apply_base_change(earliest_step);
@@ -375,7 +388,7 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
         ui.horizontal(|ui| {
             ui.label("Arm #:");
             let mut number = i+1;
-            let field = ui.add_enabled(lock.is_none(), egui::DragValue::new(&mut number).range(1..=arm_count).speed(0.05));
+            let field = ui.add_enabled(lock.is_none(), typed_number(&mut number, 1..=arm_count));
             locked_hover(field.on_hover_text("Arms run in this order"), lock);
             if number != i+1{
                 edit = Some(LayoutEdit::MoveArm{from: i, to: number-1});

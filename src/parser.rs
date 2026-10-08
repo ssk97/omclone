@@ -336,7 +336,8 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
     for glyph in &world.glyphs{
         let rot = glyph.rot;
         let pos = glyph.pos;
-        let arm_size = 0;
+        //The game writes a size of 1 for every part that isn't an arm
+        let arm_size = 1;
         let arm_index = 0;
         let instructions = Vec::new();
         //Glyph data is already relative, as in the file
@@ -353,8 +354,9 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
             GlyphType::OutputRepeating(_, _,id) => {
                 (TOutputRep, *id, None, None)
             }
+            //The conduit's id goes in its own block; the game leaves the input/output index at 0
             GlyphType::Conduit(conduit,id) => {
-                (TConduit, *id, None, Some((*id, conduit.clone())))
+                (TConduit, 0, None, Some((*id, conduit.clone())))
             }
             normal_glyph_type => {
                 (TGlyph(normal_glyph_type.clone()), 0, None, None)
@@ -619,6 +621,13 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
 mod tests {
     use super::*;
 
+    fn empty_puzzle() -> FullPuzzle {
+        FullPuzzle {
+            puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+        }
+    }
+
     #[test]
     fn negative_instruction_indexes_are_shifted() {
         use Instr::*;
@@ -630,13 +639,36 @@ mod tests {
             puzzle_name: String::new(), solution_name: String::new(), stats: None,
             part_list: vec![arm(0, vec![(-3, Grab), (-1, Drop)]), arm(1, vec![(2, RotateClockwise)])],
         };
-        let puzzle = FullPuzzle {
-            puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
-        };
-        let init = puzzle_prep(&puzzle, &solution).unwrap();
+        let init = puzzle_prep(&empty_puzzle(), &solution).unwrap();
         let tapes: Vec<(usize, Vec<Instr>)> = init.arms.iter()
             .map(|a| (a.instruction_tape.first, a.instruction_tape.instructions.clone())).collect();
         assert_eq!(tapes, vec![(0, vec![Grab, Empty, Drop]), (5, vec![RotateClockwise])]);
+    }
+
+    #[test]
+    fn saved_parts_match_the_game() {
+        let glyph = |x: i32, glyph_type: GlyphType| Glyph { pos: Pos::new(x, 0), rot: 0, glyph_type };
+        let conduit = |x: i32| glyph(x, GlyphType::Conduit(vec![Pos::new(0, 0)], 101));
+        let track = glyph(9, GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)]));
+        let world = World::setup_sim(&InitialWorld {
+            glyphs: vec![glyph(0, GlyphType::Bonding), conduit(3), conduit(6), track],
+            arms: vec![Arm::new(Pos::new(9, 0), 0, 2, ArmType::PlainArm, Tape::new(0, vec![Instr::Grab]))],
+        }).unwrap();
+        let solution = create_solution(&world, String::new(), String::new());
+        //Like the game: parts other than arms have size 1, and a conduit's id is only in its own block
+        for part in &solution.part_list {
+            match &part.part_type {
+                TArm(_) => assert_eq!(part.arm_size, 2),
+                other => assert_eq!(part.arm_size, 1, "{other:?}"),
+            }
+            if part.part_type == TConduit {
+                assert_eq!((part.input_output_index, part.conduit.as_ref().map(|c| c.0)), (0, Some(101)));
+            }
+        }
+        let mut data = Vec::new();
+        write_solution(&mut data, &solution).unwrap();
+        let parsed = parse_solution(&mut data.as_slice()).unwrap();
+        let loaded = World::setup_sim(&puzzle_prep(&empty_puzzle(), &parsed).unwrap()).unwrap();
+        assert_eq!(loaded.conduit_pairs, world.conduit_pairs);
     }
 }

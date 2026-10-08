@@ -11,7 +11,6 @@ default = ["editor_ui"]
 benchmark = []
 editor_ui = ["display_ui"]
 display_ui = ["egui", "miniquad", "egui-miniquad", "image", "fontdue"]
-bindgen = ["wasm-bindgen","web-sys","console_error_panic_hook"]
 
 [[bin]]
 name="omclone"
@@ -22,13 +21,6 @@ path = "src/main.rs"
 name="omclone_benchmark"
 required-features = ["benchmark"]
 path = "src/benchmark.rs"
-
-#[lib]
-#crate-type = ["cdylib"]
-#name="omclone_habcheck"
-#path = "src/hab_checker.rs"
-#required features doesn't work, need to add it manually
-#required-features = ["bindgen"]
 
 [profile.dev]
 opt-level = 3
@@ -58,10 +50,6 @@ fontdue = { version = "0.7", optional = true}
 #egui-miniquad = {version = "0.14", optional = true}
 egui-miniquad = { git = "https://github.com/not-fl3/egui-miniquad", rev="47417e0293b0f3104f7d291e38b1d30d11768aa6", optional = true }
 image = {version = "0.24.6", optional = true, default-features = false, features = ["png"]}
-
-wasm-bindgen = {version = "0.2.84", optional = true}
-web-sys = {version = "0.3.61", optional = true}
-console_error_panic_hook = { version = "0.1.7", optional = true }
 
 color-eyre = {version = "0.6", optional = true}
 simple-eyre = "0.3"

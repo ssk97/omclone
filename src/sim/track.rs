@@ -132,10 +132,8 @@ pub fn path_to_text(hexes: &[Pos]) -> String {
     text
 }
 
-//Path text can't reach hexes further out than this, so positions stay far from overflowing
-const MAX_PATH_COORD: i32 = 1 << 20;
-//Reads path text into a path starting at `first`, keeping everything up to the first part it can't read.
-//Letters can be either case, and whitespace is skipped.
+//Reads path text into a path starting at `first`, keeping everything up to the first part it can't read
+//(or that goes past MAX_COORD). Letters can be either case, and whitespace is skipped.
 pub fn parse_path_text(text: &str, first: Pos) -> Vec<Pos> {
     let mut chars = text.chars().filter(|c| !c.is_whitespace()).peekable();
     let mut path = vec![first];
@@ -153,7 +151,7 @@ pub fn parse_path_text(text: &str, first: Pos) -> Vec<Pos> {
             }
         };
         let next = at + step;
-        if next.x.abs() > MAX_PATH_COORD || next.y.abs() > MAX_PATH_COORD {
+        if next.x.abs() > MAX_COORD || next.y.abs() > MAX_COORD {
             break;
         }
         at = next;
@@ -179,7 +177,7 @@ fn parse_int(chars: &mut Peekable<impl Iterator<Item=char>>) -> Option<i32> {
     while let Some(d) = chars.next_if(|c| c.is_ascii_digit()) {
         s.push(d);
     }
-    s.parse().ok().filter(|n: &i32| n.unsigned_abs() <= MAX_PATH_COORD as u32)
+    s.parse().ok().filter(|n: &i32| n.unsigned_abs() <= MAX_COORD as u32)
 }
 
 //How many steps in the path aren't to a neighboring hex

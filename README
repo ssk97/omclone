@@ -11,12 +11,11 @@ Enable only one of "editor_ui" or "display_ui" to get the corresponding app
 You can use "cargo build --release --target wasm32-unknown-unknown" to build the js version. Example html pages are in display_html
 You may want to change between opt-level "3" and "s" for executable vs. wasm respectively.
 ----
-Enable feature "color-eyre" for improved error reporting. Right now most errors hard crash.
+Enable feature "color-eyre" for more detailed error reports. Load and simulation errors are shown in the app either way.
 Enable "benchmark" to get a program which will just run the default solution forever (useful for performance analysis)
 
-To use "hab_checker", uncomment its lib in Cargo.toml, enable "bindgen" and compile with "wasm-pack build --target web".
-
-You used to be able to enable "cx_checker" and compile with "wasm-pack build --target no-modules" to get the .wasm and .js in pkg folder. However, this functionality is currently broken.
+The puzzle-specific variant checkers ("hab_checker" and "cx_checker") have been removed.
+See CHECKERS.md for how they worked and what adding a new one would take.
 
 ----
 
