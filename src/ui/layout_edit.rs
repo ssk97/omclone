@@ -43,7 +43,7 @@ fn edit_part(layout: &mut InitialWorld, edit: &PartEdit){
             if let Some(arm_type) = edit.arm_type{
                 arm.arm_type = arm_type;
             }
-            arm.len = if arm.arm_type.is_wheel() {1} else {(arm.len + edit.len).clamp(1, 3)};
+            arm.len = arm.arm_type.clamp_len(arm.len + edit.len);
         }
     }
 }
@@ -89,7 +89,7 @@ impl LayoutEdit{
                     PartId::Glyph(layout.glyphs.len()-1)
                 }
                 NewPart::Arm(arm_type) => {
-                    let len = if arm_type.is_wheel() {1} else {(*len).clamp(1, 3)};
+                    let len = arm_type.clamp_len(*len);
                     layout.arms.push(Arm::new(*pos, *rot, len, *arm_type, Tape::new(0, Vec::new())));
                     PartId::Arm(layout.arms.len()-1)
                 }
@@ -146,11 +146,7 @@ impl LayoutEdit{
 }
 //A track's hexes, in global positions
 pub(super) fn track_path(world: &World, glyph: usize) -> Vec<Pos>{
-    let g = &world.glyphs[glyph];
-    match &g.glyph_type{
-        GlyphType::Track(path) => path.iter().map(|&p| g.reposition(p)).collect(),
-        _ => Vec::new(),
-    }
+    world.glyphs[glyph].footprint(None).into_vec()
 }
 //Inputs, outputs and conduits come with the puzzle, so they can't be added or removed
 pub(super) fn is_puzzle_part(glyph_type: &GlyphType) -> bool{

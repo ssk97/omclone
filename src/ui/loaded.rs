@@ -86,6 +86,8 @@ impl Loaded{
         self.replace_base(world);
     }
     fn replace_base(&mut self, world: World){
+        //The pending edit may be unchanged, but its preview was made from the old base
+        self.drop_preview();
         let target = self.timeline.time().floor() as usize;
         self.timeline.replace_base(world);
         self.tracks_dirty = true;

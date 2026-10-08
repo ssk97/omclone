@@ -419,10 +419,16 @@ pub enum ArmType {
     PlainArm, DoubleArm, TripleArm, HexArm,
     Piston, VanBerlo, Ravari
 }
+//How many hexes an arm (other than a wheel) can reach
+pub const ARM_LENGTHS: std::ops::RangeInclusive<i32> = 1..=3;
 impl ArmType {
     //Wheels hold their atoms permanently and ignore grab/drop
     pub fn is_wheel(&self) -> bool {
         matches!(self, ArmType::VanBerlo | ArmType::Ravari)
+    }
+    //The nearest length this type of arm can have (wheels only have length 1)
+    pub fn clamp_len(&self, len: i32) -> i32 {
+        if self.is_wheel() {1} else {len.clamp(*ARM_LENGTHS.start(), *ARM_LENGTHS.end())}
     }
 }
 #[derive(Debug, Clone)]
@@ -1265,9 +1271,14 @@ impl World {
         Ok(())
     }
 
-    //The hexes a glyph covers: its area, and what it can overlap
+    //The hexes a glyph covers, which is what it can overlap. An input with several variants covers its
+    //first, which setup has already spawned and moved on from.
     pub fn glyph_footprint(&self, idx: usize) -> SmallVec<[Pos; 8]> {
-        self.glyphs[idx].footprint(self.polymers.get(&idx))
+        let glyph = &self.glyphs[idx];
+        match self.input_variants.iter().find(|(id, _)| *id == idx) {
+            Some((_, variants)) => variants[0].iter().map(|a| glyph.reposition(a.pos)).collect(),
+            None => glyph.footprint(self.polymers.get(&idx)),
+        }
     }
     //Arms only cover their base hex
     pub fn part_footprint(&self, part: PartId) -> SmallVec<[Pos; 8]> {
@@ -1304,30 +1315,28 @@ impl World {
                 overlaps.push(*hex);
             }
         }
-        for other in self.all_parts() {
-            if !self.parts_conflict(part, other) {continue;}
-            let other_footprint = self.part_footprint(other);
-            for &hex in footprint {
-                if other_footprint.contains(&hex) && !overlaps.contains(&hex) {
-                    overlaps.push(hex);
-                }
-            }
-        }
+        let others = self.all_parts().filter(|&other| self.parts_conflict(part, other));
+        self.add_covered(&mut overlaps, others, footprint);
         overlaps
     }
     //The hexes of `hexes` that would overlap a glyph if added to a track (arms can sit on track).
     //`track` is the track itself, if it's already placed.
     pub fn track_overlaps(&self, track: Option<usize>, hexes: &[Pos]) -> SmallVec<[Pos; 8]> {
         let mut overlaps = SmallVec::new();
-        for i in (0..self.glyphs.len()).filter(|&i| Some(i) != track) {
-            let footprint = self.glyph_footprint(i);
+        let others = (0..self.glyphs.len()).filter(|&i| Some(i) != track).map(PartId::Glyph);
+        self.add_covered(&mut overlaps, others, hexes);
+        overlaps
+    }
+    //Adds the hexes of `hexes` that any of `parts` covers to `overlaps`, each once
+    fn add_covered(&self, overlaps: &mut SmallVec<[Pos; 8]>, parts: impl Iterator<Item=PartId>, hexes: &[Pos]) {
+        for part in parts {
+            let footprint = self.part_footprint(part);
             for &hex in hexes {
                 if footprint.contains(&hex) && !overlaps.contains(&hex) {
                     overlaps.push(hex);
                 }
             }
         }
-        overlaps
     }
     pub fn part_overlaps(&self, part: PartId) -> SmallVec<[Pos; 8]> {
         self.overlaps_with_others(part, &self.part_footprint(part))
@@ -1348,7 +1357,8 @@ impl World {
     }
     fn initial_area(&mut self) {
         for idx in 0..self.glyphs.len() {
-            let footprint = self.glyph_footprint(idx);
+            //Unlike glyph_footprint, an input with several variants counts the one it's on now
+            let footprint = self.glyphs[idx].footprint(self.polymers.get(&idx));
             self.area_touched.extend(footprint);
         }
         for arm in &self.arms {

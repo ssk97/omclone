@@ -41,7 +41,7 @@ fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&s
             ui.horizontal(|ui| {
                 let mut len = arm.len;
                 ui.label("length:");
-                ui.add_enabled(!arm.arm_type.is_wheel(), egui::DragValue::new(&mut len).range(1..=3).speed(0.05));
+                ui.add_enabled(!arm.arm_type.is_wheel(), egui::DragValue::new(&mut len).range(ARM_LENGTHS).speed(0.05));
                 edit.len = len - arm.len;
                 let mut arm_type = arm.arm_type;
                 egui::ComboBox::from_id_salt("arm_type").selected_text(arm_type_name(arm_type)).show_ui(ui, |ui| {
@@ -234,7 +234,9 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                         }
                     }
                 }
-                if ui.button("Optimize Pistons").clicked() {
+                let lock = loaded.edit_lock();
+                let optimize = ui.add_enabled(lock.is_none(), egui::Button::new("Optimize Pistons"));
+                if locked_hover(optimize, lock).clicked() {
                     let mut pistons_added = 0;
                     let mut pistons_removed = 0;
                     //Changed on a copy, so a failed setup leaves the solution as it was

@@ -31,8 +31,8 @@ impl TrackMaps {
     pub fn build<'a>(glyphs: impl IntoIterator<Item=&'a Glyph>) -> Result<Self> {
         let mut maps = TrackMaps::default();
         for g in glyphs {
-            if let GlyphType::Track(hexes) = &g.glyph_type {
-                maps.add(hexes.iter().map(|&p| g.reposition(p)).collect())?;
+            if g.is_track() {
+                maps.add(g.footprint(None).into_vec())?;
             }
         }
         //Zero offsets only served to stop later track from claiming the ends of non-looping track
@@ -179,7 +179,7 @@ fn parse_int(chars: &mut Peekable<impl Iterator<Item=char>>) -> Option<i32> {
     while let Some(d) = chars.next_if(|c| c.is_ascii_digit()) {
         s.push(d);
     }
-    s.parse().ok().filter(|n: &i32| n.abs() <= MAX_PATH_COORD)
+    s.parse().ok().filter(|n: &i32| n.unsigned_abs() <= MAX_PATH_COORD as u32)
 }
 
 //How many steps in the path aren't to a neighboring hex

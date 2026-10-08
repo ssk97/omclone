@@ -730,6 +730,16 @@ mod part_tests {
     }
 
     #[test]
+    fn inputs_cover_their_first_variant() {
+        //Setup spawns the first variant and moves on to the second, but the first is what's on the board
+        let variants = smallvec![vec![Atom::new(Pos::new(0, 0), AtomType::Salt)], vec![Atom::new(Pos::new(1, 0), AtomType::Water)]];
+        let w = world(vec![glyph(3, 3, 0, GlyphType::Input(variants, 0))], vec![arm(4, 3)]);
+        assert_eq!(w.glyph_footprint(0).to_vec(), vec![Pos::new(3, 3)]);
+        assert_eq!(w.parts_at(Pos::new(3, 3)), vec![PartId::Glyph(0)]);
+        assert!(!w.has_overlap(), "the second variant would cover the arm's hex");
+    }
+
+    #[test]
     fn stack_is_in_drawing_order() {
         let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Calcification)],
             vec![arm(0, 0), arm(5, 5), arm(0, 0)]);
@@ -806,7 +816,8 @@ mod track_editing_tests {
         assert_eq!(parse_path_text(" D d	E ", o), hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]));
         assert_eq!(parse_path_text("ddqdd", o), hexes(&[(0, 0), (1, 0), (2, 0)]));
         assert_eq!(parse_path_text("d( -2 , +3 )d", o), hexes(&[(0, 0), (1, 0), (-1, 3), (0, 3)]));
-        for broken in ["d(1,2", "d(1)", "d(,2)", "d(0,0)d", "d(1;2)", "d(99999999999,0)", "d(1048576,0)(1048576,0)"] {
+        for broken in ["d(1,2", "d(1)", "d(,2)", "d(0,0)d", "d(1;2)", "d(99999999999,0)", "d(1048576,0)(1048576,0)",
+            "d(-2147483648,0)"] {
             assert_eq!(parse_path_text(broken, o), hexes(&[(0, 0), (1, 0)]), "{broken}");
         }
     }

@@ -385,7 +385,9 @@ impl Loaded{
         let grow = match keycode {KeyCode::W => 1, KeyCode::S => -1, _ => 0};
         if let Some(placing) = &mut self.placing{
             placing.rot = (placing.rot + turn) % 6;
-            placing.len = (placing.len + grow).clamp(1, 3);
+            if let NewPart::Arm(arm_type) = placing.part{
+                placing.len = arm_type.clamp_len(placing.len + grow);
+            }
             return true;
         }
         let Some(press) = &mut self.press else {return false};
@@ -394,9 +396,7 @@ impl Loaded{
         drag.rot += turn;
         if let PartId::Arm(i) = part{
             let arm = &self.timeline.base().arms[i];
-            if !arm.arm_type.is_wheel(){
-                drag.len = (arm.len + drag.len + grow).clamp(1, 3) - arm.len;
-            }
+            drag.len = arm.arm_type.clamp_len(arm.len + drag.len + grow) - arm.len;
         }
         true
     }
@@ -468,7 +468,7 @@ impl Loaded{
         };
         Preview{edit, part, layout, world, float_world, polymer, track, landing, overlaps}
     }
-    fn drop_preview(&mut self){
+    pub(super) fn drop_preview(&mut self){
         if let Some(track) = self.preview.take().and_then(|p| p.track){
             self.dead_tracks.push(track);
         }
@@ -514,6 +514,14 @@ impl Loaded{
         let preview = self.build_preview(ctx, edit);
         if let Some(track) = self.preview.replace(preview).and_then(|p| p.track){
             self.dead_tracks.push(track);
+        }
+    }
+    //Frees all rendering data, once the solution is no longer shown
+    pub(super) fn delete_gfx(mut self, ctx: &mut dyn RenderingBackend){
+        self.drop_preview();
+        self.tracks.delete(ctx);
+        for tracks in self.dead_tracks{
+            tracks.delete(ctx);
         }
     }
     pub(super) fn draw_world(&self, render: &RenderDataBase, ctx: &mut Context){

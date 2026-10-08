@@ -83,8 +83,14 @@ impl MyMiniquadApp {
 
         let camera = CameraSetup::frame_center(&world, window::screen_size());
         let tracks = setup_tracks(self.mq_ctx.as_mut(), &world.track_maps);
-        self.app_state = Loaded(Loaded::new(world, solution, max_timestep, camera, tracks));
+        self.set_app_state(Loaded(Loaded::new(world, solution, max_timestep, camera, tracks)));
         Ok(())
+    }
+    //Replaces the app state, freeing the rendering data of a solution that was loaded
+    fn set_app_state(&mut self, state: AppState){
+        if let Loaded(old) = std::mem::replace(&mut self.app_state, state){
+            old.delete_gfx(self.mq_ctx.as_mut());
+        }
     }
 }
 
@@ -173,7 +179,7 @@ impl EventHandler for MyMiniquadApp {
         match do_loading{
             AppStateUpdate::NoChange => {},
             AppStateUpdate::ResetHome => {
-                self.app_state = NotLoaded;
+                self.set_app_state(NotLoaded);
             }
             AppStateUpdate::Load => {
                 let mut do_load = || -> Result<()>{
