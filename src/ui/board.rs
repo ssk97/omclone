@@ -433,8 +433,16 @@ impl Loaded{
         }
         true
     }
-    //The edit the mouse would make now, and how far from its hex the moving part is drawn
+    //The edit the mouse would make now (or else the path being typed would), and how far from its hex the moving
+    //part is drawn
     fn pending_edit(&self) -> Option<(LayoutEdit, XYVec)>{
+        self.tool_edit().or_else(|| {
+            let (glyph, path) = self.typed_track_path()?;
+            (path != track_path(self.timeline.base(), glyph))
+                .then(|| (LayoutEdit::SetTrack{glyph: Some(glyph), path}, XYVec::zeros()))
+        })
+    }
+    fn tool_edit(&self) -> Option<(LayoutEdit, XYVec)>{
         match &self.tool{
             BoardTool::Track(mode, Some(stroke)) =>
                 Some((LayoutEdit::SetTrack{glyph: mode.glyph, path: stroke.path.clone()}, XYVec::zeros())),
@@ -451,15 +459,39 @@ impl Loaded{
             BoardTool::Select(None) | BoardTool::Track(_, None) => None,
         }
     }
+    //The Path field's text while it's being typed in (for the selected track), and that track's first hex
+    fn editing_path_text(&self) -> Option<(&PathText, Pos)>{
+        let text = self.path_text.as_ref().filter(|p| p.editing)?;
+        let is_track = self.timeline.base().glyphs.get(text.glyph).is_some_and(|g| g.is_track());
+        if !is_track || self.selection != Some(PartId::Glyph(text.glyph)) || self.edit_lock().is_some(){
+            return None;
+        }
+        Some((text, track_path(self.timeline.base(), text.glyph)[0]))
+    }
+    //The path being typed into the Path field (as far as it can be read), and the track it's for
+    fn typed_track_path(&self) -> Option<(usize, Vec<Pos>)>{
+        let (text, first) = self.editing_path_text()?;
+        Some((text.glyph, parse_path_text(&text.text, first).0))
+    }
+    //The hex a step typed at the Path field's caret would start from
+    fn typed_caret_hex(&self) -> Option<Pos>{
+        let (text, first) = self.editing_path_text()?;
+        let before: String = text.text.chars().take(text.caret).collect();
+        parse_path_text(&before, first).0.last().copied()
+    }
+    //The track mode, the path as the stroke has it so far, and how many hexes the stroke added
+    fn track_tool_path(&self) -> Option<(&TrackMode, Vec<Pos>, usize)>{
+        let BoardTool::Track(mode, stroke) = &self.tool else {return None};
+        match (stroke, mode.glyph){
+            (Some(stroke), _) => Some((mode, stroke.path.clone(), stroke.added)),
+            (None, Some(glyph)) => Some((mode, track_path(self.timeline.base(), glyph), 0)),
+            (None, None) => None,
+        }
+    }
     //The hexes the track mode can work on (as the stroke has the path so far): the end being added to,
     //or the hexes that can be removed
     fn track_hexes_being_edited(&self) -> Vec<Pos>{
-        let BoardTool::Track(mode, stroke) = &self.tool else {return Vec::new()};
-        let path = match (stroke, mode.glyph){
-            (Some(stroke), _) => stroke.path.clone(),
-            (None, Some(glyph)) => track_path(self.timeline.base(), glyph),
-            (None, None) => return Vec::new(),
-        };
+        let Some((mode, path, _)) = self.track_tool_path() else {return Vec::new()};
         let ends = || path.first().into_iter().chain(path.last()).copied().collect();
         match mode.tool{
             TrackTool::AddFront => path.first().copied().into_iter().collect(),
@@ -469,6 +501,20 @@ impl Loaded{
             TrackTool::Remove if self.allow_gaps => path.clone(),
             TrackTool::Remove => ends(),
         }
+    }
+    //The hexes next to the end being added to that the stroke would add (stepping back to retract isn't adding)
+    fn track_extension_hexes(&self) -> Vec<Pos>{
+        let Some((mode, path, added)) = self.track_tool_path() else {return Vec::new()};
+        let end = match mode.tool{
+            TrackTool::AddFront => path[0],
+            TrackTool::AddBack => path[path.len()-1],
+            TrackTool::Remove => return Vec::new(),
+        };
+        (0..6).map(|r| end + rot_to_pos(r)).filter(|&hex| {
+            let mut stroke = TrackStroke{path: path.clone(), added, last_hex: end, refusal: None};
+            self.stroke_hex(&mut stroke, hex);
+            stroke.path.len() > path.len()
+        }).collect()
     }
     //The track an edit moves or reshapes, which the scene draws without
     fn changed_track(&self, edit: &LayoutEdit) -> Option<usize>{
@@ -538,7 +584,12 @@ impl Loaded{
         const SELECT_COLOR: [f32; 3] = [0., 0.8, 1.];
         const OVERLAP_COLOR: [f32; 3] = [1., 0.1, 0.1];
         const TRACK_TOOL_COLOR: [f32; 3] = [1., 0.75, 0.];
-        let track_hexes = self.track_hexes_being_edited();
+        const TRACK_REACH_COLOR: [f32; 3] = [0.55, 0.4, 0.];
+        let mut track_hexes = self.track_hexes_being_edited();
+        //Where typing in the Path field goes on from, labeled all round with the letters that step there
+        let caret_hex = self.typed_caret_hex();
+        track_hexes.extend(caret_hex);
+        let reach_hexes = self.track_extension_hexes();
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
             let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
@@ -547,7 +598,11 @@ impl Loaded{
             if let Some(part) = self.highlighted_part(){
                 render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
+            render.draw_hex_rings(ctx, &self.camera, &reach_hexes, TRACK_REACH_COLOR);
             render.draw_hex_rings(ctx, &self.camera, &track_hexes, TRACK_TOOL_COLOR);
+            if let Some(hex) = caret_hex{
+                render.draw_step_letters(ctx, &self.camera, hex, TRACK_TOOL_COLOR);
+            }
             return;
         };
         let part = preview.part;
@@ -569,7 +624,11 @@ impl Loaded{
         }
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.overlaps, OVERLAP_COLOR);
+        render.draw_hex_rings(ctx, &self.camera, &reach_hexes, TRACK_REACH_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &track_hexes, TRACK_TOOL_COLOR);
+        if let Some(hex) = caret_hex{
+            render.draw_step_letters(ctx, &self.camera, hex, TRACK_TOOL_COLOR);
+        }
     }
 }
 
@@ -664,6 +723,47 @@ mod tests {
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
         assert!(!loaded.handle_key(KeyCode::Escape, KeyMods::default()), "nothing left for Esc to do");
         assert!(loaded.timeline.base().glyphs.is_empty(), "the stroke was dropped, not applied");
+    }
+
+    #[test]
+    fn extension_hexes_are_the_ones_a_stroke_would_add() {
+        let hexes = |list: &[(i32, i32)]| list.iter().map(|&(x, y)| Pos::new(x, y)).collect::<Vec<_>>();
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track, bonder(2, 0)], vec![]);
+        loaded.set_track_tool(0, Some(TrackTool::AddBack));
+        //(2,0) is under the bonder, and (0,0) is the hex before the end
+        assert_eq!(loaded.track_extension_hexes(), hexes(&[(1, 1), (0, 1), (1, -1), (2, -1)]));
+        loaded.allow_overlap = true;
+        assert_eq!(loaded.track_extension_hexes(), hexes(&[(2, 0), (1, 1), (0, 1), (1, -1), (2, -1)]));
+        //Mid-stroke, stepping back onto (1,0) retracts rather than adds
+        press(&mut loaded, 1, 0, KeyMods::default());
+        move_to(&mut loaded, 1, 1);
+        assert_eq!(loaded.tool.stroke().map(|s| s.path.clone()), Some(hexes(&[(0, 0), (1, 0), (1, 1)])));
+        assert_eq!(loaded.track_extension_hexes(), hexes(&[(2, 1), (1, 2), (0, 2), (0, 1), (2, 0)]));
+        loaded.release();
+        loaded.set_track_tool(0, Some(TrackTool::Remove));
+        assert!(loaded.track_extension_hexes().is_empty());
+    }
+
+    #[test]
+    fn typed_path_text_is_previewed() {
+        let hexes = |list: &[(i32, i32)]| list.iter().map(|&(x, y)| Pos::new(x, y)).collect::<Vec<_>>();
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        //Typed "dde", then something unreadable, with the caret after the first "d"
+        loaded.path_text = Some(PathText{glyph: 0, shown: "d".into(), text: "ddeq".into(), editing: true, caret: 1});
+        loaded.refresh_preview();
+        assert!(loaded.preview.is_some());
+        let typed = hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]);
+        assert_eq!(loaded.pending_edit().map(|(e, _)| e), Some(LayoutEdit::SetTrack{glyph: Some(0), path: typed}));
+        assert_eq!(loaded.typed_caret_hex(), Some(Pos::new(1, 0)));
+
+        loaded.path_text.as_mut().unwrap().editing = false;
+        loaded.refresh_preview();
+        assert!(loaded.preview.is_none(), "only shown while typing");
+        assert_eq!(loaded.typed_caret_hex(), None);
+        assert_eq!(track_path(loaded.timeline.base(), 0), hexes(&[(0, 0), (1, 0)]), "previewing changes nothing");
     }
 
     #[test]

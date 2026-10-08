@@ -1,7 +1,7 @@
 use miniquad::*;
 use num_traits::FromPrimitive;
 use rustc_hash::FxHashMap;
-use crate::sim::{AtomType, XYPos, XYVec};
+use crate::sim::{AtomType, XYPos, XYVec, STEP_LETTERS};
 
 pub type GFXPos = [f32;2];
 
@@ -90,14 +90,15 @@ fn rendered_chars() -> impl Iterator<Item = char>{
     let atom_chars = (0..=AtomType::Quintessence as u8)
         .filter_map(|id| atom_symbol(AtomType::from_u8(id)?))
         .map(|(c, _)| c);
-    ('0'..='9').chain(atom_chars)
+    ('0'..='9').chain(atom_chars).chain(STEP_LETTERS)
 }
 
 /* Symbola v9.00 by George Douros ("Fonts in this site are free for any use"),
  * subsetted to only the characters we render. If a new character is needed,
  * add it to --unicodes and regenerate with fontTools:
  * pyftsubset path/to/Symbola.ttf --output-file=src/Symbola-subset.ttf
- *   --unicodes=U+0030-0039,U+2026,U+2609,U+263D,U+263F,U+2640,U+2642,U+2643,U+2644,U+2721,U+1F701-1F704,U+1F70D,U+1F714
+ *   --unicodes=U+0030-0039,U+2026,U+2609,U+263D,U+263F,U+2640,U+2642,U+2643,U+2644,U+2721,U+1F701-1F704,U+1F70D,U+1F714,
+ *   U+0061,U+0064,U+0065,U+0077,U+0078,U+007A
  */
 pub fn load_font() -> fontdue::Font{
     fontdue::Font::from_bytes(&include_bytes!("Symbola-subset.ttf")[..],fontdue::FontSettings::default()).unwrap()

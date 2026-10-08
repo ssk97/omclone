@@ -626,6 +626,16 @@ impl RenderDataBase {
             ctx.draw(0, 36, 1);
         }
     }
+    //Labels the hexes around `hex` with the path text letters that step to them
+    pub fn draw_step_letters(&self, ctx: &mut Context, camera: &CameraSetup, hex: Pos, color: [f32; 3]){
+        let scale = camera.scale(logical_screen_size());
+        let world_offset: GFXPos = camera.offset.into();
+        self.font.set_pipeline(ctx);
+        for (r, letter) in STEP_LETTERS.iter().enumerate(){
+            let at = pos_to_xy(hex + rot_to_pos(r as Rot));
+            self.font.render_text_centered(ctx, &letter.to_string(), color, at, world_offset, scale);
+        }
+    }
 }
 //What to draw for the world: glyph data, plus the moving atoms and arms. `hidden` isn't drawn (it's being dragged).
 pub struct Scene<'a>{
@@ -649,8 +659,7 @@ mod tests {
             let ndc = (world + camera.offset).coords.component_mul(&XYVec::new(scale.0, scale.1));
             let px = ((ndc.x + 1.)/2.*screen_size.0, (1. - ndc.y)/2.*screen_size.1);
             let back = camera.screen_to_world(px, screen_size);
-            assert!((back - world).norm() < 1e-3, "{world:?} -> {px:?} -> {back:?}");
-        }
+            assert!((back - world).norm() < 1e-3, "{world:?} -> {px:?} -> {back:?}");        }
     }
     #[test]
     fn track_lines_cover_each_move_and_lone_hexes() {

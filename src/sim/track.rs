@@ -118,7 +118,7 @@ pub fn path_loops(hexes: &[Pos]) -> bool {
 
 //Path text: one letter per step to a neighboring hex, from the keys around S (w e / a d / z x), indexed by Rot.
 //Any other step is a jump, written (dx,dy).
-const STEP_LETTERS: [char; 6] = ['d', 'e', 'w', 'a', 'z', 'x'];
+pub const STEP_LETTERS: [char; 6] = ['d', 'e', 'w', 'a', 'z', 'x'];
 
 pub fn path_to_text(hexes: &[Pos]) -> String {
     let mut text = String::new();
@@ -133,48 +133,41 @@ pub fn path_to_text(hexes: &[Pos]) -> String {
 }
 
 //Reads path text into a path starting at `first`, keeping everything up to the first part it can't read
-//(or that goes past MAX_COORD). Letters can be either case, and whitespace is skipped.
-pub fn parse_path_text(text: &str, first: Pos) -> Vec<Pos> {
-    let mut chars = text.chars().filter(|c| !c.is_whitespace()).peekable();
+//(or that goes past MAX_COORD), and returns where that part starts (a byte offset), if there is one.
+//Letters can be either case, and whitespace is skipped.
+pub fn parse_path_text(text: &str, first: Pos) -> (Vec<Pos>, Option<usize>) {
+    let mut chars = text.char_indices().filter(|(_, c)| !c.is_whitespace()).peekable();
     let mut path = vec![first];
     let mut at = first;
-    while let Some(c) = chars.next() {
+    while let Some((start, c)) = chars.next() {
         let step = if c == '(' {
-            match parse_jump(&mut chars) {
-                Some(step) => step,
-                None => break,
-            }
+            parse_jump(&mut chars)
         } else {
-            match STEP_LETTERS.iter().position(|&l| l == c.to_ascii_lowercase()) {
-                Some(r) => rot_to_pos(r as Rot),
-                None => break,
-            }
+            STEP_LETTERS.iter().position(|&l| l == c.to_ascii_lowercase()).map(|r| rot_to_pos(r as Rot))
         };
-        let next = at + step;
-        if next.x.abs() > MAX_COORD || next.y.abs() > MAX_COORD {
-            break;
-        }
+        let next = step.map(|step| at + step).filter(|next| next.x.abs() <= MAX_COORD && next.y.abs() <= MAX_COORD);
+        let Some(next) = next else {return (path, Some(start))};
         at = next;
         path.push(at);
     }
-    path
+    (path, None)
 }
 
 //The rest of a "(dx,dy)" jump after its "(". A jump to the same hex isn't a step.
-fn parse_jump(chars: &mut Peekable<impl Iterator<Item=char>>) -> Option<Pos> {
+fn parse_jump(chars: &mut Peekable<impl Iterator<Item=(usize, char)>>) -> Option<Pos> {
     let dx = parse_int(chars)?;
-    if chars.next() != Some(',') {return None;}
+    if chars.next()?.1 != ',' {return None;}
     let dy = parse_int(chars)?;
-    if chars.next() != Some(')') {return None;}
+    if chars.next()?.1 != ')' {return None;}
     let step = Pos::new(dx, dy);
     (step != Pos::zeros()).then_some(step)
 }
-fn parse_int(chars: &mut Peekable<impl Iterator<Item=char>>) -> Option<i32> {
+fn parse_int(chars: &mut Peekable<impl Iterator<Item=(usize, char)>>) -> Option<i32> {
     let mut s = String::new();
-    if let Some(sign) = chars.next_if(|&c| c == '-' || c == '+') {
+    if let Some((_, sign)) = chars.next_if(|&(_, c)| c == '-' || c == '+') {
         s.push(sign);
     }
-    while let Some(d) = chars.next_if(|c| c.is_ascii_digit()) {
+    while let Some((_, d)) = chars.next_if(|(_, c)| c.is_ascii_digit()) {
         s.push(d);
     }
     s.parse().ok().filter(|n: &i32| n.unsigned_abs() <= MAX_COORD as u32)
@@ -194,12 +187,14 @@ pub enum TrackTool {
 //Applies `tool` to the hex the cursor entered during a stroke over the board, returning whether the path changed.
 //`added` counts the hexes this stroke added, which going back over undoes. A path keeps at least one hex.
 //Without `allow_gaps` only neighboring hexes are added and only end hexes removed;
-//without `allow_overlap` a hex already on the path isn't added again.
+//without `allow_overlap` a hex already on the path isn't added again. The hex before the end is never added
+//(turning straight back), though the path text can do that.
 pub fn stroke_hex(path: &mut Vec<Pos>, added: &mut usize, tool: TrackTool, hex: Pos,
     allow_gaps: bool, allow_overlap: bool) -> std::result::Result<bool, &'static str>
 {
     const NOT_NEXT: &str = "Not next to that end of the track (see \"Allow gaps\")";
     const OVERLAP: &str = "The track already covers that hex (see \"Allow overlap\")";
+    const TURN_BACK: &str = "The track can't turn straight back on itself (type it into Path to do that)";
     let len = path.len();
     match tool {
         TrackTool::AddFront | TrackTool::AddBack => {
@@ -208,7 +203,10 @@ pub fn stroke_hex(path: &mut Vec<Pos>, added: &mut usize, tool: TrackTool, hex: 
             if hex == path[end] {
                 return Ok(false);
             }
-            if *added > 0 && len >= 2 && hex == path[prev] {
+            if len >= 2 && hex == path[prev] {
+                if *added == 0 {
+                    return Err(TURN_BACK);
+                }
                 path.remove(end);
                 *added -= 1;
                 return Ok(true);

@@ -366,12 +366,17 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
 }
 //The path text being edited, and the track's text when editing started
 pub(super) struct PathText{
-    glyph: usize,
-    shown: String,
-    text: String,
+    pub(super) glyph: usize,
+    pub(super) shown: String,
+    pub(super) text: String,
+    //The field has focus, so the board previews the text
+    pub(super) editing: bool,
+    //Where the caret is in the text (in characters)
+    pub(super) caret: usize,
 }
 const PATH_TEXT_HELP: &str = "Steps from the first hex: w e a d z x (the keys around S), or (dx,dy) to jump. \
-    Applied on Enter; anything from the first unreadable part on is dropped.";
+    Shown on the board as you type, and applied on Enter (Esc drops it); anything from the first unreadable \
+    part on is dropped.";
 fn track_section(ui: &mut egui::Ui, loaded: &mut Loaded, glyph: usize){
     let path = track_path(loaded.timeline.base(), glyph);
     ui.separator();
@@ -407,20 +412,38 @@ fn track_section(ui: &mut egui::Ui, loaded: &mut Loaded, glyph: usize){
         });
         let shown = path_to_text(&path);
         if loaded.path_text.as_ref().is_none_or(|p| p.glyph != glyph || p.shown != shown){
-            loaded.path_text = Some(PathText{glyph, shown: shown.clone(), text: shown});
+            loaded.path_text = Some(PathText{glyph, shown: shown.clone(), text: shown, editing: false, caret: 0});
         }
         let path_text = loaded.path_text.as_mut().unwrap();
+        let mut started = false;
         ui.horizontal(|ui| {
             ui.label("Path:");
-            let field = ui.add(egui::TextEdit::singleline(&mut path_text.text).code_editor().desired_width(f32::INFINITY));
-            if field.on_hover_text(PATH_TEXT_HELP).lost_focus(){
+            let output = egui::TextEdit::singleline(&mut path_text.text).code_editor().desired_width(f32::INFINITY).show(ui);
+            started = output.response.gained_focus();
+            path_text.editing = output.response.has_focus();
+            if let Some(range) = output.cursor_range{
+                path_text.caret = range.primary.index.0;
+            }
+            if output.response.response.on_hover_text(PATH_TEXT_HELP).lost_focus(){
                 //Escape also ends editing, but drops the change
                 finished = true;
                 if !ui.input(|i| i.key_pressed(egui::Key::Escape)){
-                    new_path = Some(parse_path_text(&path_text.text, path[0]));
+                    new_path = Some(parse_path_text(&path_text.text, path[0]).0);
                 }
             }
         });
+        if let (_, Some(stop)) = parse_path_text(&path_text.text, path[0]){
+            let rest = &path_text.text[stop..];
+            let mut shown_rest: String = rest.chars().take(12).collect();
+            if shown_rest.len() < rest.len(){
+                shown_rest.push('…');
+            }
+            ui.colored_label(ui.visuals().warn_fg_color, format!("Stops reading at \"{shown_rest}\" (the rest is dropped)"));
+        }
+        //A click on the board applies the typed path, so it shouldn't also draw track or place a part
+        if started{
+            loaded.end_tool();
+        }
         //Shows the track as it ends up, whether or not the change is made
         if finished{
             loaded.path_text = None;

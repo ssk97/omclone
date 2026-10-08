@@ -842,21 +842,25 @@ mod track_editing_tests {
             .into_iter().map(|p| p + first).collect();
         let text = path_to_text(&path);
         assert_eq!(text, "dewazx(3,-2)e");
-        assert_eq!(parse_path_text(&text, first), path);
+        assert_eq!(parse_path_text(&text, first), (path, None));
         assert_eq!(path_to_text(&[first]), "");
-        assert_eq!(parse_path_text("", first), vec![first]);
+        assert_eq!(parse_path_text("", first), (vec![first], None));
     }
 
     #[test]
     fn path_text_keeps_what_it_can_read() {
         let o = Pos::zeros();
-        assert_eq!(parse_path_text(" D d	E ", o), hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]));
-        assert_eq!(parse_path_text("ddqdd", o), hexes(&[(0, 0), (1, 0), (2, 0)]));
-        assert_eq!(parse_path_text("d( -2 , +3 )d", o), hexes(&[(0, 0), (1, 0), (-1, 3), (0, 3)]));
+        assert_eq!(parse_path_text(" D d	E ", o), (hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]), None));
+        assert_eq!(parse_path_text("ddqdd", o), (hexes(&[(0, 0), (1, 0), (2, 0)]), Some(2)));
+        assert_eq!(parse_path_text("d( -2 , +3 )d", o), (hexes(&[(0, 0), (1, 0), (-1, 3), (0, 3)]), None));
+        //Reading stops at the start of the jump that can't be read
         for broken in ["d(1,2", "d(1)", "d(,2)", "d(0,0)d", "d(1;2)", "d(99999999999,0)", "d(1048576,0)(1048576,0)",
             "d(-2147483648,0)"] {
-            assert_eq!(parse_path_text(broken, o), hexes(&[(0, 0), (1, 0)]), "{broken}");
+            assert_eq!(parse_path_text(broken, o), (hexes(&[(0, 0), (1, 0)]), Some(1)), "{broken}");
         }
+        //A byte offset, after skipped whitespace and wider characters
+        assert_eq!(parse_path_text("é d ✓", o).1, Some(0));
+        assert_eq!(parse_path_text(" d ✓", o).1, Some(3));
     }
 
     #[test]
@@ -881,10 +885,14 @@ mod track_editing_tests {
         assert_eq!(path, hexes(&[(0, 0), (1, 0), (2, 0)]));
         let (path, _) = stroke(&[(0, 0), (1, 0)], AddFront, &[(0, 0), (-1, 0), (-1, 1)], false, false);
         assert_eq!(path, hexes(&[(-1, 1), (-1, 0), (0, 0), (1, 0)]));
-        //Only what the stroke added is retracted
+        //Only what the stroke added is retracted, and the hex before the end is never added (even with overlap)
         let (path, results) = stroke(&[(0, 0), (1, 0)], AddBack, &[(0, 0)], false, true);
-        assert_eq!(path, hexes(&[(0, 0), (1, 0), (0, 0)]));
-        assert_eq!(results, vec![Ok(true)]);
+        assert_eq!(path, hexes(&[(0, 0), (1, 0)]));
+        assert!(results[0].is_err());
+        let (path, results) = stroke(&[(0, 0), (1, 0)], AddFront, &[(-1, 0), (0, 0), (1, 0)], false, true);
+        assert_eq!(path, hexes(&[(0, 0), (1, 0)]));
+        assert_eq!(results[..2], [Ok(true), Ok(true)]);
+        assert!(results[2].is_err());
     }
 
     #[test]
