@@ -72,6 +72,21 @@ pub fn setup_tracks(ctx: &mut dyn RenderingBackend, tracks: &TrackMaps) -> Track
     };
     add_from(&tracks.plus);
     add_from(&tracks.minus);
+    //A hex no track leads to or from (like a one-hex track) gets a small star, so it can be seen
+    for &hex in tracks.paths.iter().flat_map(|p| &p.hexes){
+        if tracks.plus.contains_key(&hex) || tracks.minus.contains_key(&hex){
+            continue;
+        }
+        let xy = pos_to_xy(hex);
+        for r in 0..3{
+            let arm = pos_to_xy_vec(rot_to_pos(r))*0.2;
+            for end in [xy + arm, xy - arm]{
+                verts_vec.push(end.into());
+                index_vec.push(curr_index);
+                curr_index += 1;
+            }
+        }
+    }
 
     let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&verts_vec));
     let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&index_vec));

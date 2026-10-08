@@ -756,6 +756,18 @@ mod part_tests {
 
         let apart = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 1, 0, GlyphType::Bonding)], vec![arm(3, 3)]);
         assert!(!apart.has_overlap());
+
+        let crossing_itself = world(vec![track(0, 0, &[(0, 0), (1, 0), (1, 1), (0, 1), (0, 0)])], vec![]);
+        assert!(crossing_itself.has_overlap());
+        assert_eq!(crossing_itself.part_overlaps(PartId::Glyph(0)).to_vec(), vec![Pos::new(0, 0)]);
+    }
+
+    #[test]
+    fn track_overlaps_skip_arms_and_the_track_itself() {
+        let w = world(vec![track(0, 0, &[(0, 0), (1, 0)]), glyph(5, 0, 0, GlyphType::Bonding)], vec![arm(3, 0)]);
+        let hexes = [Pos::new(1, 0), Pos::new(3, 0), Pos::new(6, 0)];
+        assert_eq!(w.track_overlaps(Some(0), &hexes).to_vec(), vec![Pos::new(6, 0)]);
+        assert_eq!(w.track_overlaps(None, &hexes).to_vec(), vec![Pos::new(1, 0), Pos::new(6, 0)]);
     }
 
     #[test]
@@ -764,6 +776,93 @@ mod part_tests {
         //Glyph 0 moved one hex right still covers (1,0), which only it covered before
         assert!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(1, 0), Pos::new(2, 0)]).is_empty());
         assert_eq!(w.overlaps_with_others(PartId::Glyph(0), &[Pos::new(3, 0), Pos::new(4, 0)]).to_vec(), vec![Pos::new(4, 0)]);
+    }
+}
+
+//Reshaping track: path text and strokes over the board
+mod track_editing_tests {
+    use crate::sim::*;
+    use TrackTool::*;
+
+    fn hexes(path: &[(i32, i32)]) -> Vec<Pos> {
+        path.iter().map(|&(x, y)| Pos::new(x, y)).collect()
+    }
+
+    #[test]
+    fn path_text_round_trips() {
+        let first = Pos::new(3, -2);
+        let path: Vec<Pos> = hexes(&[(0, 0), (1, 0), (1, 1), (0, 2), (-1, 2), (-1, 1), (0, 0), (3, -2), (3, -1)])
+            .into_iter().map(|p| p + first).collect();
+        let text = path_to_text(&path);
+        assert_eq!(text, "dewazx(3,-2)e");
+        assert_eq!(parse_path_text(&text, first), path);
+        assert_eq!(path_to_text(&[first]), "");
+        assert_eq!(parse_path_text("", first), vec![first]);
+    }
+
+    #[test]
+    fn path_text_keeps_what_it_can_read() {
+        let o = Pos::zeros();
+        assert_eq!(parse_path_text(" D d	E ", o), hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]));
+        assert_eq!(parse_path_text("ddqdd", o), hexes(&[(0, 0), (1, 0), (2, 0)]));
+        assert_eq!(parse_path_text("d( -2 , +3 )d", o), hexes(&[(0, 0), (1, 0), (-1, 3), (0, 3)]));
+        for broken in ["d(1,2", "d(1)", "d(,2)", "d(0,0)d", "d(1;2)", "d(99999999999,0)", "d(1048576,0)(1048576,0)"] {
+            assert_eq!(parse_path_text(broken, o), hexes(&[(0, 0), (1, 0)]), "{broken}");
+        }
+    }
+
+    #[test]
+    fn gaps_are_steps_to_non_neighbors() {
+        assert_eq!(gap_count(&hexes(&[(0, 0)])), 0);
+        assert_eq!(gap_count(&hexes(&[(0, 0), (1, 0), (3, 0), (3, 1), (0, 0)])), 2);
+    }
+
+    //Runs a stroke over `over` from a track with path `path`
+    fn stroke(path: &[(i32, i32)], tool: TrackTool, over: &[(i32, i32)], gaps: bool, overlap: bool)
+        -> (Vec<Pos>, Vec<std::result::Result<bool, &'static str>>)
+    {
+        let mut path = hexes(path);
+        let mut added = 0;
+        let results = hexes(over).into_iter().map(|h| stroke_hex(&mut path, &mut added, tool, h, gaps, overlap)).collect();
+        (path, results)
+    }
+
+    #[test]
+    fn adding_extends_either_end_and_going_back_retracts() {
+        let (path, _) = stroke(&[(0, 0), (1, 0)], AddBack, &[(1, 0), (2, 0), (3, 0), (2, 0)], false, false);
+        assert_eq!(path, hexes(&[(0, 0), (1, 0), (2, 0)]));
+        let (path, _) = stroke(&[(0, 0), (1, 0)], AddFront, &[(0, 0), (-1, 0), (-1, 1)], false, false);
+        assert_eq!(path, hexes(&[(-1, 1), (-1, 0), (0, 0), (1, 0)]));
+        //Only what the stroke added is retracted
+        let (path, results) = stroke(&[(0, 0), (1, 0)], AddBack, &[(0, 0)], false, true);
+        assert_eq!(path, hexes(&[(0, 0), (1, 0), (0, 0)]));
+        assert_eq!(results, vec![Ok(true)]);
+    }
+
+    #[test]
+    fn adding_refuses_gaps_and_overlap_unless_allowed() {
+        let (path, results) = stroke(&[(0, 0)], AddBack, &[(2, 0)], false, false);
+        assert_eq!((path, results[0].is_err()), (hexes(&[(0, 0)]), true));
+        let (path, _) = stroke(&[(0, 0)], AddBack, &[(2, 0)], true, false);
+        assert_eq!(path, hexes(&[(0, 0), (2, 0)]));
+
+        let square = [(0, 0), (1, 0), (1, 1), (0, 1)];
+        let (path, results) = stroke(&square, AddBack, &[(0, 0)], false, false);
+        assert_eq!((path, results[0].is_err()), (hexes(&square), true));
+        let (path, _) = stroke(&square, AddBack, &[(0, 0)], false, true);
+        assert_eq!(path.len(), 5);
+    }
+
+    #[test]
+    fn removing_takes_ends_and_keeps_one_hex() {
+        let line = [(0, 0), (1, 0), (2, 0)];
+        let (path, results) = stroke(&line, Remove, &[(1, 0), (5, 5), (2, 0), (0, 0), (1, 0)], false, false);
+        assert_eq!(path, hexes(&[(1, 0)]));
+        assert!(results[0].is_err(), "a middle hex leaves a gap");
+        assert_eq!(results[1], Ok(false), "not on the track");
+        assert!(results[4].is_err(), "the last hex stays");
+        let (path, _) = stroke(&line, Remove, &[(1, 0)], true, false);
+        assert_eq!(path, hexes(&[(0, 0), (2, 0)]));
     }
 }
 

@@ -27,6 +27,16 @@ pub(super) struct Loaded{
     pub(super) stack_view: Option<Vec<PartId>>,
     pub(super) allow_overlap: bool,
     pub(super) press: Option<Press>,
+    pub(super) placing: Option<Placing>,
+    pub(super) track_mode: Option<TrackMode>,
+    pub(super) stroke: Option<TrackStroke>,
+    pub(super) allow_gaps: bool,
+    pub(super) path_text: Option<PathText>,
+    //Whatever the mouse would change now, drawn in place, and the tracks other than one it changes
+    pub(super) preview: Option<Preview>,
+    pub(super) scene_tracks: Option<(usize, TrackBindings)>,
+    pub(super) pointer_over_ui: bool,
+    pub(super) history: UndoHistory<World>,
     pub(super) tracks_dirty: bool,
     //Track buffers to free once the rendering context is available
     pub(super) dead_tracks: Vec<TrackBindings>,
@@ -56,18 +66,60 @@ impl Loaded{
             stack_view: None,
             allow_overlap,
             press: None,
+            placing: None,
+            track_mode: None,
+            stroke: None,
+            allow_gaps: false,
+            path_text: None,
+            preview: None,
+            scene_tracks: None,
+            pointer_over_ui: false,
+            history: UndoHistory::new(),
             tracks_dirty: false,
             dead_tracks: Vec::new(),
         }
     }
-    //Replaces the starting world after a part edit, then runs back to the shown timestep
+    //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
     pub(super) fn commit_world(&mut self, mut world: World){
         world.repeat_length = world.repeat_length.max(self.timeline.base().repeat_length);
+        self.history.record(self.timeline.base().clone());
+        self.replace_base(world);
+    }
+    fn replace_base(&mut self, world: World){
         let target = self.timeline.time().floor() as usize;
         self.timeline.replace_base(world);
         self.tracks_dirty = true;
         self.clear_crash();
         self.try_set_target_time(target);
+    }
+    //Why undo and redo can't be used right now, if they can't
+    pub(super) fn history_lock(&self) -> Option<&'static str>{
+        if self.press.is_some() || self.stroke.is_some(){
+            Some("Release the mouse button first")
+        } else {
+            self.edit_lock()
+        }
+    }
+    //Goes back to the starting world (with its tapes) from before the last layout edit
+    pub(super) fn undo(&mut self){
+        if self.history_lock().is_some() || !self.history.can_undo(){
+            return;
+        }
+        let previous = self.history.undo(self.timeline.base().clone()).unwrap();
+        self.restore_base(previous);
+    }
+    pub(super) fn redo(&mut self){
+        if self.history_lock().is_some() || !self.history.can_redo(){
+            return;
+        }
+        let next = self.history.redo(self.timeline.base().clone()).unwrap();
+        self.restore_base(next);
+    }
+    //Parts may be numbered differently afterwards, so nothing stays selected
+    fn restore_base(&mut self, world: World){
+        self.replace_base(world);
+        self.stack_view = None;
+        self.select(None);
     }
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.

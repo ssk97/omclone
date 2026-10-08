@@ -15,11 +15,14 @@ mod board;
 mod layout_edit;
 mod loaded;
 mod tape_buffer;
+mod undo;
 mod windows;
 use board::*;
 use layout_edit::*;
 use loaded::{Loaded, RunState};
 use tape_buffer::*;
+use undo::UndoHistory;
+use windows::PathText;
 
 struct PathInfo{
     base: String,
@@ -42,6 +45,10 @@ pub struct MyMiniquadApp {
     unloaded_info: PathInfo,
     extra_message: Option<String>,
     dragging: Option<GFXPos>,
+    //Where the right button went down, to tell a click from panning
+    right_press: Option<(f32, f32)>,
+    //As of the last key event
+    keymods: KeyMods,
 }
 
 impl MyMiniquadApp {
@@ -58,7 +65,7 @@ impl MyMiniquadApp {
         Self {
             mq_ctx, egui_mq,
             render_data,app_state,unloaded_info,
-            extra_message:None, dragging: None,
+            extra_message:None, dragging: None, right_press: None, keymods: KeyMods::default(),
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -151,7 +158,7 @@ impl EventHandler for MyMiniquadApp {
                     windows::file_window(egui_ctx, loaded, &mut self.unloaded_info);
                     windows::arms_window(egui_ctx, loaded, &mut self.extra_message);
                     windows::part_window(egui_ctx, loaded);
-                    windows::stack_tooltip(egui_ctx, loaded);
+                    windows::cursor_tooltip(egui_ctx, loaded);
                     /*egui::Window::new("debug").min_width(128.).show(egui_ctx, |ui|{
                         ui.label(format!("curr time: {}",loaded.timeline.time() as u64));
                     });*/
@@ -216,7 +223,8 @@ impl EventHandler for MyMiniquadApp {
                 loaded.camera.pan_pixels(x-drag_last[0], y-drag_last[1]);
                 *drag_last = [x,y];
             }
-            loaded.pointer_moved((x, y), window::screen_size());
+            let over_ui = self.egui_mq.egui_ctx().is_pointer_over_egui();
+            loaded.pointer_moved((x, y), window::screen_size(), over_ui);
         }
     }
 
@@ -250,9 +258,14 @@ impl EventHandler for MyMiniquadApp {
         self.egui_mq.mouse_button_down_event(mb, x, y);
         if !self.egui_mq.egui_ctx().is_pointer_over_egui(){
             match mb {
-                MouseButton::Right | MouseButton::Middle => self.dragging = Some([x,y]),
+                MouseButton::Right | MouseButton::Middle => {
+                    self.dragging = Some([x,y]);
+                    if mb == MouseButton::Right{
+                        self.right_press = Some((x, y));
+                    }
+                }
                 MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
-                    loaded.press((x, y), window::screen_size());
+                    loaded.press((x, y), window::screen_size(), self.keymods);
                 },
                 _ => {}
             }
@@ -270,7 +283,14 @@ impl EventHandler for MyMiniquadApp {
             MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
                 loaded.release();
             },
-            _ => self.dragging = None,
+            _ => {
+                self.dragging = None;
+                let clicked = self.right_press.take().is_some_and(|(px, py)|
+                    (x-px)*(x-px) + (y-py)*(y-py) <= DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX);
+                if let (MouseButton::Right, true, Loaded(loaded)) = (mb, clicked, &mut self.app_state){
+                    loaded.right_click();
+                }
+            }
         }
     }
 
@@ -295,6 +315,7 @@ impl EventHandler for MyMiniquadApp {
         keymods: KeyMods,
         _repeat: bool,
     ) {
+        self.keymods = keymods;
         if let Loaded(loaded) = &mut self.app_state{
             //Typing in a tape takes priority over the part hotkeys
             if !self.egui_mq.egui_ctx().text_edit_focused() && loaded.handle_key(keycode, keymods){
@@ -305,6 +326,14 @@ impl EventHandler for MyMiniquadApp {
     }
 
     fn key_up_event(&mut self, keycode: KeyCode, keymods: KeyMods) {
+        self.keymods = keymods;
+        //The modifiers may still count the key being released
+        match keycode{
+            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
+            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
+            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
+            _ => {}
+        }
         self.egui_mq.key_up_event(keycode, keymods);
     }
 }

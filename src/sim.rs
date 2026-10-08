@@ -1295,14 +1295,34 @@ impl World {
         let glyphs = (0..self.glyphs.len()).rev().map(PartId::Glyph);
         arms.chain(glyphs).filter(|&part| self.part_footprint(part).contains(&hex)).collect()
     }
-    //The hexes of `footprint` (belonging to `part`, which may have moved) that overlap any other part
+    //The hexes of `footprint` (belonging to `part`, which may have moved) that overlap any other part,
+    //or that it covers twice (a track crossing itself)
     pub fn overlaps_with_others(&self, part: PartId, footprint: &[Pos]) -> SmallVec<[Pos; 8]> {
-        let mut overlaps = SmallVec::new();
+        let mut overlaps: SmallVec<[Pos; 8]> = SmallVec::new();
+        for (i, hex) in footprint.iter().enumerate() {
+            if footprint[..i].contains(hex) && !overlaps.contains(hex) {
+                overlaps.push(*hex);
+            }
+        }
         for other in self.all_parts() {
             if !self.parts_conflict(part, other) {continue;}
             let other_footprint = self.part_footprint(other);
             for &hex in footprint {
                 if other_footprint.contains(&hex) && !overlaps.contains(&hex) {
+                    overlaps.push(hex);
+                }
+            }
+        }
+        overlaps
+    }
+    //The hexes of `hexes` that would overlap a glyph if added to a track (arms can sit on track).
+    //`track` is the track itself, if it's already placed.
+    pub fn track_overlaps(&self, track: Option<usize>, hexes: &[Pos]) -> SmallVec<[Pos; 8]> {
+        let mut overlaps = SmallVec::new();
+        for i in (0..self.glyphs.len()).filter(|&i| Some(i) != track) {
+            let footprint = self.glyph_footprint(i);
+            for &hex in hexes {
+                if footprint.contains(&hex) && !overlaps.contains(&hex) {
                     overlaps.push(hex);
                 }
             }
@@ -1317,7 +1337,8 @@ impl World {
         for part in self.all_parts() {
             for hex in self.part_footprint(part) {
                 let here = occupants.entry(hex).or_default();
-                if here.iter().any(|&other| self.parts_conflict(part, other)) {
+                //A track crossing itself overlaps too
+                if here.iter().any(|&other| other == part || self.parts_conflict(part, other)) {
                     return true;
                 }
                 here.push(part);

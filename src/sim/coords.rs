@@ -44,6 +44,22 @@ pub fn xy_to_pos(input: XYPos) -> Pos {
     let u = (input.x - v) / 2.;
     round_axial(u, v)
 }
+//How many steps apart two hexes are
+pub fn hex_distance(a: Pos, b: Pos) -> i32 {
+    let d = b - a;
+    (d.x.abs() + d.y.abs() + (d.x + d.y).abs()) / 2
+}
+//The hexes along a straight line from `a` to `b`, both included, each next to the one before
+pub fn hex_line(a: Pos, b: Pos) -> Vec<Pos> {
+    let n = hex_distance(a, b);
+    let (start, end) = (pos_to_xy(a), pos_to_xy(b));
+    //Nudged off the edges between hexes, so ties round the same way all along the line
+    let nudge = XYVec::new(1e-3, 2e-3);
+    (0..=n).map(|i| {
+        let t = if n == 0 {0.} else {i as f32 / n as f32};
+        xy_to_pos(start + (end - start) * t + nudge)
+    }).collect()
+}
 
 #[cfg(test)]
 mod tests {
@@ -64,6 +80,19 @@ mod tests {
                 for nudge in &nudges {
                     assert_eq!(xy_to_pos(pos_to_xy(p) + nudge), p, "{p:?} nudged by {nudge:?}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn hex_lines_step_to_neighbors() {
+        for (a, b) in [((0, 0), (0, 0)), ((0, 0), (5, 0)), ((2, -1), (-3, 4)), ((0, 0), (3, 2)), ((1, 1), (-4, -2))] {
+            let (a, b) = (Pos::new(a.0, a.1), Pos::new(b.0, b.1));
+            let line = hex_line(a, b);
+            assert_eq!((line[0], *line.last().unwrap()), (a, b));
+            assert_eq!(line.len() as i32, hex_distance(a, b) + 1);
+            for pair in line.windows(2) {
+                assert_eq!(hex_distance(pair[0], pair[1]), 1, "{a:?} to {b:?}: {line:?}");
             }
         }
     }

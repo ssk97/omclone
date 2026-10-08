@@ -315,9 +315,30 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
         }
     });
 }
+//Shows the reason a disabled control can't be used
+fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Response{
+    match lock{
+        Some(reason) => response.on_disabled_hover_text(reason),
+        None => response,
+    }
+}
 pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     egui::Window::new("Part").show(egui_ctx, |ui| {
-        ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"));
+        ui.horizontal(|ui| {
+            let lock = loaded.history_lock();
+            let undo = ui.add_enabled(lock.is_none() && loaded.history.can_undo(), egui::Button::new("Undo"));
+            if locked_hover(undo.on_hover_text("Ctrl+Z"), lock).clicked(){
+                loaded.undo();
+            }
+            let redo = ui.add_enabled(lock.is_none() && loaded.history.can_redo(), egui::Button::new("Redo"));
+            if locked_hover(redo.on_hover_text("Ctrl+Y"), lock).clicked(){
+                loaded.redo();
+            }
+            ui.separator();
+            add_part_menu(ui, loaded);
+            ui.separator();
+            ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"));
+        });
         ui.separator();
         ui.label("Parts here:");
         let highlighted = loaded.highlighted_part();
@@ -331,36 +352,196 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             None => {ui.weak("(click the board)");}
         }
         if clicked.is_some() {
-            loaded.selection = clicked;
+            loaded.select(clicked);
         }
         ui.separator();
         match loaded.selection {
-            Some(part) => {
-                let locked = loaded.part_lock(part);
-                if let Some(edit) = part_fields(ui, loaded.timeline.base(), part, locked) {
-                    if let Err(err) = loaded.apply_edit(&edit) {
-                        loaded.message = Some(err);
-                    }
-                }
-            }
+            Some(part) => part_section(ui, loaded, part),
             None => {ui.weak("No part selected");}
         }
     });
 }
-//Names the part picked from the stack under the held mouse button
-pub(super) fn stack_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
-    if let Some(press) = &loaded.press {
-        let label = part_label(loaded.timeline.base(), press.part());
-        let error = press.drag.as_ref().and_then(|d| d.preview.as_ref())
-            .and_then(|p| p.world.as_ref().err().cloned());
-        egui::Tooltip::always_open(egui_ctx.clone(), egui::LayerId::background(),
-            egui::Id::new("part_stack_tooltip"), egui::PopupAnchor::Pointer).show(|ui| {
-            ui.label(format!("{label} ({}/{})", press.cand+1, press.stack.len()));
-            if let Some(err) = error {
-                ui.colored_label(egui::Color32::RED, err);
+fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
+    let mut edit = None;
+    let locked = loaded.part_lock(part, EditKind::Move);
+    if let Some(part_edit) = part_fields(ui, loaded.timeline.base(), part, locked) {
+        edit = Some(LayoutEdit::Part(part_edit));
+    }
+    if let PartId::Arm(i) = part{
+        let arm_count = loaded.timeline.base().arms.len();
+        let lock = loaded.part_lock(part, EditKind::Reorder);
+        ui.horizontal(|ui| {
+            ui.label("Arm #:");
+            let mut number = i+1;
+            let field = ui.add_enabled(lock.is_none(), egui::DragValue::new(&mut number).range(1..=arm_count).speed(0.05));
+            locked_hover(field.on_hover_text("Arms run in this order"), lock);
+            if number != i+1{
+                edit = Some(LayoutEdit::MoveArm{from: i, to: number-1});
             }
         });
     }
+    let lock = loaded.part_lock(part, EditKind::Delete);
+    let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
+    if locked_hover(delete.on_hover_text("Delete or Backspace"), lock).clicked(){
+        edit = Some(LayoutEdit::Delete(part));
+    }
+    if let Some(edit) = edit{
+        if let Err(err) = loaded.apply_edit(&edit) {
+            loaded.message = Some(err);
+        }
+        return;
+    }
+    if let PartId::Glyph(i) = part{
+        if loaded.timeline.base().glyphs[i].is_track(){
+            track_section(ui, loaded, i);
+        }
+    }
+}
+//The path text being edited, and the track's text when editing started
+pub(super) struct PathText{
+    glyph: usize,
+    shown: String,
+    text: String,
+}
+const PATH_TEXT_HELP: &str = "Steps from the first hex: w e a d z x (the keys around S), or (dx,dy) to jump. \
+    Applied on Enter; anything from the first unreadable part on is dropped.";
+fn track_section(ui: &mut egui::Ui, loaded: &mut Loaded, glyph: usize){
+    let path = track_path(loaded.timeline.base(), glyph);
+    ui.separator();
+    let mut info = format!("Track: {} hex{} · {} · cost {}", path.len(), if path.len() == 1 {""} else {"es"},
+        if path_loops(&path) {"loops"} else {"doesn't loop"}, path.len()*5);
+    let gaps = gap_count(&path);
+    if gaps > 0{
+        info += &format!(" · {gaps} gap{}", if gaps == 1 {""} else {"s"});
+    }
+    ui.label(info);
+    let lock = loaded.edit_lock();
+    let mut new_path = None;
+    let mut finished = false;
+    ui.add_enabled_ui(lock.is_none(), |ui| {
+        ui.horizontal(|ui| {
+            let current = loaded.track_mode.as_ref().filter(|m| m.glyph == Some(glyph)).map(|m| m.tool);
+            for (tool, label) in [(TrackTool::AddFront, "Add to front"), (TrackTool::AddBack, "Add to back"),
+                (TrackTool::Remove, "Remove hexes")]
+            {
+                let button = ui.selectable_label(current == Some(tool), label)
+                    .on_hover_text("Then click or drag over the board. Esc or right-click to finish.");
+                if button.clicked(){
+                    loaded.set_track_tool(glyph, (current != Some(tool)).then_some(tool));
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut loaded.allow_gaps, "Allow gaps")
+                .on_hover_text("Lets the board tools add hexes that aren't next to the end, and remove middle hexes");
+            if ui.button("Reverse").on_hover_text("Swaps which way Forward and Back move arms along it").clicked(){
+                new_path = Some(path.iter().rev().copied().collect());
+            }
+        });
+        let shown = path_to_text(&path);
+        if loaded.path_text.as_ref().is_none_or(|p| p.glyph != glyph || p.shown != shown){
+            loaded.path_text = Some(PathText{glyph, shown: shown.clone(), text: shown});
+        }
+        let path_text = loaded.path_text.as_mut().unwrap();
+        ui.horizontal(|ui| {
+            ui.label("Path:");
+            let field = ui.add(egui::TextEdit::singleline(&mut path_text.text).code_editor().desired_width(f32::INFINITY));
+            if field.on_hover_text(PATH_TEXT_HELP).lost_focus(){
+                //Escape also ends editing, but drops the change
+                finished = true;
+                if !ui.input(|i| i.key_pressed(egui::Key::Escape)){
+                    new_path = Some(parse_path_text(&path_text.text, path[0]));
+                }
+            }
+        });
+        //Shows the track as it ends up, whether or not the change is made
+        if finished{
+            loaded.path_text = None;
+        }
+    });
+    if let Some(new_path) = new_path.filter(|p| *p != path){
+        if let Err(err) = loaded.apply_edit(&LayoutEdit::SetTrack{glyph: Some(glyph), path: new_path}) {
+            loaded.message = Some(err);
+        }
+    }
+}
+//Picks a part to place on the board (or a track to draw)
+fn add_part_menu(ui: &mut egui::Ui, loaded: &mut Loaded){
+    let lock = loaded.edit_lock();
+    let menu = ui.add_enabled_ui(lock.is_none(), |ui| {
+        ui.menu_button("Add part", |ui| {
+            ui.set_max_width(320.);
+            ui.weak("Then click the board. Shift+click places more; Esc or right-click stops.");
+            ui.label("Arms");
+            ui.horizontal_wrapped(|ui| {
+                for arm_type in ALL_ARM_TYPES{
+                    new_part_button(ui, loaded, NewPart::Arm(arm_type));
+                }
+            });
+            ui.label("Glyphs");
+            ui.horizontal_wrapped(|ui| {
+                for glyph_type in ALL_NEW_GLYPHS{
+                    new_part_button(ui, loaded, NewPart::Glyph(glyph_type));
+                }
+            });
+            let drawing = loaded.track_mode.as_ref().is_some_and(|m| m.glyph.is_none());
+            let track = ui.selectable_label(drawing, "Track").on_hover_text("Click the board to start it, and drag to draw it");
+            if track.clicked(){
+                if drawing {loaded.end_track_mode()} else {loaded.start_new_track()}
+                ui.close();
+            }
+        });
+    });
+    locked_hover(menu.response, lock);
+}
+fn new_part_button(ui: &mut egui::Ui, loaded: &mut Loaded, part: NewPart){
+    let placing = loaded.placing.as_ref().is_some_and(|p| p.part == part);
+    if ui.selectable_label(placing, part.name()).clicked(){
+        if placing {loaded.placing = None} else {loaded.start_placing(part)}
+        ui.close();
+    }
+}
+//What the mouse is doing on the board: the part picked from the stack under it, or the part or tool it's using
+pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
+    let base = loaded.timeline.base();
+    let (title, note) = if let Some(press) = &loaded.press {
+        let copy = if press.duplicate {", copying"} else {""};
+        let title = format!("{} ({}/{}){copy}", part_label(base, press.part()), press.cand+1, press.stack.len());
+        //Why it isn't moving, unless nothing can be edited anyway
+        let lock = loaded.press_lock().filter(|_| EDITOR_ENABLED && press.drag.is_none());
+        (title, lock.map(str::to_owned))
+    } else if loaded.pointer_over_ui {
+        return;
+    } else if let Some(mode) = &loaded.track_mode {
+        let title = match mode.glyph{
+            None => String::from("Click to start a new track, then drag to draw it"),
+            Some(i) => {
+                let verb = match mode.tool{
+                    TrackTool::AddFront => "Adding to the front of",
+                    TrackTool::AddBack => "Adding to the back of",
+                    TrackTool::Remove => "Removing hexes from",
+                };
+                format!("{verb} {}", part_label(base, PartId::Glyph(i)))
+            }
+        };
+        (title, Some(String::from("Esc or right-click to finish")))
+    } else if let Some(placing) = &loaded.placing {
+        (format!("Placing {}", placing.part.name()), Some(String::from("Shift+click to place more; Esc or right-click to stop")))
+    } else {
+        return;
+    };
+    let refusal = loaded.stroke.as_ref().and_then(|s| s.refusal).map(str::to_owned);
+    let error = loaded.preview.as_ref().and_then(|p| p.world.as_ref().err().cloned()).or(refusal);
+    egui::Tooltip::always_open(egui_ctx.clone(), egui::LayerId::background(),
+        egui::Id::new("part_stack_tooltip"), egui::PopupAnchor::Pointer).show(|ui| {
+        ui.label(title);
+        if let Some(note) = note {
+            ui.weak(note);
+        }
+        if let Some(err) = error {
+            ui.colored_label(egui::Color32::RED, err);
+        }
+    });
 }
 pub(super) fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
