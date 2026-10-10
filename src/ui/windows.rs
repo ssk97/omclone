@@ -80,7 +80,9 @@ const MAX_TIMESTEP_FIELD: usize = 1_000_000;
 pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     egui::Window::new("World loaded").default_pos((0.,0.)).show(egui_ctx, |ui| {
         ui.style_mut().spacing.slider_width = 500.;
-        let mut target_time = loaded.timeline.time().floor() as usize;
+        //Where the timeline is headed, so that +1 clicked again before it gets there goes on another step
+        let cursor = loaded.cursor_step();
+        let mut target_time = cursor;
         if loaded.max_timestep < target_time{
             loaded.max_timestep = target_time;
         }
@@ -110,7 +112,7 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             if loaded.max_timestep < target_time{
                 loaded.max_timestep = target_time;
             }
-            if target_time != loaded.timeline.time().floor() as usize{
+            if target_time != cursor{
                 loaded.try_set_target_time(target_time);
             }
 
@@ -319,6 +321,8 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             None => {ui.weak("(click the board)");}
         }
         if clicked.is_some() {
+            //A quick click can land in the same frame as the Path field losing focus, before it's drawn
+            loaded.commit_typed_path();
             loaded.select(clicked);
         }
         ui.separator();

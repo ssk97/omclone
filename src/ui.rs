@@ -255,7 +255,7 @@ impl EventHandler for MyMiniquadApp {
         self.egui_mq.mouse_wheel_event(dx / per_line, dy / per_line);
         if let Loaded(loaded) = &mut self.app_state{
             //While a part is held, the wheel picks between the parts under it
-            if loaded.wheel(dy){
+            if loaded.wheel(dy / per_line){
                 return;
             }
         }

@@ -38,6 +38,12 @@ impl TapeSelection{
         self.anchor_arm = self.arm;
         self.anchor_step = None;
     }
+    //Keeps the selected arms among the first `arm_count`, which undo can make fewer at any time
+    fn fit(&mut self, arm_count: usize){
+        let last = arm_count.saturating_sub(1);
+        self.arm = self.arm.min(last);
+        self.anchor_arm = self.anchor_arm.min(last);
+    }
 }
 
 pub(super) enum TapeOp{
@@ -159,7 +165,12 @@ fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
 }
 fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
     use egui::{Event, Key};
+    //An undo among the frame's earlier events may have taken arms away
     let arm_count = loaded.timeline.base().arms.len();
+    if arm_count == 0{
+        return;
+    }
+    loaded.tape_sel.fit(arm_count);
     match event{
         //Typing gives a character at a time. egui-miniquad pastes as Text too (other backends send Paste), so a
         //one-character paste counts as typing.
@@ -243,6 +254,18 @@ enum Hit{
     Cell(usize, usize), Ruler(usize), Gutter(usize)
 }
 impl Layout{
+    //The sizes for `arm_count` arms in `ui`'s style. Where it's drawn (`origin` and `view`) is filled in once known.
+    fn new(ui: &egui::Ui, arm_count: usize) -> Self{
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let small = egui::TextStyle::Small.resolve(ui.style());
+        let (char_width, row_height, small_height) = ui.ctx().fonts_mut(|f|
+            (f.glyph_width(&font, '0'), f.row_height(&font), f.row_height(&small)));
+        let cell = vec2((char_width + 1.).round(), (row_height + 4.).round());
+        let digits = arm_count.to_string().len().max(2);
+        let ruler = cell.y;
+        Layout{origin: Pos2::ZERO, view: Rect::NOTHING, cell, digits, gutter: digits as f32 * char_width + 10., ruler,
+            ruler_below: ruler.max(small_height + 2. + ui.spacing().scroll.bar_width)}
+    }
     fn x(&self, step: usize) -> f32{
         self.origin.x + self.gutter + step as f32 * self.cell.x
     }
@@ -354,18 +377,12 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
         sel.anchor_step = None;
     }
     let caret = sel.caret;
-    sel.arm = sel.arm.min(arm_count-1);
-    sel.anchor_arm = sel.anchor_arm.min(arm_count-1);
+    sel.fit(arm_count);
 
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let small = egui::TextStyle::Small.resolve(ui.style());
-    let (char_width, row_height, small_height) = ui.ctx().fonts_mut(|f|
-        (f.glyph_width(&font, '0'), f.row_height(&font), f.row_height(&small)));
-    let cell = vec2((char_width + 1.).round(), (row_height + 4.).round());
-    let digits = arm_count.to_string().len().max(2);
-    let gutter = digits as f32 * char_width + 10.;
-    let ruler = cell.y;
-    let ruler_below = ruler.max(small_height + 2. + ui.spacing().scroll.bar_width);
+    let mut layout = Layout::new(ui, arm_count);
+    let Layout{cell, gutter, ruler, ruler_below, ..} = layout;
     let step_count = loaded.max_timestep.max(longest_tape(&loaded.timeline.base().arms)).max(caret) + 16;
 
     let size = vec2(gutter + step_count as f32 * cell.x, ruler + arm_count as f32 * cell.y + ruler_below);
@@ -380,29 +397,36 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
         //The viewport can be larger than the grid (it's sized before the scroll area shrinks to fit), and the
         //rulers and arm numbers have to stay on the grid
         let view = viewport.translate(rect.min.to_vec2()).intersect(rect);
-        let layout = Layout{origin: rect.min, view, cell, digits, gutter, ruler, ruler_below};
+        (layout.origin, layout.view) = (rect.min, view);
 
-        let (pointer, pressed, down, shift, pressed_anywhere) = ui.input(|i|
-            (i.pointer.interact_pos(), i.pointer.primary_pressed(), i.pointer.primary_down(), i.modifiers.shift, i.pointer.any_pressed()));
-        if let Some(pos) = pointer{
-            if pressed && response.is_pointer_button_down_on(){
-                response.request_focus();
-                if let Some(hit) = layout.hit(pos, arm_count, step_count){
-                    press(loaded, hit, shift);
-                }
-            } else if down && response.is_pointer_button_down_on(){
-                let (arm, step) = layout.cell_at(pos, arm_count, step_count);
-                drag(loaded, arm, step);
+        let (press_pos, pointer, down, shift, pressed_anywhere) = ui.input(|i| (
+            //Where the button went down this frame. By the end of a slow frame, the pointer may have moved on.
+            i.events.iter().rev().find_map(|e| match *e{
+                egui::Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed: true, ..} => Some(pos),
+                _ => None,
+            }),
+            i.pointer.interact_pos(), i.pointer.primary_down(), i.modifiers.shift, i.pointer.any_pressed()));
+        //A press can be released in the same frame (a click during a slow frame, or a touchpad tap). egui reports that
+        //as a click, since the button was never down on the grid at the end of a frame.
+        let quick_click = press_pos.is_some() && !down && response.clicked();
+        let pressed_on_grid = response.is_pointer_button_down_on() || quick_click;
+        if let Some(pos) = press_pos.filter(|_| pressed_on_grid){
+            response.request_focus();
+            if let Some(hit) = layout.hit(pos, arm_count, step_count){
+                press(loaded, hit, shift);
             }
+        } else if let Some(pos) = pointer.filter(|_| down && response.is_pointer_button_down_on()){
+            let (arm, step) = layout.cell_at(pos, arm_count, step_count);
+            drag(loaded, arm, step);
         }
         if !down{
             loaded.tape_sel.drag_from = None;
         }
         if response.has_focus(){
-            //Like a text box, it keeps the arrow keys and gives up focus on a click elsewhere
+            //Like a text box, it keeps the arrow keys and gives up focus on a press elsewhere
             ui.memory_mut(|m| m.set_focus_lock_filter(grid_id(), egui::EventFilter{
                 horizontal_arrows: true, vertical_arrows: true, escape: true, tab: false}));
-            if pressed_anywhere && !response.is_pointer_button_down_on(){
+            if pressed_anywhere && !pressed_on_grid{
                 response.surrender_focus();
             } else {
                 for event in ui.input(|i| i.events.clone()){
@@ -620,5 +644,120 @@ mod tests {
         assert_eq!(hit(55., 90.), Some(Hit::Ruler(2)));
         assert_eq!(hit(5., 50.), Some(Hit::Gutter(1)));
         assert_eq!(hit(55., 50.), Some(Hit::Cell(1, 2)));
+    }
+}
+
+//These edit the tapes, which needs the editor
+#[cfg(all(test, feature = "editor_ui"))]
+mod editing_tests {
+    use super::*;
+    use egui::{Event, Key, Modifiers};
+
+    fn key(key: Key, modifiers: Modifiers) -> Event {
+        Event::Key{key, physical_key: None, pressed: true, repeat: false, modifiers}
+    }
+    //Handles keys that arrived together, as the grid does in one frame
+    fn handle_frame(loaded: &mut Loaded, events: &[Event]) {
+        let _ = egui::Context::default().run_ui(Default::default(), |ui| {
+            for event in events {
+                handle_event(ui, loaded, event);
+            }
+        });
+    }
+    fn add_arm_and_select_it(loaded: &mut Loaded, x: i32) {
+        let edit = LayoutEdit::Add{part: NewPart::Arm(ArmType::PlainArm), pos: Pos::new(x, 0), rot: 0, len: 1};
+        loaded.apply_edit(&edit).unwrap();
+        let arm = loaded.timeline.base().arms.len() - 1;
+        (loaded.tape_sel.arm, loaded.tape_sel.anchor_arm) = (arm, arm);
+    }
+
+    //The selection was only fitted to the arms once a frame, so typing after an undo that removed the selected
+    //arm indexed past the arms
+    #[test]
+    fn typing_after_undoing_the_selected_arm() {
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = Loaded::for_test(vec![], vec![arm]);
+        add_arm_and_select_it(&mut loaded, 3);
+        handle_frame(&mut loaded, &[key(Key::Z, Modifiers::COMMAND), Event::Text("f".into())]);
+        let arms = &loaded.timeline.base().arms;
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].instruction_tape.instructions, vec![Instr::Grab]);
+    }
+
+    fn empty_arm(x: i32) -> Arm {
+        Arm::new(Pos::new(x, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]))
+    }
+    fn button(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE}
+    }
+    //Draws the grid for one frame with these events, returning its layout as drawn
+    fn grid_frame(ctx: &egui::Context, loaded: &mut Loaded, events: Vec<Event>) -> Layout {
+        let mut layout = None;
+        let _ = ctx.run_ui(egui::RawInput{events, ..Default::default()}, |ui| {
+            tape_grid(ui, loaded);
+            layout = Some(Layout::new(ui, loaded.timeline.base().arms.len()));
+        });
+        let mut layout = layout.unwrap();
+        layout.origin = ctx.read_response(grid_id()).expect("the grid was drawn").rect.min;
+        layout
+    }
+    //A press and its release in the same frame (as in a click during a slow frame, or a touchpad tap)
+    fn quick_click(pos: Pos2) -> Vec<Event> {
+        vec![Event::PointerMoved(pos), button(pos, true), button(pos, false)]
+    }
+
+    //A press released in the same frame didn't count, and when the grid had focus it gave it up, so the keys after
+    //went to the part hotkeys (where Backspace deletes the selected part)
+    #[test]
+    fn quick_clicks_move_the_caret_and_keep_focus() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], vec![empty_arm(0), empty_arm(3)]);
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 2).center()));
+        assert_eq!((loaded.tape_sel.arm, loaded.cursor_step()), (0, 2));
+        assert!(has_focus(&ctx));
+        grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(1, 5).center()));
+        assert_eq!((loaded.tape_sel.arm, loaded.cursor_step()), (1, 5));
+        assert!(has_focus(&ctx), "clicking the grid again keeps its focus");
+        grid_frame(&ctx, &mut loaded, vec![Event::Text("f".into())]);
+        assert_eq!(loaded.timeline.base().arms[1].instruction_tape.cell(5), Instr::Grab);
+    }
+
+    //When a frame took long enough for the pointer to move on after the press, the press landed where the pointer
+    //had got to
+    #[test]
+    fn drags_select_from_where_the_button_went_down() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], vec![empty_arm(0)]);
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        let (from, to) = (layout.cell_rect(0, 3).center(), layout.cell_rect(0, 8).center());
+        grid_frame(&ctx, &mut loaded, vec![Event::PointerMoved(from), button(from, true), Event::PointerMoved(to)]);
+        grid_frame(&ctx, &mut loaded, vec![]);
+        grid_frame(&ctx, &mut loaded, vec![button(to, false)]);
+        assert_eq!(loaded.tape_sel.steps(), 3..9);
+    }
+
+    //Right away rather than on release, so keys go to the board while a part is dragged there
+    #[test]
+    fn pressing_elsewhere_gives_up_focus() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], vec![empty_arm(0)]);
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        let cell = layout.cell_rect(0, 2).center();
+        grid_frame(&ctx, &mut loaded, vec![Event::PointerMoved(cell), button(cell, true)]);
+        grid_frame(&ctx, &mut loaded, vec![button(cell, false)]);
+        assert!(has_focus(&ctx));
+        let below = cell + vec2(0., 1000.);
+        grid_frame(&ctx, &mut loaded, vec![Event::PointerMoved(below), button(below, true)]);
+        assert!(!has_focus(&ctx));
+    }
+
+    #[test]
+    fn keys_after_undoing_the_only_arm() {
+        let mut loaded = Loaded::for_test(vec![], vec![]);
+        add_arm_and_select_it(&mut loaded, 0);
+        handle_frame(&mut loaded, &[key(Key::Z, Modifiers::COMMAND), key(Key::ArrowDown, Modifiers::NONE),
+            key(Key::End, Modifiers::NONE), Event::Text("f".into())]);
+        assert!(loaded.timeline.base().arms.is_empty());
     }
 }

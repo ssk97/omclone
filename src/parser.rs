@@ -2,12 +2,12 @@ use crate::sim::*;
 
 #[cfg(feature = "color-eyre")]
 use color_eyre::{
-    eyre::{bail, ensure, eyre},
+    eyre::{ensure, eyre},
     Result,
 };
 #[cfg(not(feature = "color-eyre"))]
 use simple_eyre::{
-    eyre::{bail, ensure, eyre},
+    eyre::{ensure, eyre},
     Result,
 };
 
@@ -232,7 +232,7 @@ fn name_to_part_type(name: String) -> Result<PartType> {
         "out-std"              => TOutput,
         "out-rep"              => TOutputRep,
         "pipe"                 => TConduit,
-        _                      => bail!("Arm/Glyph {:?} not recognized", name),
+        _                      => return Err(eyre!("Arm/Glyph {:?} not recognized", name)),
     })
 }
 fn part_type_to_name(part: &PartType) -> Result<&'static str> {
@@ -267,7 +267,7 @@ fn part_type_to_name(part: &PartType) -> Result<&'static str> {
         TOutput               => "out-std",
         TOutputRep            => "out-rep",
         TConduit              => "pipe",
-        _                     => bail!("Illegal part type {:?} in write attempt!", part),
+        _                     => return Err(eyre!("Illegal part type {:?} in write attempt!", part)),
     })
 }
 pub fn parse_solution(f: &mut impl Read) -> Result<FullSolution> {

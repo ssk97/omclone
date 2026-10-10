@@ -159,11 +159,14 @@ impl Loaded{
         self.tool.press().map(|p| p.part()).or(self.selection)
     }
     //A track tool ends when anything but its track is selected (a new track has none yet, so it keeps on
-    //when nothing is selected)
+    //when nothing is selected). So does Path text, which would otherwise be shown again unapplied.
     pub(super) fn select(&mut self, part: Option<PartId>){
         self.selection = part;
         if self.tool.track_mode().is_some_and(|m| m.glyph.map(PartId::Glyph) != part){
             self.end_track_mode();
+        }
+        if self.path_text.as_ref().is_some_and(|p| Some(PartId::Glyph(p.glyph)) != part){
+            self.path_text = None;
         }
     }
     fn check_overlap(&self, overlaps: &[Pos]) -> std::result::Result<(), String>{
@@ -238,6 +241,9 @@ impl Loaded{
         }
         //Arms are picked where they are now (glyphs don't move)
         let stack = self.timeline.curr().parts_at(press_hex);
+        //Mouse events come before egui's frame, so if the selection changes here, the Path field isn't drawn
+        //again to apply its own text
+        self.commit_typed_path();
         if stack.is_empty(){
             self.select(None);
             self.stack_view = None;
@@ -472,6 +478,16 @@ impl Loaded{
     fn typed_track_path(&self) -> Option<(usize, Vec<Pos>)>{
         let (text, first) = self.editing_path_text()?;
         Some((text.glyph, parse_path_text(&text.text, first).0))
+    }
+    //Applies the path being typed into the Path field, if any
+    pub(super) fn commit_typed_path(&mut self){
+        let Some((glyph, path)) = self.typed_track_path() else {return};
+        self.path_text = None;
+        if path != track_path(self.timeline.base(), glyph){
+            if let Err(err) = self.apply_edit(&LayoutEdit::SetTrack{glyph: Some(glyph), path}){
+                self.message = Some(err);
+            }
+        }
     }
     //The hex a step typed at the Path field's caret would start from
     fn typed_caret_hex(&self) -> Option<Pos>{
@@ -764,6 +780,32 @@ mod tests {
         assert!(loaded.preview.is_none(), "only shown while typing");
         assert_eq!(loaded.typed_caret_hex(), None);
         assert_eq!(track_path(loaded.timeline.base(), 0), hexes(&[(0, 0), (1, 0)]), "previewing changes nothing");
+    }
+
+    //The click happens before egui's frame, and on empty board it deselects the track, so the Path field
+    //was never drawn again to apply its text
+    #[test]
+    fn clicking_empty_board_applies_the_typed_path() {
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        loaded.path_text = Some(PathText{glyph: 0, shown: "d".into(), text: "dd".into(), editing: true, caret: 2});
+        press(&mut loaded, 5, 5, KeyMods::default());
+        loaded.release();
+        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
+        assert_eq!(loaded.selection, None);
+    }
+
+    #[test]
+    fn deselected_path_text_is_dropped() {
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        loaded.path_text = Some(PathText{glyph: 0, shown: "d".into(), text: "dde".into(), editing: true, caret: 3});
+        loaded.select(None);
+        loaded.select(Some(PartId::Glyph(0)));
+        assert!(loaded.pending_edit().is_none(), "the abandoned text isn't previewed again");
+        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0)]);
     }
 
     #[test]
