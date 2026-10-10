@@ -489,11 +489,16 @@ impl Loaded{
             }
         }
     }
-    //The hex a step typed at the Path field's caret would start from
-    fn typed_caret_hex(&self) -> Option<Pos>{
+    //The hex a step typed at the Path field's caret would start from, and the typed path's hexes after it,
+    //which typing there shifts
+    fn typed_caret(&self) -> Option<(Pos, Vec<Pos>)>{
         let (text, first) = self.editing_path_text()?;
         let before: String = text.text.chars().take(text.caret).collect();
-        parse_path_text(&before, first).0.last().copied()
+        let before = parse_path_text(&before, first).0;
+        //The whole text's path starts with the path before the caret: a step cut off by the caret just ends that
+        //one early, leaving the step in the tail
+        let tail = parse_path_text(&text.text, first).0.split_off(before.len());
+        Some((before[before.len()-1], tail))
     }
     //The track mode, the path as the stroke has it so far, and how many hexes the stroke added
     fn track_tool_path(&self) -> Option<(&TrackMode, Vec<Pos>, usize)>{
@@ -602,8 +607,10 @@ impl Loaded{
         const TRACK_TOOL_COLOR: [f32; 3] = [1., 0.75, 0.];
         const TRACK_REACH_COLOR: [f32; 3] = [0.55, 0.4, 0.];
         let mut track_hexes = self.track_hexes_being_edited();
-        //Where typing in the Path field goes on from, labeled all round with the letters that step there
-        let caret_hex = self.typed_caret_hex();
+        //Where typing in the Path field goes on from, labeled all round with the letters that step there, and the
+        //hexes after it in the reach color (the track tools, which use it, end while typing)
+        let (caret_hex, caret_tail) = self.typed_caret().unzip();
+        let caret_tail = caret_tail.unwrap_or_default();
         track_hexes.extend(caret_hex);
         let reach_hexes = self.track_extension_hexes();
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
@@ -614,6 +621,7 @@ impl Loaded{
             if let Some(part) = self.highlighted_part(){
                 render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
+            render.draw_hex_rings(ctx, &self.camera, &caret_tail, TRACK_REACH_COLOR);
             render.draw_hex_rings(ctx, &self.camera, &reach_hexes, TRACK_REACH_COLOR);
             render.draw_hex_rings(ctx, &self.camera, &track_hexes, TRACK_TOOL_COLOR);
             if let Some(hex) = caret_hex{
@@ -639,6 +647,8 @@ impl Loaded{
             PartId::Arm(i) => render.draw_dragged_arm(ctx, &self.camera, &preview.layout.arms[i], i, extra),
         }
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
+        //Under the overlaps, so the tail doesn't hide them
+        render.draw_hex_rings(ctx, &self.camera, &caret_tail, TRACK_REACH_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.overlaps, OVERLAP_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &reach_hexes, TRACK_REACH_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &track_hexes, TRACK_TOOL_COLOR);
@@ -773,13 +783,28 @@ mod tests {
         assert!(loaded.preview.is_some());
         let typed = hexes(&[(0, 0), (1, 0), (2, 0), (2, 1)]);
         assert_eq!(loaded.pending_edit().map(|(e, _)| e), Some(LayoutEdit::SetTrack{glyph: Some(0), path: typed}));
-        assert_eq!(loaded.typed_caret_hex(), Some(Pos::new(1, 0)));
+        assert_eq!(loaded.typed_caret(), Some((Pos::new(1, 0), hexes(&[(2, 0), (2, 1)]))));
 
         loaded.path_text.as_mut().unwrap().editing = false;
         loaded.refresh_preview();
         assert!(loaded.preview.is_none(), "only shown while typing");
-        assert_eq!(loaded.typed_caret_hex(), None);
+        assert_eq!(loaded.typed_caret(), None);
         assert_eq!(track_path(loaded.timeline.base(), 0), hexes(&[(0, 0), (1, 0)]), "previewing changes nothing");
+    }
+
+    #[test]
+    fn typed_path_tail_is_the_hexes_after_the_caret() {
+        let hexes = |list: &[(i32, i32)]| list.iter().map(|&(x, y)| Pos::new(x, y)).collect::<Vec<_>>();
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        let mut caret_at = |caret| {
+            loaded.path_text = Some(PathText{glyph: 0, shown: "d".into(), text: "d(2,0)d".into(), editing: true, caret});
+            loaded.typed_caret()
+        };
+        assert_eq!(caret_at(0), Some((Pos::new(0, 0), hexes(&[(1, 0), (3, 0), (4, 0)]))));
+        assert_eq!(caret_at(3), Some((Pos::new(1, 0), hexes(&[(3, 0), (4, 0)]))), "inside a jump, it's in the tail");
+        assert_eq!(caret_at(7), Some((Pos::new(4, 0), vec![])));
     }
 
     //The click happens before egui's frame, and on empty board it deselects the track, so the Path field

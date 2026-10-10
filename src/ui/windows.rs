@@ -375,7 +375,7 @@ pub(super) struct PathText{
     pub(super) text: String,
     //The field has focus, so the board previews the text
     pub(super) editing: bool,
-    //Where the caret is in the text (in characters)
+    //Where typing goes in the text (in characters): the caret, or the start of the selection it replaces
     pub(super) caret: usize,
 }
 const PATH_TEXT_HELP: &str = "Steps from the first hex: w e a d z x (the keys around S), or (dx,dy) to jump. \
@@ -426,7 +426,7 @@ fn track_section(ui: &mut egui::Ui, loaded: &mut Loaded, glyph: usize){
             started = output.response.gained_focus();
             path_text.editing = output.response.has_focus();
             if let Some(range) = output.cursor_range{
-                path_text.caret = range.primary.index.0;
+                path_text.caret = range.as_sorted_char_range().start.0;
             }
             if output.response.response.on_hover_text(PATH_TEXT_HELP).lost_focus(){
                 //Escape also ends editing, but drops the change
