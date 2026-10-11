@@ -156,8 +156,11 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
         });
     });
 }
+//Opened from the Part window
 pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size: (f32, f32)){
-    egui::Window::new("Camera controls").show(egui_ctx, |ui| {
+    //A copy, as the window's contents use `loaded` too
+    let mut open = loaded.camera_window_open;
+    egui::Window::new("Camera controls").open(&mut open).show(egui_ctx, |ui| {
         ui.horizontal(|ui|{
             ui.label("x:");
             ui.add(egui::DragValue::new(&mut loaded.camera.offset.x)
@@ -175,6 +178,7 @@ pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, scree
                 .logarithmic(true));
         });
     });
+    loaded.camera_window_open = open;
 }
 #[cfg(feature = "editor_ui")]
 pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloaded_info: &mut PathInfo){
@@ -338,6 +342,14 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             ui.separator();
             ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"));
         });
+        ui.horizontal(|ui| {
+            //First, so the readout changing length doesn't move it
+            ui.toggle_value(&mut loaded.camera_window_open, "Camera")
+                .on_hover_text("Camera controls, for moving and zooming without a mouse wheel or right button");
+            let readout = egui::RichText::new(mouse_readout(loaded)).monospace();
+            //Over a window, it's where the mouse last was on the board
+            ui.label(if loaded.pointer_over_ui {readout.weak()} else {readout});
+        });
         ui.separator();
         ui.label("Parts here:");
         let highlighted = loaded.highlighted_part();
@@ -361,6 +373,22 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             loaded.select(clicked);
         }
     });
+}
+//The hex under the mouse, and how far it is from the selected part
+fn mouse_readout(loaded: &Loaded) -> String{
+    let Some(hex) = loaded.hovered_hex else {return String::from("Mouse: –")};
+    let mut text = format!("Mouse: ({:3}, {:3})", hex.x, hex.y);
+    if let Some(part) = loaded.selection{
+        let world = loaded.timeline.base();
+        let pos = match part{
+            PartId::Glyph(i) => world.glyphs[i].pos,
+            PartId::Arm(i) => world.arms[i].pos,
+        };
+        let offset = hex - pos;
+        text += &format!(" · ({:+3}, {:+3}) from {}, {} away", offset.x, offset.y, part_label(world, part),
+            hex_distance(pos, hex));
+    }
+    text
 }
 fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     let mut edit = None;

@@ -103,7 +103,8 @@ const BOND_NORMAL_ID:usize = 3;
 const BOND_RED_ID:usize = 4;
 const BOND_WHITE_ID:usize = 5;
 const BOND_YELLOW_ID:usize = 6;
-const ORIGIN_COLOR: [f32; 3] = [0.3, 0.3, 0.3];
+const ORIGIN_COLOR: Color = [0.3, 0.3, 0.3, 1.];
+const WHITE: Color = [1., 1., 1., 1.];
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -165,16 +166,36 @@ fn setup_circle(ctx: &mut dyn RenderingBackend) -> Bindings{
         images: vec![],
     }
 }
-//An outline just inside a hex's edges (12 triangles)
-fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
+//A hex's corners, scaled by `size` (1 reaches the edges of the hex grid)
+fn hex_corners(size: f32) -> [Vert; 6]{
     const CORNER: f32 = 2./SQRT3;//distance to a corner, for an inner radius of 1
-    let mut verts = [[0.;2];12];
-    for i in 0..6{
+    std::array::from_fn(|i| {
         let angle = PI/6. + (i as f32)*PI/3.;
         let (s, c) = angle.sin_cos();
-        verts[i] = [c*CORNER*0.95, s*CORNER*0.95];
-        verts[i+6] = [c*CORNER*0.78, s*CORNER*0.78];
+        [c*CORNER*size, s*CORNER*size]
+    })
+}
+//The hex, out to the edge of a ring (6 triangles from its center)
+fn setup_hex_fill(ctx: &mut dyn RenderingBackend) -> Bindings{
+    let mut verts = [[0.;2];7];
+    verts[..6].copy_from_slice(&hex_corners(0.95));
+    let mut indices = [0u16;18];
+    for i in 0..6{
+        indices[i*3..i*3+3].copy_from_slice(&[6, i as u16, ((i+1)%6) as u16]);
     }
+    let vertex_buffer = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&verts));
+    let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&indices));
+    Bindings {
+        vertex_buffers: vec![vertex_buffer],
+        index_buffer,
+        images: vec![],
+    }
+}
+//An outline just inside a hex's edges (12 triangles)
+fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
+    let mut verts = [[0.;2];12];
+    verts[..6].copy_from_slice(&hex_corners(0.95));
+    verts[6..].copy_from_slice(&hex_corners(0.78));
     let mut indices = [0u16;36];
     for i in 0..6{
         let next = (i+1)%6;
@@ -191,6 +212,7 @@ fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
 }
 struct ShapeStore{
     hex_ring_bindings: Bindings,
+    hex_fill_bindings: Bindings,
     arm_bindings: Bindings,
     circle_bindings: Bindings,
     texture_bindings: Vec<Bindings>,
@@ -238,28 +260,23 @@ impl CameraSetup{
         self.scale_base = (self.scale_base*1.1f32.powf(notches)).clamp(min, max);
         self.offset += self.screen_to_world(px, screen_size) - before;
     }
+    //Fits every glyph's hexes (tracks included, but only a repeating output's own hex) and everywhere the arms can
+    //reach, with a border around them
     pub fn frame_center(world: &World, screen_size:(f32,f32)) -> Self{
-        let pos_list = world.glyphs.iter().map(|x| pos_to_xy(x.pos));
-        let (mut lowx, mut lowy, mut highx, mut highy) = pos_list.fold(
-            (f32::INFINITY,f32::INFINITY,f32::NEG_INFINITY,f32::NEG_INFINITY),
-            |(lowx, lowy, highx, highy), this| {
-                let (thisx, thisy) = (this.x, this.y);
-                let new_lowx = if thisx < lowx {thisx} else {lowx};
-                let new_highx = if thisx > highx {thisx} else {highx};
-                let new_lowy = if thisy < lowy {thisy} else {lowy};
-                let new_highy = if thisy > highy {thisy} else {highy};
-                (new_lowx, new_lowy, new_highx, new_highy)
-            }
-        );
-        const BORDER: f32 = 6.;
-        lowx -= BORDER;
-        lowy -= BORDER;
-        highx+= BORDER;
-        highy+= BORDER;
-        let offset = XYVec::new(-(lowx+highx)/2., -(lowy+highy)/2.);
-        let world_width_scale = screen_size.0/SCALE_REF_PX*2./(highx-lowx);
-        let world_height_scale = screen_size.1/SCALE_REF_PX*2./(highy-lowy);
-        let scale_base = if world_width_scale < world_height_scale {world_width_scale} else {world_height_scale};
+        //Without its polymer, a repeating output's footprint is empty: its display runs far past the rest
+        let glyph_hexes = world.glyphs.iter().flat_map(|g| g.footprint(None).into_iter().chain([g.pos])).map(pos_to_xy);
+        //Grabbers can turn to any angle, so an arm reaches anywhere in a square around its base (2 world units a hex)
+        let arm_reach = world.arms.iter().flat_map(|arm| {
+            let (base, reach) = (pos_to_xy(arm.pos), XYVec::repeat(arm.len as f32*2.));
+            [base - reach, base + reach]
+        });
+        let points: Vec<XYPos> = glyph_hexes.chain(arm_reach).collect();
+        let border = XYVec::repeat(6.);
+        let low = points.iter().fold(XYPos::new(f32::INFINITY, f32::INFINITY), |a, b| a.inf(b)) - border;
+        let high = points.iter().fold(XYPos::new(f32::NEG_INFINITY, f32::NEG_INFINITY), |a, b| a.sup(b)) + border;
+        let size = high - low;
+        let offset = -(low.coords + high.coords)/2.;
+        let scale_base = (screen_size.0/size.x).min(screen_size.1/size.y)*2./SCALE_REF_PX;
         CameraSetup {scale_base, offset}
     }
 }
@@ -280,7 +297,7 @@ impl RenderDataBase {
             images: vec![],
             uniforms: UniformBlockLayout {
                 uniforms: vec![
-                    UniformDesc::new("color", UniformType::Float3),
+                    UniformDesc::new("color", UniformType::Float4),
                     UniformDesc::new("offset", UniformType::Float2),
                     UniformDesc::new("world_offset", UniformType::Float2),
                     UniformDesc::new("angle", UniformType::Float1),
@@ -296,7 +313,7 @@ impl RenderDataBase {
         let pipeline = ctx.new_pipeline(
             &[BufferLayout::default()],
             &[VertexAttribute::new("local_pos", VertexFormat::Float2)],
-            shader, Default::default()
+            shader, alpha_blend()
         );
         
         let shader_meta_uv = ShaderMeta {
@@ -321,14 +338,7 @@ impl RenderDataBase {
                 VertexAttribute::new("uv", VertexFormat::Float2),
             ],
             shader_uv,
-            PipelineParams{
-                color_blend: Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::Value(BlendValue::SourceAlpha),
-                    BlendFactor::OneMinusValue(BlendValue::SourceAlpha))
-                ),
-                ..Default::default()
-            }
+            alpha_blend()
         );
         let pipeline_tracks = ctx.new_pipeline(
             &[BufferLayout::default()],
@@ -336,11 +346,12 @@ impl RenderDataBase {
             shader,
             PipelineParams{
                 primitive_type:PrimitiveType::Lines,
-                ..Default::default()
+                ..alpha_blend()
             }
         );
         let shapes = ShapeStore{
             hex_ring_bindings: setup_hex_ring(ctx),
+            hex_fill_bindings: setup_hex_fill(ctx),
             arm_bindings: setup_arms(ctx),
             circle_bindings: setup_circle(ctx),
             texture_bindings: setup_textures(ctx),
@@ -357,37 +368,37 @@ impl RenderDataBase {
     }
 }
 
-fn atom_color(t: AtomType) -> [f32;3]{
+fn atom_color(t: AtomType) -> Color{
     use AtomType::*;
     match t{
-        Salt  => [0.8, 0.8, 0.8],
-        Air   => [0., 1., 1.],
-        Earth => [0., 1., 0.],
-        Fire  => [1., 0., 0.],
-        Water => [0., 0., 1.],
-        Vitae => [1., 0.6, 0.6],
-        Mors  => [0.4, 0., 0.],
-        Quicksilver => [1.,1.,1.],
-        Gold => [1., 0.85, 0.2],
-        Silver => [0.35, 0.3, 0.4],
-        Copper => [0.8, 0.4, 0.1],
-        Iron => [0.35, 0.25, 0.20],
-        Tin => [0.4, 0.4, 0.2],
-        Lead => [0.3, 0.3, 0.3],
+        Salt  => [0.8, 0.8, 0.8, 1.],
+        Air   => [0., 1., 1., 1.],
+        Earth => [0., 1., 0., 1.],
+        Fire  => [1., 0., 0., 1.],
+        Water => [0., 0., 1., 1.],
+        Vitae => [1., 0.6, 0.6, 1.],
+        Mors  => [0.4, 0., 0., 1.],
+        Quicksilver => [1.,1.,1., 1.],
+        Gold => [1., 0.85, 0.2, 1.],
+        Silver => [0.35, 0.3, 0.4, 1.],
+        Copper => [0.8, 0.4, 0.1, 1.],
+        Iron => [0.35, 0.25, 0.20, 1.],
+        Tin => [0.4, 0.4, 0.2, 1.],
+        Lead => [0.3, 0.3, 0.3, 1.],
         Quintessence => {
             let t = ((miniquad::date::now()/2.).fract() as f32)*PI*2.;
             let colorize = |o:f32|->f32 {
                 (t+o).sin().max(0.)
             };
-            [colorize(0.),colorize(PI*2./3.),colorize(-PI*2./3.)]
+            [colorize(0.),colorize(PI*2./3.),colorize(-PI*2./3.), 1.]
         },
-        RepeatingOutputMarker | ConduitSpace => [0., 0., 0.],
+        RepeatingOutputMarker | ConduitSpace => [0., 0., 0., 1.],
     }
 }
 //Dark symbols on light atoms, light symbols on dark atoms
-fn symbol_color(fill: [f32;3]) -> [f32;3]{
+fn symbol_color(fill: Color) -> Color{
     let luminance = 0.299*fill[0] + 0.587*fill[1] + 0.114*fill[2];
-    if luminance > 0.7 {[0.1, 0.1, 0.1]} else {[0.95, 0.95, 0.95]}
+    if luminance > 0.7 {[0.1, 0.1, 0.1, 1.]} else {[0.95, 0.95, 0.95, 1.]}
 }
 
 impl RenderDataBase {
@@ -471,7 +482,7 @@ impl RenderDataBase {
     fn draw_conduit_number(&self, ctx: &mut Context, glyph: &Glyph, world_offset: GFXPos, scale: (f32, f32)){
         if let GlyphType::Conduit(_, id) = glyph.glyph_type{
             let offset = pos_to_xy(glyph.pos);
-            self.font.render_text_centered(ctx, &id.to_string(), [1., 1., 1.], offset, world_offset, scale);
+            self.font.render_text_centered(ctx, &id.to_string(), WHITE, offset, world_offset, scale);
         }
     }
     fn draw_lines(&self, ctx: &mut Context, lines: &LineBuffer, world_offset: GFXPos, scale: (f32, f32)){
@@ -481,13 +492,13 @@ impl RenderDataBase {
         ctx.apply_pipeline(&self.pipeline_tracks);
         ctx.apply_bindings(&lines.bindings);
         ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-            color:[1., 1., 1.], offset:[0.,0.], world_offset, angle:0., scale
+            color: WHITE, offset:[0.,0.], world_offset, angle:0., scale
         }));
         ctx.draw(0, lines.count as i32, 1);
     }
     //Basic pipeline with the arm bindings
     fn draw_arm(&self, ctx: &mut Context, f_arm: &FloatArm, world_offset: GFXPos, scale: (f32, f32)){
-        let color = [0., 0., 0.];
+        let color = [0., 0., 0., 1.];
         let offset = f_arm.pos.into();
         let triangles_drawn = if f_arm.grabbing {6} else {3};
         for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
@@ -579,7 +590,7 @@ impl RenderDataBase {
         self.font.set_pipeline(ctx);
         for (num, f_arm) in shown_arms() {
             let string = (num+1).to_string();
-            self.font.render_text_centered(ctx, &string, [1., 1., 1.], f_arm.pos, world_offset, scale);
+            self.font.render_text_centered(ctx, &string, WHITE, f_arm.pos, world_offset, scale);
         }
     }
     //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. `track` is its own track data.
@@ -616,23 +627,32 @@ impl RenderDataBase {
         ctx.apply_bindings(&self.shapes.arm_bindings);
         self.draw_arm(ctx, &f_arm, world_offset, scale);
         self.font.set_pipeline(ctx);
-        self.font.render_text_centered(ctx, &(num+1).to_string(), [1., 1., 1.], f_arm.pos, world_offset, scale);
+        self.font.render_text_centered(ctx, &(num+1).to_string(), WHITE, f_arm.pos, world_offset, scale);
     }
     //Outlines each hex
-    pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: [f32; 3]){
+    pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color){
+        self.draw_hexes(ctx, camera, hexes, color, &self.shapes.hex_ring_bindings, 36);
+    }
+    //Fills each hex
+    pub fn draw_hex_fills(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color){
+        self.draw_hexes(ctx, camera, hexes, color, &self.shapes.hex_fill_bindings, 18);
+    }
+    fn draw_hexes(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color, shape: &Bindings,
+        index_count: i32)
+    {
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&self.shapes.hex_ring_bindings);
+        ctx.apply_bindings(shape);
         for &p in hexes{
             ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
                 color, offset: pos_to_xy(p).into(), world_offset, angle: 0., scale
             }));
-            ctx.draw(0, 36, 1);
+            ctx.draw(0, index_count, 1);
         }
     }
     //Labels the hexes around `hex` with the path text letters that step to them
-    pub fn draw_step_letters(&self, ctx: &mut Context, camera: &CameraSetup, hex: Pos, color: [f32; 3]){
+    pub fn draw_step_letters(&self, ctx: &mut Context, camera: &CameraSetup, hex: Pos, color: Color){
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         self.font.set_pipeline(ctx);

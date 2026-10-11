@@ -1,5 +1,5 @@
 use miniquad::*;
-use crate::{sim::*, parser, render_sim::*, render_library::GFXPos, timeline::Timeline};
+use crate::{sim::*, parser, render_sim::*, render_library::{Color, GFXPos}, timeline::Timeline};
 use smallvec::{SmallVec, smallvec};
 use std::{io::BufReader, io::prelude::*, path::PathBuf};
 

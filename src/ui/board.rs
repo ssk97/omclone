@@ -344,6 +344,10 @@ impl Loaded{
     pub(super) fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
         let cursor_xy = self.camera.screen_to_world(px, screen_size);
         self.pointer_over_ui = over_ui;
+        //Panning and zooming keep the world under the mouse where it is, so this stays right until it moves again
+        if !over_ui{
+            self.hovered_hex = Some(xy_to_pos(cursor_xy));
+        }
         if let BoardTool::Place(placing) = &mut self.tool{
             placing.cursor_xy = (!over_ui).then_some(cursor_xy);
         }
@@ -618,10 +622,13 @@ impl Loaded{
         self.preview = Some(self.build_preview(edit));
     }
     pub(super) fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
-        const SELECT_COLOR: [f32; 3] = [0., 0.8, 1.];
-        const OVERLAP_COLOR: [f32; 3] = [1., 0.1, 0.1];
-        const TRACK_TOOL_COLOR: [f32; 3] = [1., 0.75, 0.];
-        const TRACK_REACH_COLOR: [f32; 3] = [0.55, 0.4, 0.];
+        const SELECT_COLOR: Color = [0., 0.8, 1., 1.];
+        const OVERLAP_COLOR: Color = [1., 0.1, 0.1, 1.];
+        const TRACK_TOOL_COLOR: Color = [1., 0.75, 0., 1.];
+        const TRACK_REACH_COLOR: Color = [0.55, 0.4, 0., 1.];
+        const HOVER_COLOR: Color = [1., 1., 1., 0.12];
+        //A held or placed part shows where it lands instead
+        let hover = self.hovered_hex.filter(|_| self.tool.press().is_none() && self.tool.placing().is_none());
         let mut track_hexes = self.track_hexes_being_edited();
         //Where typing in the Path field goes on from, labeled all round with the letters that step there, and the
         //hexes after it in the reach color (the track tools, which use it, end while typing)
@@ -634,6 +641,7 @@ impl Loaded{
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
                 area: &world.area_touched, float_world: &self.float_world, hidden: None};
             render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
+            render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
             if let Some(part) = self.highlighted_part(){
                 render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
@@ -662,6 +670,7 @@ impl Loaded{
                 preview.polymer.as_ref(), preview.track.as_ref(), extra),
             PartId::Arm(i) => render.draw_dragged_arm(ctx, &self.camera, &preview.layout.arms[i], i, extra),
         }
+        render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
         //Under the overlaps, so the tail doesn't hide them
         render.draw_hex_rings(ctx, &self.camera, &caret_tail, TRACK_REACH_COLOR);

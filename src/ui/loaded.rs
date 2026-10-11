@@ -26,6 +26,7 @@ pub(super) struct Loaded{
 
     pub(super) max_timestep: usize,
     pub(super) camera: CameraSetup,
+    pub(super) camera_window_open: bool,
     pub(super) solution: parser::FullSolution,
     pub(super) message: Option<String>,
     //The solution changed since it was loaded or saved
@@ -54,6 +55,8 @@ pub(super) struct Loaded{
     pub(super) preview: Option<Preview>,
     pub(super) scene_tracks: Option<(usize, TrackMaps)>,
     pub(super) pointer_over_ui: bool,
+    //The hex the mouse was last over, kept while it's over a window
+    pub(super) hovered_hex: Option<Pos>,
     //Board input waiting for egui to apply the text field being typed in (see board_input)
     pub(super) waiting_input: Vec<BoardInput>,
     pub(super) history: UndoHistory<World, StepKind>,
@@ -68,6 +71,7 @@ impl Loaded{
             float_world: FloatWorld::new(),
 
             max_timestep,camera,solution,
+            camera_window_open: false,
             message: None,
             dirty: false,
             backup_stale: false,
@@ -76,7 +80,7 @@ impl Loaded{
             tape_sel: TapeSelection::default(),
             tape_group: None,
             run_state: RunState::Manual(0),
-            area_mode: AreaMode::Shown,
+            area_mode: AreaMode::Hidden,
             run_speed: 0.05,
             popup_reload: false,
 
@@ -89,6 +93,7 @@ impl Loaded{
             preview: None,
             scene_tracks: None,
             pointer_over_ui: false,
+            hovered_hex: None,
             waiting_input: Vec::new(),
             history: UndoHistory::new(),
         }

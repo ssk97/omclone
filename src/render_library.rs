@@ -9,10 +9,24 @@ pub type Vert = [f32;2];
 //Vertex format: (x, y)
 pub type UvVert = [f32;4];
 //(x, y), (u, v)
+//RGBA, with alpha blended over what's drawn below
+pub type Color = [f32;4];
+
+//Blends by the fragment's alpha. Opaque colors draw as if unblended.
+pub fn alpha_blend() -> PipelineParams{
+    PipelineParams{
+        color_blend: Some(BlendState::new(
+            Equation::Add,
+            BlendFactor::Value(BlendValue::SourceAlpha),
+            BlendFactor::OneMinusValue(BlendValue::SourceAlpha))
+        ),
+        ..Default::default()
+    }
+}
 
 #[repr(C)]
 pub struct BasicUniforms{
-    pub color: [f32;3],
+    pub color: Color,
     pub offset: GFXPos,
     pub world_offset: GFXPos,
     pub angle: f32,
@@ -27,7 +41,7 @@ pub struct UvUniforms{
 }
 #[repr(C)]
 pub struct TextUniforms{
-    pub color: [f32;3],
+    pub color: Color,
     pub offset: GFXPos,
     pub world_offset: GFXPos,
     pub angle: f32,
@@ -149,7 +163,7 @@ impl FontStorage{
             images: vec!["tex".to_string()],
             uniforms: UniformBlockLayout {
                 uniforms: vec![
-                    UniformDesc::new("color", UniformType::Float3),
+                    UniformDesc::new("color", UniformType::Float4),
                     UniformDesc::new("offset", UniformType::Float2),
                     UniformDesc::new("world_offset", UniformType::Float2),
                     UniformDesc::new("angle", UniformType::Float1),
@@ -161,7 +175,6 @@ impl FontStorage{
         const V_SHADE: &str = include_str!("text_vert.vs");
         const F_SHADE: &str = include_str!("text_frag.fs");
         let shader_uv = ctx.new_shader(ShaderSource::Glsl { vertex: V_SHADE, fragment: F_SHADE } , shader_meta).unwrap();
-        use miniquad::graphics::*;
         let pipeline = ctx.new_pipeline(
             &[BufferLayout::default()],
             &[
@@ -169,14 +182,7 @@ impl FontStorage{
                 VertexAttribute::new("uv", VertexFormat::Float2),
             ],
             shader_uv,
-            PipelineParams{
-                color_blend: Some(BlendState::new(
-                    Equation::Add,
-                    BlendFactor::Value(BlendValue::SourceAlpha),
-                    BlendFactor::OneMinusValue(BlendValue::SourceAlpha))
-                ),
-                ..Default::default()
-            }
+            alpha_blend()
         );
 
         let font = load_font();
@@ -191,7 +197,7 @@ impl FontStorage{
         ctx.apply_pipeline(&self.pipeline);
     }
     //WARNING: Assumes pipeline has been set already
-    fn draw_char(&self, ctx: &mut dyn RenderingBackend, char_data: &CharStorage, color: [f32;3], pen: XYPos,
+    fn draw_char(&self, ctx: &mut dyn RenderingBackend, char_data: &CharStorage, color: Color, pen: XYPos,
         size: f32, angle: f32, world_offset: GFXPos, scale: (f32, f32))
     {
         ctx.apply_bindings(&char_data.binding);
@@ -202,7 +208,7 @@ impl FontStorage{
     }
     //WARNING: Assumes pipeline has been set already
     //Centers the text's bounding box on pos. Characters the font wasn't built with are skipped
-    pub fn render_text_centered(&self, ctx: &mut dyn RenderingBackend, text: &str, color: [f32;3], pos: XYPos, world_offset: GFXPos, scale: (f32, f32)){
+    pub fn render_text_centered(&self, ctx: &mut dyn RenderingBackend, text: &str, color: Color, pos: XYPos, world_offset: GFXPos, scale: (f32, f32)){
         let text_chars = || text.chars().filter_map(|c| self.chars.get(&c));
         let mut width_total = 0.;
         let (mut bottom, mut top) = (f32::INFINITY, f32::NEG_INFINITY);
@@ -222,7 +228,7 @@ impl FontStorage{
     }
     //WARNING: Assumes pipeline has been set already
     //Draws the atom's symbol centered on pos, scaled so its larger side is SYMBOL_SIZE
-    pub fn render_atom_symbol(&self, ctx: &mut dyn RenderingBackend, t: AtomType, color: [f32;3], pos: XYPos, world_offset: GFXPos, scale: (f32, f32)){
+    pub fn render_atom_symbol(&self, ctx: &mut dyn RenderingBackend, t: AtomType, color: Color, pos: XYPos, world_offset: GFXPos, scale: (f32, f32)){
         let Some((c, angle)) = atom_symbol(t) else {return};
         let Some(char_data) = self.chars.get(&c) else {return};
         let m = &char_data.metrics;
