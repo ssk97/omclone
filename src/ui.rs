@@ -60,6 +60,9 @@ pub struct MyMiniquadApp {
     mouse: (f32, f32),
     //As of the last key event
     keymods: KeyMods,
+    //A mouse button was released since egui's last frame, and where the mouse has moved since (see mouse_motion_event)
+    released: bool,
+    held_motion: Option<(f32, f32)>,
 }
 
 impl MyMiniquadApp {
@@ -82,6 +85,7 @@ impl MyMiniquadApp {
             mq_ctx, egui_mq,
             render_data,app_state,unloaded_info,
             extra_message:None, dragging: None, right_press: None, mouse: (0., 0.), keymods: KeyMods::default(),
+            released: false, held_motion: None,
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -208,6 +212,11 @@ impl EventHandler for MyMiniquadApp {
                 }
             };
         });
+        //Movement held back from that frame goes into the next one
+        self.released = false;
+        if let Some((x, y)) = self.held_motion.take(){
+            self.egui_mq.mouse_motion_event(x, y);
+        }
         //egui has now applied any text field that the board input waited for
         if let Loaded(loaded) = &mut self.app_state{
             loaded.flush_board_input();
@@ -264,7 +273,13 @@ impl EventHandler for MyMiniquadApp {
     }
 
     fn mouse_motion_event(&mut self, x: f32, y: f32) {
-        self.egui_mq.mouse_motion_event( x, y);
+        //egui gives a click, or the end of a drag, the pointer's position at the end of its frame. In a slow frame the
+        //mouse can move on after the button comes up, so egui only sees that movement in the next frame.
+        if self.released{
+            self.held_motion = Some((x, y));
+        } else {
+            self.egui_mq.mouse_motion_event(x, y);
+        }
         let (x, y) = logical(x, y);
         self.mouse = (x, y);
         if let Loaded(loaded) = &mut self.app_state{
@@ -303,6 +318,8 @@ impl EventHandler for MyMiniquadApp {
         x: f32,
         y: f32,
     ) {
+        //The press is where the mouse is now, later than any movement held back
+        self.held_motion = None;
         self.egui_mq.mouse_button_down_event(mb, x, y);
         let (x, y) = logical(x, y);
         let egui_ctx = self.egui_mq.egui_ctx();
@@ -329,7 +346,9 @@ impl EventHandler for MyMiniquadApp {
         x: f32,
         y: f32,
     ) {
+        self.held_motion = None;
         self.egui_mq.mouse_button_up_event(mb, x, y);
+        self.released = true;
         let (x, y) = logical(x, y);
         match mb {
             MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{

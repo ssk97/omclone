@@ -82,8 +82,10 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             loaded.max_timestep = target_time;
         }
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut target_time, 0..=loaded.max_timestep)
-                .show_value(false));
+            //Sliders only sense drags, and egui never takes a press released in the same frame (a click during a slow
+            //frame) as a drag, so such a click was ignored. Sensing clicks too makes egui give the slider its position.
+            let _ = ui.add(egui::Slider::new(&mut target_time, 0..=loaded.max_timestep)
+                .show_value(false)).interact(egui::Sense::click());
             ui.add(egui::DragValue::new(&mut target_time)
                 .range(0..=loaded.max_timestep)
                 .speed(0.1));
@@ -136,6 +138,7 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             }
             if loaded.area_mode != AreaMode::Off{
                 ui.monospace(format!("{:5}",loaded.timeline.curr().area_touched.len()));
+                ui.label(" area");
             }
             ui.separator();
             ui.label("Speed:");
@@ -1059,5 +1062,24 @@ mod tests {
         tap_board(&ctx, &mut loaded, 5, 5);
         assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
         assert_eq!(loaded.selection, None);
+    }
+
+    //A click on the timeline slider whose press and release came in one frame (during a slow frame) was ignored
+    #[test]
+    fn a_click_within_one_frame_moves_the_timeline() {
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![], vec![]);
+        loaded.max_timestep = 100;
+        let mut timeline_frame = |events: Vec<Event>| {
+            let _ = ctx.run_ui(RawInput{events, ..Default::default()}, |ui| timeline_window(ui.ctx(), &mut loaded));
+        };
+        for _ in 0..3 {
+            timeline_frame(vec![]);
+        }
+        let slider = widget_rect(&ctx, |w| w.typ == WidgetType::Slider).expect("no slider drawn");
+        timeline_frame(vec![Event::PointerMoved(slider.center())]);
+        timeline_frame(click(slider.center()));
+        let step = loaded.cursor_step();
+        assert!((45..=55).contains(&step), "the middle of the slider is near timestep 50, not {step}");
     }
 }
