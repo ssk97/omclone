@@ -70,7 +70,7 @@
 		async function read_puzzle(){
 			if (puz_input.files.length > 0){
 				const input_file = puz_input.files[0];
-				filedata = await getAsByteArray(input_file);
+				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_puzzle(js_object(filedata));
 				show_loaded(puz_input, 'puzzle-loaded', input_file);
 			}
@@ -78,7 +78,7 @@
 		async function read_solution(){
 			if (sol_input.files.length > 0){
 				const input_file = sol_input.files[0];
-				filedata = await getAsByteArray(input_file);
+				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_solution(js_object(filedata));
 				show_loaded(sol_input, 'solution-loaded', input_file);
 			}

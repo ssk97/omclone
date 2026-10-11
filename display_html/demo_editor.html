@@ -70,7 +70,7 @@
 		async function read_puzzle(){
 			if (puz_input.files.length > 0){
 				const input_file = puz_input.files[0];
-				filedata = await getAsByteArray(input_file);
+				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_puzzle(js_object(filedata));
 				show_loaded(puz_input, 'puzzle-loaded', input_file);
 			}
@@ -78,7 +78,7 @@
 		async function read_solution(){
 			if (sol_input.files.length > 0){
 				const input_file = sol_input.files[0];
-				filedata = await getAsByteArray(input_file);
+				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_solution_name(js_object(input_file.name));
 				wasm_exports.js_load_solution(js_object(filedata));
 				show_loaded(sol_input, 'solution-loaded', input_file);
@@ -92,6 +92,10 @@
 				window.addEventListener('message', function (e) {
 					if (e.data && typeof e.data === 'object' && e.data.command && e.data.command === 'load') {
 						wasm_exports.js_load_puzzle(js_object(e.data.puzzle));
+						//Optional: the name Save downloads the solution as
+						if (typeof e.data.solution_name === 'string'){
+							wasm_exports.js_load_solution_name(js_object(e.data.solution_name));
+						}
 						wasm_exports.js_load_solution(js_object(e.data.solution));
 						document.getElementById('header_div').style.display = 'none';
 					}
@@ -101,8 +105,8 @@
 		}
 		
 		function save_file(filedata, filename){
-				name = consume_js_object(filename)
-				data = consume_js_object(filedata)
+				const name = consume_js_object(filename);
+				const data = consume_js_object(filedata);
 				const blob = new Blob([data]);
 			    const url = window.URL.createObjectURL(blob);
 				const a = document.createElement('a');
@@ -112,7 +116,9 @@
 				a.download = name;
 				document.body.appendChild(a);
 				a.click();
-				window.URL.revokeObjectURL(url);
+				a.remove();
+				//After the download has started from it
+				setTimeout(() => window.URL.revokeObjectURL(url), 0);
 		}
 		
 		register_plugin = function (importObject) {
