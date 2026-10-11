@@ -255,7 +255,11 @@ impl CameraSetup{
             let (base, reach) = (pos_to_xy(arm.pos), XYVec::repeat(arm.len as f32*2.));
             [base - reach, base + reach]
         });
-        let points: Vec<XYPos> = glyph_hexes.chain(arm_reach).collect();
+        let mut points: Vec<XYPos> = glyph_hexes.chain(arm_reach).collect();
+        //With no parts, the bounds below would be infinite
+        if points.is_empty(){
+            points.push(XYPos::origin());
+        }
         let border = XYVec::repeat(6.);
         let low = points.iter().fold(XYPos::new(f32::INFINITY, f32::INFINITY), |a, b| a.inf(b)) - border;
         let high = points.iter().fold(XYPos::new(f32::NEG_INFINITY, f32::NEG_INFINITY), |a, b| a.sup(b)) + border;

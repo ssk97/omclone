@@ -189,7 +189,6 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
         ui.text_edit_singleline(&mut unloaded_info.solution);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
-                loaded.solution.solution_name = loaded::saved_solution_name(&loaded.solution.solution_name);
                 //Serialize fully first so a failure doesn't leave a partial file
                 let saved = loaded.solution_bytes().and_then(|data| {
                     #[cfg(not(target_arch = "wasm32"))]
@@ -200,6 +199,8 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
                 });
                 loaded.message = Some(match saved {
                     Ok(()) => {
+                        //The name as saved
+                        loaded.solution.solution_name = loaded::saved_solution_name(&loaded.solution.solution_name);
                         loaded.dirty = false;
                         recovery::clear();
                         String::from("Saved!")

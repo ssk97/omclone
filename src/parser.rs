@@ -105,8 +105,10 @@ fn parse_var_int(f: &mut impl Read) -> Result<usize> {
 }
 fn parse_str(f: &mut impl Read) -> Result<String> {
     let length = parse_var_int(f)?;
-    let mut dat = vec![0; length as usize];
-    f.read_exact(&mut dat)?;
+    //Read as far as the file goes rather than allocating the length up front, which a corrupt file can make huge
+    let mut dat = Vec::new();
+    f.by_ref().take(length as u64).read_to_end(&mut dat)?;
+    ensure!(dat.len() == length, "String runs past the end of the file");
     //Have to re-wrap to convert to anyhow error
     Ok(String::from_utf8(dat)?)
 }
@@ -522,6 +524,9 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
     };
     Ok(puzzle_output)
 }
+//Far past any real solution. The tape is allocated out to its last instruction, so a corrupt index past this would
+//take gigabytes.
+const MAX_INSTRUCTION_INDEX: usize = 1 << 24;
 //`offset` is added to every instruction index; it must make them all non-negative
 fn process_instructions(input: &[(i32, Instr)], offset: i64) -> Result<Tape> {
     let mut first = usize::MAX; //A giant value
@@ -529,6 +534,7 @@ fn process_instructions(input: &[(i32, Instr)], offset: i64) -> Result<Tape> {
     for &(pos, instr) in input {
         ensure!(instr != Instr::Empty, "Empty instruction found in file!");
         let pos = usize::try_from(pos as i64 + offset)?;
+        ensure!(pos <= MAX_INSTRUCTION_INDEX, "Instruction at timestep {pos} is past the limit of {MAX_INSTRUCTION_INDEX}");
         if first > pos {
             if first != usize::MAX {
                 let splice_source = std::iter::repeat(Instr::Empty).take(first - pos);
@@ -556,7 +562,12 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
         .flat_map(|p| p.instructions.iter().map(|&(pos, _)| pos))
         .min().unwrap_or(0);
     let instruction_offset = -(earliest_instruction.min(0) as i64);
+    let bounds = -MAX_COORD..=MAX_COORD;
     for p in &soln.part_list {
+        //Further out, positions would overflow later on. Track and conduit hexes are relative to the part.
+        let mut hexes = std::iter::once(&p.pos).chain(p.tracks.iter().flatten()).chain(p.conduit.iter().flat_map(|c| &c.1));
+        ensure!(hexes.all(|h| bounds.contains(&h.x) && bounds.contains(&h.y)),
+            "The part at {:?} reaches past the limit of {MAX_COORD} hexes", (p.pos.x, p.pos.y));
         match &p.part_type {
             TGlyph(gtype) => {
                 glyphs.push(Glyph {
@@ -566,6 +577,8 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 });
             }
             TArm(atype) => {
+                //A much longer arm would take forever to mark its area
+                ensure!(ARM_LENGTHS.contains(&p.arm_size), "Arm length {} isn't in {:?}", p.arm_size, ARM_LENGTHS);
                 let instr = process_instructions(&p.instructions, instruction_offset)?;
                 arms.push((Arm::new(p.pos, p.rot, p.arm_size, *atype, instr),p.arm_index));
             }
@@ -611,6 +624,10 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 glyphs.push(Glyph {glyph_type: GlyphType::Conduit(conduits.1, conduits.0), pos: p.pos, rot: p.rot });
             }
         }
+    }
+    //Only a glyph's rotation mod 6 matters, and a corrupt one would overflow the angle math
+    for g in &mut glyphs {
+        g.rot = normalize_dir(g.rot);
     }
     arms.sort_by(|a, b| a.1.cmp(&b.1));
     let arms = arms.into_iter().map(|a| a.0).collect();
