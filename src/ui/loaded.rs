@@ -49,6 +49,8 @@ pub(super) struct Loaded{
     pub(super) list_hex: Option<Pos>,
     //The Part window lists every glyph instead
     pub(super) all_glyphs: bool,
+    //numbering_version at the latest press, for the clicks and drags in that list (see part_window)
+    pub(super) list_press_numbering: u64,
     pub(super) allow_overlap: bool,
     pub(super) tool: BoardTool,
     pub(super) allow_gaps: bool,
@@ -62,6 +64,9 @@ pub(super) struct Loaded{
     //Board input waiting for egui to apply the text field being typed in (see board_input)
     pub(super) waiting_input: Vec<BoardInput>,
     pub(super) history: UndoHistory<World, StepKind>,
+    //Counts the changes that may renumber parts: undo, redo, and edits that delete or reorder parts. Clicks and
+    //drags that pick parts by number record it at their press, and do nothing if it changes before they finish.
+    pub(super) numbering_version: u64,
 }
 impl Loaded{
     pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup) -> Self{
@@ -89,6 +94,7 @@ impl Loaded{
             selection: None,
             list_hex: None,
             all_glyphs: false,
+            list_press_numbering: 0,
             allow_overlap,
             tool: BoardTool::Select(None),
             allow_gaps: false,
@@ -99,6 +105,7 @@ impl Loaded{
             hovered_hex: None,
             waiting_input: Vec::new(),
             history: UndoHistory::new(),
+            numbering_version: 0,
         }
     }
     //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
@@ -172,6 +179,7 @@ impl Loaded{
     //back to the caret
     fn restore_base(&mut self, world: World){
         self.replace_base(world);
+        self.numbering_version += 1;
         self.select(None);
         self.tape_sel.collapse();
     }

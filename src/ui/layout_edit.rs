@@ -146,12 +146,36 @@ impl LayoutEdit{
         };
         (layout, part)
     }
-    //Whether parts can be renumbered or added, so the stack under the cursor may be out of date
+    //Whether it adds, removes or renumbers parts, so the part it returns (none for a deletion) is selected
+    //instead of keeping the selection
     pub(super) fn is_structural(&self) -> bool{
         !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..})
     }
     pub(super) fn is_reorder(&self) -> bool{
         matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..})
+    }
+    //Whether parts it keeps may have other numbers afterwards (see renumbered)
+    pub(super) fn renumbers(&self) -> bool{
+        self.is_reorder() || matches!(self, LayoutEdit::Delete(_))
+    }
+    //The number that a part numbered `part` before the edit has after it, or None if the edit deletes it
+    pub(super) fn renumbered(&self, part: PartId) -> Option<PartId>{
+        //As in apply: taken out at `from`, then put back in at `to`
+        let reorder = |i: usize, from: usize, to: usize| {
+            if i == from {
+                return to;
+            }
+            let removed = if i > from {i - 1} else {i};
+            if removed >= to {removed + 1} else {removed}
+        };
+        let delete = |i: usize, deleted: usize| (i != deleted).then_some(if i > deleted {i - 1} else {i});
+        match (self, part){
+            (LayoutEdit::ReorderArm{from, to}, PartId::Arm(i)) => Some(PartId::Arm(reorder(i, *from, *to))),
+            (LayoutEdit::ReorderGlyph{from, to}, PartId::Glyph(i)) => Some(PartId::Glyph(reorder(i, *from, *to))),
+            (LayoutEdit::Delete(PartId::Arm(deleted)), PartId::Arm(i)) => delete(i, *deleted).map(PartId::Arm),
+            (LayoutEdit::Delete(PartId::Glyph(deleted)), PartId::Glyph(i)) => delete(i, *deleted).map(PartId::Glyph),
+            _ => Some(part),
+        }
     }
 }
 //The number (as an index) that puts the part numbered `dragged` directly after `anchor` (or before it, if not
@@ -397,6 +421,31 @@ mod tests {
         let reordered = round_trip(&applied(&w, edit));
         let types: Vec<GlyphType> = reordered.glyphs.iter().map(|g| g.glyph_type.clone()).collect();
         assert_eq!(types, vec![GlyphType::Disposal, GlyphType::Bonding, GlyphType::Calcification]);
+    }
+
+    #[test]
+    fn renumbered_parts_are_where_the_edit_puts_them() {
+        //Each part has its own position, to tell them apart
+        let glyphs = (0..4).map(|i| glyph(i * 3, 0, 0, GlyphType::Bonding)).collect();
+        let arms = (0..4).map(|i| arm(i * 3, 5, 1, ArmType::PlainArm)).collect();
+        let w = world(glyphs, arms);
+        let pos = |layout: &InitialWorld, part| match part {
+            PartId::Glyph(i) => layout.glyphs[i].pos,
+            PartId::Arm(i) => layout.arms[i].pos,
+        };
+        let parts: Vec<PartId> = (0..4).map(PartId::Glyph).chain((0..4).map(PartId::Arm)).collect();
+        use LayoutEdit::*;
+        for edit in [ReorderGlyph{from: 0, to: 2}, ReorderGlyph{from: 3, to: 1}, ReorderArm{from: 1, to: 3},
+            ReorderArm{from: 2, to: 0}, Delete(PartId::Glyph(1)), Delete(PartId::Arm(2))]
+        {
+            let after = edit.apply(&w).0;
+            for &part in &parts {
+                match edit.renumbered(part) {
+                    Some(now) => assert_eq!(pos(&after, now), pos(&w.layout(), part), "{edit:?} moves {part:?}"),
+                    None => assert_eq!(edit, Delete(part), "only a deleted part is gone"),
+                }
+            }
+        }
     }
 
     #[test]

@@ -23,8 +23,8 @@ pub(super) struct TapeSelection{
     pub(super) caret: usize,
     //The cell a drag started on
     drag_from: Option<(usize, usize)>,
-    //The arm whose number a drag started on, which dragging reorders
-    reorder_from: Option<usize>,
+    //The arm whose number a drag started on, which dragging reorders, and the numbering_version then
+    reorder_from: Option<(usize, u64)>,
     //The caret's arm and timestep when it was last scrolled into view
     shown: (usize, usize),
 }
@@ -219,12 +219,9 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
                     (sel.anchor_arm, sel.arm, sel.anchor_step) = (0, arm_count-1, Some(0));
                     move_caret(loaded, end);
                 }
-                //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it. It can
-                //renumber the arms, so it ends a reorder that would otherwise take the wrong arm.
-                Key::Z | Key::Y if modifiers.command => {
-                    sel.reorder_from = None;
-                    if key == Key::Y || modifiers.shift {loaded.redo()} else {loaded.undo()}
-                }
+                //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it
+                Key::Z if modifiers.command => if modifiers.shift {loaded.redo()} else {loaded.undo()},
+                Key::Y if modifiers.command => loaded.redo(),
                 Key::Backspace => edit(loaded, TapeOp::EraseBack, true),
                 Key::Delete => edit(loaded, TapeOp::EraseForward, true),
                 Key::Insert => loaded.tape_mode = !loaded.tape_mode,
@@ -321,6 +318,7 @@ impl Layout{
 }
 fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
     let can_reorder = loaded.edit_lock().is_none();
+    let numbering = loaded.numbering_version;
     let sel = &mut loaded.tape_sel;
     let step = match hit{
         Hit::Cell(arm, step) => {
@@ -344,7 +342,7 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
             Hit::Gutter(arm) => {
                 sel.collapse();
                 //Clicking only selects its row; dragging reorders it
-                sel.reorder_from = can_reorder.then_some(arm);
+                sel.reorder_from = can_reorder.then_some((arm, numbering));
             }
         }
     }
@@ -444,9 +442,12 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             let (arm, step) = layout.cell_at(pos, arm_count, step_count);
             drag(loaded, arm, step);
         }
-        //Where an arm number being dragged would go. A press that egui doesn't take as a drag only selected its row.
-        let reordering = loaded.tape_sel.reorder_from.is_some() && (response.dragged() || response.drag_stopped());
-        let reorder = loaded.tape_sel.reorder_from.filter(|_| reordering).zip(pointer)
+        //Where an arm number being dragged would go. A press that egui doesn't take as a drag only selected its row,
+        //and a drag the arms were renumbered during (by an undo, say) would take the wrong arm, so it does nothing.
+        let reorder_from = loaded.tape_sel.reorder_from.filter(|&(_, numbering)| numbering == loaded.numbering_version)
+            .map(|(from, _)| from);
+        let reordering = reorder_from.is_some() && (response.dragged() || response.drag_stopped());
+        let reorder = reorder_from.filter(|_| reordering).zip(pointer)
             .and_then(|(from, pos)| layout.reorder_target(pos, from, arm_count, step_count));
         let over_numbers = matches!(response.hover_pos().and_then(|p| layout.hit(p, arm_count, step_count)),
             Some(Hit::Gutter(_)));
@@ -460,7 +461,8 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
         let drop_beside = reorder.filter(|_| down).map(|(anchor, after, _)| (anchor, after));
         if !down{
             loaded.tape_sel.drag_from = None;
-            if let (Some(from), Some((_, _, to))) = (loaded.tape_sel.reorder_from.take(), reorder){
+            loaded.tape_sel.reorder_from = None;
+            if let (Some(from), Some((_, _, to))) = (reorder_from, reorder){
                 if let Err(err) = loaded.apply_edit(&LayoutEdit::ReorderArm{from, to}){
                     loaded.message = Some(err);
                 }
@@ -864,6 +866,17 @@ mod editing_tests {
         grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
         assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3]);
         assert_eq!(loaded.tape_sel.arms(), 1..2, "a click only selects the row");
+    }
+
+    #[test]
+    fn an_arm_number_drag_that_undo_renumbers_the_arms_during_does_nothing() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], numbered_arms(3));
+        add_arm_and_select_it(&mut loaded, 20);
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        //The undo takes away the arm being dragged
+        drag_grid(&ctx, &mut loaded, number(&layout, 3), number(&layout, 0), vec![key(Key::Z, Modifiers::COMMAND)]);
+        assert_eq!(arm_order(&loaded), vec![0, 1, 2]);
     }
 
     #[test]

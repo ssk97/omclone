@@ -183,8 +183,7 @@ impl Loaded{
             _ => Ok(()),
         }
     }
-    //Makes the edit if it's allowed. A part it adds or renumbers is selected, and the tapes' caret follows an arm
-    //that's renumbered.
+    //Makes the edit if it's allowed. A part it adds or renumbers is selected.
     pub(super) fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
         if matches!(edit, LayoutEdit::Part(e) if e.is_noop()){
             return Ok(());
@@ -199,14 +198,40 @@ impl Loaded{
             self.check_overlap(&world.part_overlaps(part))?;
         }
         self.commit_world(world);
+        self.follow_renumbering(edit);
         if edit.is_structural(){
             self.select(part);
         }
-        if let LayoutEdit::ReorderArm{to, ..} = *edit{
-            self.tape_sel.arm = to;
-            self.tape_sel.collapse();
-        }
         Ok(())
+    }
+    //Keeps the track tool, the Path text and the ends of the tapes' selected arms on the parts they had through
+    //`edit`, which may renumber them. The tool and text end if their track is deleted. Clicks and drags in the
+    //windows hold numbers this can't reach, so they check numbering_version instead.
+    fn follow_renumbering(&mut self, edit: &LayoutEdit){
+        if edit.renumbers(){
+            self.numbering_version += 1;
+        }
+        let renumbered_glyph = |i| match edit.renumbered(PartId::Glyph(i)){
+            Some(PartId::Glyph(i)) => Some(i),
+            _ => None,
+        };
+        if let BoardTool::Track(TrackMode{glyph: Some(track), ..}, _) = &mut self.tool{
+            match renumbered_glyph(*track){
+                Some(now) => *track = now,
+                None => self.end_track_mode(),
+            }
+        }
+        self.path_text = self.path_text.take().and_then(|mut text| {
+            text.glyph = renumbered_glyph(text.glyph)?;
+            Some(text)
+        });
+        //A deleted arm's number is left for TapeSelection::fit to keep in range
+        let sel = &mut self.tape_sel;
+        for end in [&mut sel.arm, &mut sel.anchor_arm]{
+            if let Some(PartId::Arm(now)) = edit.renumbered(PartId::Arm(*end)){
+                *end = now;
+            }
+        }
     }
     pub(super) fn cancel_press(&mut self){
         if let BoardTool::Select(press) = &mut self.tool{
@@ -875,6 +900,53 @@ mod tests {
         assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderArm{from: 0, to: 1}), Ok(()));
         assert_eq!(loaded.timeline.base().arms[1].pos, Pos::new(0, 0));
         assert_eq!((loaded.selection, loaded.tape_sel.arm), (Some(PartId::Arm(1)), 1), "the tapes' caret follows it");
+    }
+
+    fn track_at(x: i32, y: i32) -> Glyph{
+        Glyph{pos: Pos::new(x, y), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])}
+    }
+    fn tracks(loaded: &Loaded) -> Vec<bool>{
+        loaded.timeline.base().glyphs.iter().map(Glyph::is_track).collect()
+    }
+
+    //Reordering another glyph onto the track's number left the track tool with that number, so the next stroke
+    //turned the other glyph into a track
+    #[test]
+    fn reordering_another_glyph_onto_the_tracks_number_ends_the_track_tool() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), track_at(0, 2)], vec![]);
+        loaded.select(Some(PartId::Glyph(1)));
+        loaded.set_track_tool(1, Some(TrackTool::AddBack));
+        assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderGlyph{from: 0, to: 1}), Ok(()));
+        //Next to the end of the bonder, which is now glyph 1
+        press(&mut loaded, 2, 0, KeyMods::default());
+        loaded.release();
+        assert_eq!(tracks(&loaded), vec![true, false]);
+    }
+
+    #[test]
+    fn a_renumbered_track_keeps_its_track_tool() {
+        let mut loaded = Loaded::for_test(vec![track_at(0, 2), bonder(0, 0)], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        loaded.set_track_tool(0, Some(TrackTool::AddBack));
+        assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderGlyph{from: 0, to: 1}), Ok(()));
+        press(&mut loaded, 2, 2, KeyMods::default());
+        loaded.release();
+        assert_eq!(tracks(&loaded), vec![false, true]);
+        assert_eq!(track_path(loaded.timeline.base(), 1), vec![Pos::new(0, 2), Pos::new(1, 2), Pos::new(2, 2)]);
+    }
+
+    #[test]
+    fn the_tapes_caret_stays_on_its_arm_when_arms_are_renumbered() {
+        let arms = (0..4).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm,
+            Tape::new(i as usize, vec![Instr::Grab]))).collect();
+        let mut loaded = Loaded::for_test(vec![], arms);
+        (loaded.tape_sel.arm, loaded.tape_sel.anchor_arm) = (2, 2);
+        //Each arm's tape starts at its original number
+        let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].instruction_tape.first;
+        assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderArm{from: 0, to: 3}), Ok(()));
+        assert_eq!(caret_arm(&loaded), 2);
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(PartId::Arm(0))), Ok(()));
+        assert_eq!(caret_arm(&loaded), 2);
     }
 
     #[test]

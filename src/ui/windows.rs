@@ -326,6 +326,10 @@ fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Response{
     }
 }
 pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+    //Before the part's fields are drawn, since the press may end the one being typed in and apply it
+    if egui_ctx.input(|i| i.pointer.primary_pressed()){
+        loaded.list_press_numbering = loaded.numbering_version;
+    }
     egui::Window::new("Part").min_width(readout_width(egui_ctx)).show(egui_ctx, |ui| {
         ui.horizontal(|ui| {
             let lock = loaded.history_lock();
@@ -368,7 +372,10 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             Some(part) => {ui.push_id(part, |ui| part_section(ui, loaded, part));}
             None => {ui.weak("No part selected");}
         }
-        //After the fields are drawn, so that one being typed in (which the click ends) goes to its own part first
+        //After the fields are drawn, so that one being typed in (which the click ends) goes to its own part first.
+        //That can renumber the parts (as can an undo or Delete during a drag), and then the part clicked or dragged
+        //may have another number, so the click or drop does nothing.
+        let action = action.filter(|_| loaded.list_press_numbering == loaded.numbering_version);
         match action {
             Some(ListAction::Select(part)) => loaded.select(Some(part)),
             Some(ListAction::Reorder(edit)) => if let Err(err) = loaded.apply_edit(&edit) {
@@ -390,7 +397,7 @@ struct DraggedGlyph(usize);
 //How many rows the list of parts shows before it scrolls
 const PART_LIST_ROWS: f32 = 12.;
 //The parts on the hex last clicked, or every glyph. Clicking one selects it, and glyphs can be dragged above or below
-//another glyph to reorder them.
+//another glyph to reorder them, unless the parts are renumbered in between (see part_window).
 fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
     let base = loaded.timeline.base();
     let parts: Vec<PartId> = if loaded.all_glyphs {
@@ -411,6 +418,11 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
     }
     let row_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let ctx = ui.ctx().clone();
+    //A drag that the glyphs were renumbered during would move the wrong one (see part_window), so it's abandoned
+    let current = loaded.list_press_numbering == loaded.numbering_version;
+    if !current {
+        egui::DragAndDrop::clear_payload(&ctx);
+    }
     let dragged = egui::DragAndDrop::payload::<DraggedGlyph>(&ctx).map(|d| d.0);
     //Scrolls to the selection when it, or the list shown, changes
     let shown_id = egui::Id::new("part_list_shown");
@@ -434,7 +446,9 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
             let PartId::Glyph(glyph) = part else {continue};
             if can_reorder {
                 row = row.interact(egui::Sense::drag());
-                row.dnd_set_drag_payload(DraggedGlyph(glyph));
+                if current {
+                    row.dnd_set_drag_payload(DraggedGlyph(glyph));
+                }
             }
             let Some(from) = dragged else {continue};
             //The gaps between rows count as the nearer row's, so the target doesn't flicker off between them
@@ -787,7 +801,7 @@ pub(super) fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut Pa
     do_loading
 }
 
-//A field typed in for one part, then a click that selects another, as the app's frames see them
+//The Part window as the app's frames see it: fields typed in, clicks, and glyphs dragged in the list of parts
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {
     use super::*;
@@ -834,30 +848,48 @@ mod tests {
             frame(ctx, loaded, vec![]);
         }
     }
-    //Presses at `from`, moves to `to` over a few frames, and releases there
-    fn drag(ctx: &egui::Context, loaded: &mut Loaded, from: Pos2, to: Pos2) {
-        let button = |pos, pressed| Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed,
-            modifiers: egui::Modifiers::NONE};
+    fn button(pos: Pos2, pressed: bool) -> Event {
+        Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE}
+    }
+    //Presses at `from` and moves to `to` over a few frames
+    fn press_and_move(ctx: &egui::Context, loaded: &mut Loaded, from: Pos2, to: Pos2) {
         frame(ctx, loaded, vec![Event::PointerMoved(from), button(from, true)]);
         for i in 1..=4 {
             frame(ctx, loaded, vec![Event::PointerMoved(from + (to - from) * (i as f32 / 4.))]);
         }
+    }
+    //Presses at `from`, moves to `to` over a few frames, and releases there
+    fn drag(ctx: &egui::Context, loaded: &mut Loaded, from: Pos2, to: Pos2) {
+        press_and_move(ctx, loaded, from, to);
         frame(ctx, loaded, vec![button(to, false)]);
     }
     //A press and release in one frame
     fn click(pos: Pos2) -> Vec<Event> {
-        let button = |pressed| Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed,
-            modifiers: egui::Modifiers::NONE};
-        vec![Event::PointerMoved(pos), button(true), button(false)]
+        vec![Event::PointerMoved(pos), button(pos, true), button(pos, false)]
+    }
+    //Clicks the field at `at` and types `text` into it
+    fn type_at(ctx: &egui::Context, loaded: &mut Loaded, at: Pos2, text: &str) {
+        frame(ctx, loaded, click(at));
+        frame(ctx, loaded, vec![]);
+        frame(ctx, loaded, vec![Event::Text(text.into())]);
+        assert!(ctx.text_edit_focused());
     }
     //Clicks the first widget of this type and types `text` into it
     fn type_into(ctx: &egui::Context, loaded: &mut Loaded, typ: WidgetType, text: &str) {
         settle(ctx, loaded);
         let at = widget(ctx, |w| w.typ == typ);
-        frame(ctx, loaded, click(at));
-        frame(ctx, loaded, vec![]);
-        frame(ctx, loaded, vec![Event::Text(text.into())]);
-        assert!(ctx.text_edit_focused());
+        type_at(ctx, loaded, at, text);
+    }
+    //The center of the number field on the same line as this label, as drawn last frame
+    fn number_field(ctx: &egui::Context, label: &str) -> Pos2 {
+        let line = row(ctx, label).y_range();
+        ctx.viewport(|v| {
+            let widgets = &v.prev_pass.widgets;
+            widgets.layers().flat_map(|(_, rects)| rects)
+                .find(|w| line.contains(w.rect.center().y)
+                    && widgets.info(w.id).is_some_and(|i| i.typ == WidgetType::DragValue))
+                .map(|w| w.rect.center())
+        }).unwrap_or_else(|| panic!("no number field beside {label:?}"))
     }
     //A press and release on the board at a hex, in one frame (like a touchpad tap). egui sees it off its windows.
     fn tap_board(ctx: &egui::Context, loaded: &mut Loaded, x: i32, y: i32) {
@@ -945,6 +977,53 @@ mod tests {
         assert_eq!(glyph_types(&loaded), vec![Calcification, Bonding]);
     }
 
+    //A typed Glyph # that the click applied renumbered the glyphs before the click took effect, which then
+    //selected whichever glyph had the clicked row's number
+    #[test]
+    fn a_click_that_applies_a_typed_glyph_number_selects_nothing_else() {
+        use GlyphType::*;
+        for separate_frames in [false, true] {
+            let ctx = context();
+            let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification),
+                glyph(6, 0, Duplication)], vec![]);
+            loaded.all_glyphs = true;
+            loaded.select(Some(PartId::Glyph(0)));
+            settle(&ctx, &mut loaded);
+            type_at(&ctx, &mut loaded, number_field(&ctx, "Glyph #:"), "3");
+            let other = row(&ctx, "Calcification (glyph 2)").center();
+            if separate_frames {
+                frame(&ctx, &mut loaded, vec![Event::PointerMoved(other), button(other, true)]);
+                frame(&ctx, &mut loaded, vec![button(other, false)]);
+            } else {
+                frame(&ctx, &mut loaded, click(other));
+            }
+            assert_eq!(glyph_types(&loaded), vec![Calcification, Duplication, Bonding], "the typed number applies");
+            assert_eq!(loaded.selection, Some(PartId::Glyph(2)), "the bonder stays selected");
+        }
+    }
+
+    //An undo during a drag renumbered the glyphs, and the drop moved the wrong one, or panicked when the dragged
+    //glyph was gone
+    #[test]
+    fn a_drag_that_undo_renumbers_the_glyphs_during_does_nothing() {
+        use GlyphType::*;
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification)], vec![]);
+        loaded.all_glyphs = true;
+        let add = LayoutEdit::Add{part: NewPart::Glyph(Duplication), pos: Pos::new(6, 0), rot: 0, len: 1};
+        assert_eq!(loaded.apply_edit(&add), Ok(()));
+        settle(&ctx, &mut loaded);
+        let from = row(&ctx, "Duplication (glyph 3)").center();
+        press_and_move(&ctx, &mut loaded, from, from + egui::vec2(0., 10.));
+        loaded.undo();
+        frame(&ctx, &mut loaded, vec![]);
+        //The rows moved up when the added glyph's row went away
+        let to = bottom_half(row(&ctx, "Bonder (glyph 1)"));
+        frame(&ctx, &mut loaded, vec![Event::PointerMoved(to)]);
+        frame(&ctx, &mut loaded, vec![button(to, false)]);
+        assert_eq!(glyph_types(&loaded), vec![Bonding, Calcification]);
+    }
+
     #[test]
     fn a_typed_number_goes_to_its_part_when_the_board_selects_another() {
         let ctx = context();
@@ -957,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_number_goes_to_its_part_when_the_stack_list_selects_another() {
+    fn a_typed_number_goes_to_its_part_when_the_part_list_selects_another() {
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(4, 0)], vec![]);
         loaded.select(Some(PartId::Glyph(0)));
