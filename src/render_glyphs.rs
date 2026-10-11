@@ -10,7 +10,7 @@ const QUAD_INDEX_BUF: [u16;6] = [
 
 //Non-power-of-two images must use TextureWrap::Clamp (and no mipmaps) or WebGL1 renders them black
 pub fn load_texture(ctx: &mut dyn RenderingBackend, byte_data: &[u8], wrap: TextureWrap) -> (TextureId, u32, u32){
-    use image::io::Reader as ImageReader;
+    use image::ImageReader;
     use image::ImageFormat::Png;
     use std::io::Cursor;
     let img = ImageReader::with_format(Cursor::new(byte_data),Png).decode().unwrap().into_rgba8();

@@ -2,6 +2,7 @@
 use super::*;
 
 bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Bonds: u8 {
         const NO_BOND     =0b0000_0000;
         const NORMAL      =0b0000_0001;
