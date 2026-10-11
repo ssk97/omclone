@@ -151,12 +151,9 @@ impl LayoutEdit{
     pub(super) fn is_structural(&self) -> bool{
         !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..})
     }
-    pub(super) fn is_reorder(&self) -> bool{
-        matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..})
-    }
     //Whether parts it keeps may have other numbers afterwards (see renumbered)
     pub(super) fn renumbers(&self) -> bool{
-        self.is_reorder() || matches!(self, LayoutEdit::Delete(_))
+        matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..} | LayoutEdit::Delete(_))
     }
     //The number that a part numbered `part` before the edit has after it, or None if the edit deletes it
     pub(super) fn renumbered(&self, part: PartId) -> Option<PartId>{

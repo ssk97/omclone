@@ -64,8 +64,9 @@ pub(super) struct Loaded{
     //Board input waiting for egui to apply the text field being typed in (see board_input)
     pub(super) waiting_input: Vec<BoardInput>,
     pub(super) history: UndoHistory<World, StepKind>,
-    //Counts the changes that may renumber parts: undo, redo, and edits that delete or reorder parts. Clicks and
-    //drags that pick parts by number record it at their press, and do nothing if it changes before they finish.
+    //Counts the changes that may renumber parts: edits that delete or reorder parts, and undoing or redoing a layout
+    //edit. Clicks and drags that pick parts by number record it at their press, and do nothing if it changes before
+    //they finish.
     pub(super) numbering_version: u64,
 }
 impl Loaded{

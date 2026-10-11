@@ -193,8 +193,7 @@ impl Loaded{
         }
         let (layout, part) = edit.apply(self.timeline.base());
         let world = World::setup_sim(&layout).map_err(|e| e.to_string())?;
-        //A part that's only renumbered stays where it was, overlapping or not
-        if let Some(part) = part.filter(|_| !edit.is_reorder()){
+        if let Some(part) = part{
             self.check_overlap(&world.part_overlaps(part))?;
         }
         self.commit_world(world);
@@ -885,21 +884,6 @@ mod tests {
         loaded.select(Some(PartId::Glyph(0)));
         assert!(loaded.pending_edit().is_none(), "the abandoned text isn't previewed again");
         assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0)]);
-    }
-
-    //Reordering was refused when the part overlapped another and overlap wasn't allowed, though nothing changes position
-    #[test]
-    fn overlapping_parts_can_be_reordered() {
-        let calcifier = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Calcification};
-        let arm = |x| Arm::new(Pos::new(x, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
-        let mut loaded = Loaded::for_test(vec![bonder(0, 0), calcifier], vec![arm(0), arm(5)]);
-        loaded.allow_overlap = false;
-        assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderGlyph{from: 0, to: 1}), Ok(()));
-        assert_eq!(loaded.timeline.base().glyphs[1].glyph_type, GlyphType::Bonding);
-        assert_eq!(loaded.selection, Some(PartId::Glyph(1)));
-        assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderArm{from: 0, to: 1}), Ok(()));
-        assert_eq!(loaded.timeline.base().arms[1].pos, Pos::new(0, 0));
-        assert_eq!((loaded.selection, loaded.tape_sel.arm), (Some(PartId::Arm(1)), 1), "the tapes' caret follows it");
     }
 
     fn track_at(x: i32, y: i32) -> Glyph{
