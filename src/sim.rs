@@ -75,7 +75,7 @@ pub enum ArmMovement{
 }
 
 //A part of the layout: an index into World::glyphs or World::arms
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PartId {
     Glyph(usize),
     Arm(usize),
@@ -97,7 +97,6 @@ pub struct World {
     pub repeat_length: usize,
     pub track_maps: TrackMaps,
     pub cost: i32,
-    pub instruction_count: i32,
     pub conduit_pairs: ConduitPairMap,
     //Repeating output data, keyed by glyph index
     pub polymers: FxHashMap<usize, Polymer>,

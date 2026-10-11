@@ -1,11 +1,6 @@
 //The egui windows
 use super::*;
 
-#[cfg(all(target_arch = "wasm32", feature="editor_ui"))]
-extern "C" {
-    fn save_file(filedata: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
-}
-
 //A number that's typed in rather than dragged, applied once on Enter or when the field loses focus
 //(each change is a layout edit). Only typed values are clamped to `range`, not the value shown.
 fn typed_number<N: egui::emath::Numeric>(value: &mut N, range: std::ops::RangeInclusive<N>) -> egui::DragValue<'_>{
@@ -129,11 +124,17 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
                 loaded.edit_repeat_length(repeat_length);
             }
             ui.separator();
-            let area_check = ui.checkbox(&mut loaded.show_area, "Collide/Area");
-            if area_check.changed() && loaded.timeline.set_mark_area(loaded.show_area){
-                loaded.clear_crash();
+            ui.label("Collide/Area:");
+            for (mode, label, hover) in [
+                (AreaMode::Shown, "Show", "Checks collisions and measures area, shading the hexes it covers"),
+                (AreaMode::Hidden, "Hide", "Checks collisions and measures area, without the shading"),
+                (AreaMode::Off, "Off", "No collision checks or area. Turning them back on simulates again from the start."),
+            ]{
+                if ui.selectable_label(loaded.area_mode == mode, label).on_hover_text(hover).clicked(){
+                    loaded.set_area_mode(mode);
+                }
             }
-            if loaded.show_area{
+            if loaded.area_mode != AreaMode::Off{
                 ui.monospace(format!("{:5}",loaded.timeline.curr().area_touched.len()));
             }
             ui.separator();
@@ -184,28 +185,19 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
         ui.text_edit_singleline(&mut unloaded_info.solution);
         ui.horizontal(|ui| {
             if ui.button("Save").clicked() {
-                let dat = &*unloaded_info;
-                if !loaded.solution.solution_name.contains("omclone"){
-                    loaded.solution.solution_name += "(omclone)";
-                }
-                let new_solution = parser::create_solution(loaded.timeline.base(),
-                    loaded.solution.puzzle_name.clone(),
-                    loaded.solution.solution_name.clone());
+                loaded.solution.solution_name = loaded::saved_solution_name(&loaded.solution.solution_name);
                 //Serialize fully first so a failure doesn't leave a partial file
-                let mut data = Vec::new();
-                let saved = parser::write_solution(&mut data, &new_solution).and_then(|()| {
+                let saved = loaded.solution_bytes().and_then(|data| {
                     #[cfg(not(target_arch = "wasm32"))]
-                    std::fs::write(Path::new(&dat.base).join(&dat.solution), &data)?;
-                    #[cfg(target_arch = "wasm32")]{
-                        let filedata = sapp_jsutils::JsObject::buffer(&data);
-                        let filename = sapp_jsutils::JsObject::string(&dat.solution);
-                        unsafe {save_file(filedata,filename);}
-                    }
+                    std::fs::write(solution_path(unloaded_info), &data)?;
+                    #[cfg(target_arch = "wasm32")]
+                    download(&data, &unloaded_info.solution);
                     Ok(())
                 });
                 loaded.message = Some(match saved {
                     Ok(()) => {
                         loaded.dirty = false;
+                        recovery::clear();
                         String::from("Saved!")
                     }
                     Err(err) => format!("Save failed: {err}"),
@@ -219,6 +211,44 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
         if loaded.dirty{
             ui.weak("Unsaved changes");
         }
+        ui.separator();
+        solution_stats(ui, loaded);
+    });
+}
+//The solution's stats as the loaded file had them, and as they are now. Cycles and area are only known once the
+//timeline has run past the last output.
+#[cfg(feature = "editor_ui")]
+fn solution_stats(ui: &mut egui::Ui, loaded: &Loaded){
+    let base = loaded.timeline.base();
+    let completion = loaded.timeline.completion();
+    let unknown = |ui: &mut egui::Ui, why: &str| {ui.weak("–").on_hover_text(why);};
+    let not_run = "Run or step past the last output to measure this";
+    egui::Grid::new("solution_stats").show(ui, |ui| {
+        for heading in ["", "Cycles", "Cost", "Area", "Instructions"]{
+            ui.label(heading);
+        }
+        ui.end_row();
+        ui.label("As loaded");
+        match &loaded.solution.stats{
+            Some(s) => for n in [s.cycles, s.cost, s.area, s.instructions]{
+                ui.label(n.to_string());
+            },
+            None => {ui.weak("unsolved");}
+        }
+        ui.end_row();
+        ui.label("Now");
+        match completion{
+            Some(c) => {ui.label(c.cycles.to_string());}
+            None => unknown(ui, not_run),
+        }
+        ui.label(base.cost.to_string());
+        match completion{
+            _ if loaded.area_mode == AreaMode::Off => unknown(ui, "Turn on Collide/Area to measure this"),
+            Some(c) => {ui.label(c.area.to_string());}
+            None => unknown(ui, not_run),
+        }
+        ui.label(base.instruction_count().to_string());
+        ui.end_row();
     });
 }
 //`extra_message` reports what "Optimize Pistons" changed
@@ -320,15 +350,15 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             },
             None => {ui.weak("(click the board)");}
         }
-        if clicked.is_some() {
-            //A quick click can land in the same frame as the Path field losing focus, before it's drawn
-            loaded.commit_typed_path();
-            loaded.select(clicked);
-        }
         ui.separator();
+        //Each part's fields keep their own egui state, so text typed for one part is never applied to another
         match loaded.selection {
-            Some(part) => part_section(ui, loaded, part),
+            Some(part) => {ui.push_id(part, |ui| part_section(ui, loaded, part));}
             None => {ui.weak("No part selected");}
+        }
+        //After the fields are drawn, so that one being typed in (which the click ends) goes to its own part first
+        if clicked.is_some() {
+            loaded.select(clicked);
         }
     });
 }
@@ -597,4 +627,101 @@ pub(super) fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut Pa
         }
     });
     do_loading
+}
+
+//A field typed in for one part, then a click that selects another, as the app's frames see them
+#[cfg(all(test, feature = "editor_ui"))]
+mod tests {
+    use super::*;
+    use egui::{Event, Pos2, RawInput, WidgetType};
+    use loaded::TEST_SCREEN;
+
+    fn context() -> egui::Context {
+        let ctx = egui::Context::default();
+        ctx.options_mut(|o| o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses);
+        //Records each widget's type and label, to find them by
+        ctx.global_style_mut(|s| s.debug.show_interactive_widgets = true);
+        ctx
+    }
+    //Draws the Part window for a frame with these events, then applies the board input that waited for it
+    fn frame(ctx: &egui::Context, loaded: &mut Loaded, events: Vec<Event>) {
+        let _ = ctx.run_ui(RawInput{events, ..Default::default()}, |ui| part_window(ui.ctx(), loaded));
+        loaded.flush_board_input();
+    }
+    //The center of the first widget drawn last frame that matches
+    fn widget(ctx: &egui::Context, matches: impl Fn(&egui::WidgetInfo) -> bool) -> Pos2 {
+        ctx.viewport(|v| {
+            let widgets = &v.prev_pass.widgets;
+            widgets.layers().flat_map(|(_, rects)| rects)
+                .find(|w| widgets.info(w.id).is_some_and(&matches)).map(|w| w.rect.center())
+        }).expect("no such widget drawn")
+    }
+    //A press and release in one frame
+    fn click(pos: Pos2) -> Vec<Event> {
+        let button = |pressed| Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed,
+            modifiers: egui::Modifiers::NONE};
+        vec![Event::PointerMoved(pos), button(true), button(false)]
+    }
+    //Clicks the first widget of this type and types `text` into it
+    fn type_into(ctx: &egui::Context, loaded: &mut Loaded, typ: WidgetType, text: &str) {
+        //A new window takes a few frames to settle into place
+        for _ in 0..3 {
+            frame(ctx, loaded, vec![]);
+        }
+        let at = widget(ctx, |w| w.typ == typ);
+        frame(ctx, loaded, click(at));
+        frame(ctx, loaded, vec![]);
+        frame(ctx, loaded, vec![Event::Text(text.into())]);
+        assert!(ctx.text_edit_focused());
+    }
+    //A press and release on the board at a hex, in one frame (like a touchpad tap). egui sees it off its windows.
+    fn tap_board(ctx: &egui::Context, loaded: &mut Loaded, x: i32, y: i32) {
+        let px = loaded.test_px(x, y);
+        let typing = ctx.text_edit_focused();
+        loaded.board_input(BoardInput::Press{px, screen: TEST_SCREEN, keymods: KeyMods::default()}, typing);
+        loaded.board_input(BoardInput::Release, typing);
+        frame(ctx, loaded, click(Pos2::new(2000., 2000.)));
+    }
+    fn bonder(x: i32, y: i32) -> Glyph {
+        Glyph{pos: Pos::new(x, y), rot: 0, glyph_type: GlyphType::Bonding}
+    }
+    fn positions(loaded: &Loaded) -> Vec<Pos> {
+        loaded.timeline.base().glyphs.iter().map(|g| g.pos).collect()
+    }
+
+    #[test]
+    fn a_typed_number_goes_to_its_part_when_the_board_selects_another() {
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(4, 0)], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        type_into(&ctx, &mut loaded, WidgetType::DragValue, "2");
+        tap_board(&ctx, &mut loaded, 4, 0);
+        assert_eq!(positions(&loaded), vec![Pos::new(2, 0), Pos::new(4, 0)]);
+        assert_eq!(loaded.selection, Some(PartId::Glyph(1)));
+    }
+
+    #[test]
+    fn a_typed_number_goes_to_its_part_when_the_stack_list_selects_another() {
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(4, 0)], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        loaded.stack_view = Some(vec![PartId::Glyph(0), PartId::Glyph(1)]);
+        type_into(&ctx, &mut loaded, WidgetType::DragValue, "2");
+        let other = widget(&ctx, |w| w.label.as_deref() == Some("Bonder (glyph 2)"));
+        frame(&ctx, &mut loaded, click(other));
+        assert_eq!(positions(&loaded), vec![Pos::new(2, 0), Pos::new(4, 0)]);
+        assert_eq!(loaded.selection, Some(PartId::Glyph(1)));
+    }
+
+    #[test]
+    fn a_typed_path_is_applied_when_the_board_deselects_it() {
+        let ctx = context();
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        type_into(&ctx, &mut loaded, WidgetType::TextEdit, "d");
+        tap_board(&ctx, &mut loaded, 5, 5);
+        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
+        assert_eq!(loaded.selection, None);
+    }
 }

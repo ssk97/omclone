@@ -74,7 +74,7 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         let same_tapes = world.arms.iter().zip(&rebuilt.arms).all(|(a, b)|
             a.instruction_tape.first == b.instruction_tape.first && a.instruction_tape.instructions == b.instruction_tape.instructions);
         if !same_tapes || world.cost != rebuilt.cost || world.repeat_length != rebuilt.repeat_length
-            || world.instruction_count != rebuilt.instruction_count || world.area_touched != rebuilt.area_touched {
+            || world.instruction_count() != rebuilt.instruction_count() || world.area_touched != rebuilt.area_touched {
             println!("Rebuild changed the world: {:?}", fpath);
             results.setup_errors += 1;
             return;
@@ -1009,10 +1009,14 @@ mod timeline_tests {
 
     //An arm moving salt from an input at (0,0) to an output at (-1,1), `repeats` times per loop
     fn mover(repeats: usize) -> InitialWorld {
+        mover_filling(repeats, 1_000_000)
+    }
+    //Like mover, with an output that's full after `products`
+    fn mover_filling(repeats: usize, products: i32) -> InitialWorld {
         let salt = |x, y| Atom::new(Pos::new(x, y), AtomType::Salt);
         let glyphs = vec![
             Glyph { pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Input(smallvec![vec![salt(0, 0)]], 0) },
-            Glyph { pos: Pos::new(-1, 1), rot: 0, glyph_type: GlyphType::Output(smallvec![vec![salt(0, 0)]], 1_000_000, 0) },
+            Glyph { pos: Pos::new(-1, 1), rot: 0, glyph_type: GlyphType::Output(smallvec![vec![salt(0, 0)]], products, 0) },
         ];
         let tape = [Grab, RotateCounterClockwise, Drop, RotateClockwise].repeat(repeats);
         let arms = vec![Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape::new(0, tape))];
@@ -1124,6 +1128,55 @@ mod timeline_tests {
         let gaps: Vec<u64> = behind.windows(2).map(|w| w[1] - w[0]).collect();
         assert!(gaps.windows(2).all(|g| g[0] <= g[1]), "gaps going back: {gaps:?}");
         assert!(*behind.last().unwrap() > end/4, "oldest is only {} back", behind.last().unwrap());
+    }
+
+    //The cycles and area of a straight run once it completes
+    fn completed(init: &InitialWorld) -> (i32, i32) {
+        let mut world = World::setup_sim(init).unwrap();
+        let mut motion = WorldStepInfo::new();
+        while !world.is_complete() {
+            world.run_step(true, &mut motion).unwrap();
+        }
+        let stats = world.get_stats();
+        (stats.cycles, stats.area)
+    }
+    fn completion(timeline: &Timeline) -> Option<(i32, i32)> {
+        timeline.completion().map(|c| (c.cycles, c.area))
+    }
+
+    #[test]
+    fn completion_is_kept_until_an_edit_before_it() {
+        let init = mover_filling(100, 6);
+        let expected = completed(&init);
+        let mut timeline = Timeline::new(World::setup_sim(&init).unwrap(), true);
+        timeline.advance_to(10.).unwrap();
+        assert_eq!(completion(&timeline), None, "not run that far yet");
+        timeline.advance_to(100.).unwrap();
+        assert_eq!(completion(&timeline), Some(expected));
+        timeline.rewind(5);
+        assert_eq!(completion(&timeline), Some(expected), "moving back changes nothing");
+
+        timeline.base_mut().arms[0].instruction_tape.insert(200, &[Empty], true);
+        timeline.program_changed(200);
+        assert_eq!(completion(&timeline), Some(expected), "an edit after it completed");
+
+        //Skip the grab at step 8, so the output fills a loop later
+        timeline.base_mut().arms[0].instruction_tape.insert(8, &[Empty], true);
+        timeline.program_changed(8);
+        assert_eq!(completion(&timeline), None);
+        timeline.advance_to(100.).unwrap();
+        let edited = completed(&timeline.base().layout());
+        assert_eq!(completion(&timeline), Some(edited));
+        assert_eq!(edited.0, expected.0 + 4);
+    }
+
+    #[test]
+    fn instruction_count_follows_tape_edits() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(2)).unwrap(), true);
+        assert_eq!(timeline.base().instruction_count(), 8);
+        timeline.base_mut().arms[0].instruction_tape.insert(2, &[Empty], true);
+        assert_eq!(timeline.base().instruction_count(), 7);
+        assert_eq!(World::setup_sim(&timeline.base().layout()).unwrap().instruction_count(), 7);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use miniquad::*;
 use crate::{sim::*, parser, render_sim::*, render_library::GFXPos, timeline::Timeline};
 use smallvec::{SmallVec, smallvec};
-use std::{io::BufReader, io::prelude::*};
+use std::{io::BufReader, io::prelude::*, path::PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs::File, path::Path};
@@ -14,12 +14,13 @@ use simple_eyre::eyre::Result;
 mod board;
 mod layout_edit;
 mod loaded;
+mod recovery;
 mod tape_grid;
 mod undo;
 mod windows;
 use board::*;
 use layout_edit::*;
-use loaded::{Loaded, RunState};
+use loaded::{AreaMode, Loaded, RunState};
 use tape_grid::{TapeSelection, longest_tape};
 use undo::UndoHistory;
 use windows::PathText;
@@ -28,6 +29,14 @@ struct PathInfo{
     base: String,
     puzzle: String,
     solution: String,
+}
+//Where Save writes the solution (on the web, the name it downloads as)
+fn solution_path(info: &PathInfo) -> PathBuf{
+    if cfg!(target_arch = "wasm32") {
+        PathBuf::from(&info.solution)
+    } else {
+        std::path::Path::new(&info.base).join(&info.solution)
+    }
 }
 enum AppState{
     NotLoaded,Loaded(Loaded) 
@@ -55,6 +64,8 @@ pub struct MyMiniquadApp {
 
 impl MyMiniquadApp {
     pub fn new() -> Self {
+        //Here rather than in main, as miniquad replaces the panic hook on the web before this runs
+        recovery::install_panic_hook();
         let mut mq_ctx = window::new_rendering_backend();
         let render_data = RenderDataBase::new(mq_ctx.as_mut());
         let (base_str, puzzle_str, solution_str) = omclone::default_paths();
@@ -64,6 +75,9 @@ impl MyMiniquadApp {
         let app_state = AppState::NotLoaded;
         let unloaded_info = PathInfo{base, puzzle, solution};
         let egui_mq = egui_miniquad::EguiMq::new(mq_ctx.as_mut());
+        //A press anywhere else applies a text field being typed in, even one that starts a drag (egui's default
+        //waits for a click). The board waits for this before acting on the press (see Loaded::board_input).
+        egui_mq.egui_ctx().options_mut(|o| o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses);
         Self {
             mq_ctx, egui_mq,
             render_data,app_state,unloaded_info,
@@ -73,18 +87,15 @@ impl MyMiniquadApp {
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
         let puzzle = parser::parse_puzzle(&mut BufReader::new(f_puzzle))?;
         let solution = parser::parse_solution(&mut BufReader::new(f_sol))?;
-        println!("Check: {:?}", solution.stats);
         let init = parser::puzzle_prep(&puzzle, &solution)?;
-        let mut max_timestep = 0;
-        for (a_num, a) in init.arms.iter().enumerate(){
-            println!("Arms {:02}: {:?}", a_num, a.instruction_tape.to_string());
-            max_timestep = max_timestep.max(a.instruction_tape.first)
-        }
+        let last_start = init.arms.iter().map(|a| a.instruction_tape.first).max().unwrap_or(0);
         let world = World::setup_sim(&init)?;
-        max_timestep += world.repeat_length*2+100;
+        let max_timestep = last_start + world.repeat_length*2+100;
 
         let camera = CameraSetup::frame_center(&world, logical_screen_size());
         self.app_state = Loaded(Loaded::new(world, solution, max_timestep, camera));
+        //Unsaved changes to the solution it replaced were discarded
+        recovery::clear();
         Ok(())
     }
     //A solution names its puzzle by the puzzle's file name, which loading doesn't check
@@ -132,6 +143,17 @@ pub extern "C" fn js_load_solution_name(name: sapp_jsutils::JsObject){
     name.to_string(&mut sol_name);
     *JS_SOLUTION_NAME.lock().unwrap() = Some(sol_name);
 }
+#[cfg(target_arch = "wasm32")]
+extern "C" {
+    fn save_file(filedata: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
+}
+//Has the browser download a file
+#[cfg(target_arch = "wasm32")]
+fn download(data: &[u8], name: &str){
+    let filedata = sapp_jsutils::JsObject::buffer(data);
+    let filename = sapp_jsutils::JsObject::string(name);
+    unsafe {save_file(filedata, filename);}
+}
 
 
 const EDITOR_ENABLED: bool = cfg!(feature = "editor_ui");
@@ -139,6 +161,8 @@ const EDITOR_ENABLED: bool = cfg!(feature = "editor_ui");
 impl EventHandler for MyMiniquadApp {
     fn update(&mut self) {
         if let Loaded(loaded) = &mut self.app_state{
+            //Before simulating, so a crash running an edit still has that edit
+            loaded.update_backup(|| solution_path(&self.unloaded_info));
             loaded.update();
             loaded.refresh_preview();
             let timeline = &loaded.timeline;
@@ -184,11 +208,16 @@ impl EventHandler for MyMiniquadApp {
                 }
             };
         });
+        //egui has now applied any text field that the board input waited for
+        if let Loaded(loaded) = &mut self.app_state{
+            loaded.flush_board_input();
+        }
         self.egui_mq.draw(ctx);
         match do_loading{
             AppStateUpdate::NoChange => {},
             AppStateUpdate::ResetHome => {
                 self.app_state = NotLoaded;
+                recovery::clear();
             }
             AppStateUpdate::Load => {
                 //Loads, returning a warning if there's something to check
@@ -209,7 +238,8 @@ impl EventHandler for MyMiniquadApp {
                         let f_puzzle = puzzle.as_ref().unwrap();
                         let solution = JS_SOLUTION_INPUT.lock().unwrap();
                         let f_sol = solution.as_ref().unwrap();
-                        let name = JS_SOLUTION_NAME.lock().unwrap().take();
+                        //Kept, like the files, for loading again after a Reset
+                        let name = JS_SOLUTION_NAME.lock().unwrap().clone();
                         self.unloaded_info.solution = name.unwrap_or(String::from("omclone.solution"));
                         self.load(f_puzzle.as_slice(), f_sol.as_slice())?;
                         Ok(None)
@@ -242,8 +272,9 @@ impl EventHandler for MyMiniquadApp {
                 loaded.camera.pan_pixels(x-drag_last[0], y-drag_last[1]);
                 *drag_last = [x,y];
             }
-            let over_ui = self.egui_mq.egui_ctx().is_pointer_over_egui();
-            loaded.pointer_moved((x, y), logical_screen_size(), over_ui);
+            let egui_ctx = self.egui_mq.egui_ctx();
+            let input = BoardInput::Move{px: (x, y), screen: logical_screen_size(), over_ui: egui_ctx.is_pointer_over_egui()};
+            loaded.board_input(input, egui_ctx.text_edit_focused());
         }
     }
 
@@ -274,7 +305,8 @@ impl EventHandler for MyMiniquadApp {
     ) {
         self.egui_mq.mouse_button_down_event(mb, x, y);
         let (x, y) = logical(x, y);
-        if !self.egui_mq.egui_ctx().is_pointer_over_egui(){
+        let egui_ctx = self.egui_mq.egui_ctx();
+        if !egui_ctx.is_pointer_over_egui(){
             match mb {
                 MouseButton::Right | MouseButton::Middle => {
                     self.dragging = Some([x,y]);
@@ -283,7 +315,8 @@ impl EventHandler for MyMiniquadApp {
                     }
                 }
                 MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
-                    loaded.press((x, y), logical_screen_size(), self.keymods);
+                    let input = BoardInput::Press{px: (x, y), screen: logical_screen_size(), keymods: self.keymods};
+                    loaded.board_input(input, egui_ctx.text_edit_focused());
                 },
                 _ => {}
             }
@@ -300,7 +333,7 @@ impl EventHandler for MyMiniquadApp {
         let (x, y) = logical(x, y);
         match mb {
             MouseButton::Left => if let Loaded(loaded) = &mut self.app_state{
-                loaded.release();
+                loaded.board_input(BoardInput::Release, self.egui_mq.egui_ctx().text_edit_focused());
             },
             _ => {
                 self.dragging = None;

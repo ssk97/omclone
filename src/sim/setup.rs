@@ -177,7 +177,6 @@ impl World {
             repeat_length: 0,
             track_maps: Default::default(),
             cost: 0,
-            instruction_count: 0,
             conduit_pairs: Default::default(),
             polymers: Default::default(),
             input_variants: Vec::new(),
@@ -206,8 +205,6 @@ impl World {
                 Piston => 40,
             };
             World::normalize_instructions(a, &world.track_maps)?;
-            world.instruction_count += a.instruction_tape.instructions.iter()
-                .filter(|&&a| !matches!(a, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32;
             if a.arm_type == VanBerlo || a.arm_type == Ravari {
                 use AtomType::*;
                 a.grabbing = true;
@@ -303,11 +300,16 @@ impl World {
         }
         earliest
     }
+    //The instructions in the tapes as they are now (with Repeat and Reset already expanded, which the game counts too)
+    pub fn instruction_count(&self) -> i32 {
+        self.arms.iter().flat_map(|a| &a.instruction_tape.instructions)
+            .filter(|i| !matches!(i, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32
+    }
     pub fn get_stats(&self) -> SolutionStats {
         let cycles = (self.timestep-self.get_first_timestep()) as i32;
         let cost = self.cost;
         let area = self.area_touched.len() as i32;
-        let instructions = self.instruction_count;
+        let instructions = self.instruction_count();
         SolutionStats {cycles,cost,area,instructions}
     }
 }

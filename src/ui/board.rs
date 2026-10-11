@@ -35,6 +35,12 @@ impl BoardTool{
         match self {BoardTool::Track(_, stroke) => stroke.as_ref(), _ => None}
     }
 }
+//Left mouse button input for the board, in logical pixels on a screen of size `screen`
+pub(super) enum BoardInput{
+    Press{px: (f32, f32), screen: (f32, f32), keymods: KeyMods},
+    Move{px: (f32, f32), screen: (f32, f32), over_ui: bool},
+    Release,
+}
 //The left mouse button is held on the board
 pub(super) struct Press{
     press_px: (f32, f32),
@@ -230,6 +236,29 @@ impl Loaded{
     pub(super) fn right_click(&mut self){
         self.end_tool();
     }
+    //Takes mouse input for the board. Mouse events arrive before egui's frame sees them, so a press made while a text
+    //field is being typed in waits, along with the input after it, until egui has applied the field (see
+    //flush_board_input). Otherwise the press could select another part first, and the field's value would go to it.
+    pub(super) fn board_input(&mut self, input: BoardInput, typing: bool){
+        if !self.waiting_input.is_empty() || (typing && matches!(input, BoardInput::Press{..})){
+            self.waiting_input.push(input);
+        } else {
+            self.apply_board_input(input);
+        }
+    }
+    //Applies the input that waited for egui's frame
+    pub(super) fn flush_board_input(&mut self){
+        for input in std::mem::take(&mut self.waiting_input){
+            self.apply_board_input(input);
+        }
+    }
+    fn apply_board_input(&mut self, input: BoardInput){
+        match input{
+            BoardInput::Press{px, screen, keymods} => self.press(px, screen, keymods),
+            BoardInput::Move{px, screen, over_ui} => self.pointer_moved(px, screen, over_ui),
+            BoardInput::Release => self.release(),
+        }
+    }
     pub(super) fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
         self.cancel_press();
         let press_xy = self.camera.screen_to_world(px, screen_size);
@@ -241,9 +270,6 @@ impl Loaded{
         }
         //Arms are picked where they are now (glyphs don't move)
         let stack = self.timeline.curr().parts_at(press_hex);
-        //Mouse events come before egui's frame, so if the selection changes here, the Path field isn't drawn
-        //again to apply its own text
-        self.commit_typed_path();
         if stack.is_empty(){
             self.select(None);
             self.stack_view = None;
@@ -479,16 +505,6 @@ impl Loaded{
         let (text, first) = self.editing_path_text()?;
         Some((text.glyph, parse_path_text(&text.text, first).0))
     }
-    //Applies the path being typed into the Path field, if any
-    pub(super) fn commit_typed_path(&mut self){
-        let Some((glyph, path)) = self.typed_track_path() else {return};
-        self.path_text = None;
-        if path != track_path(self.timeline.base(), glyph){
-            if let Err(err) = self.apply_edit(&LayoutEdit::SetTrack{glyph: Some(glyph), path}){
-                self.message = Some(err);
-            }
-        }
-    }
     //The hex a step typed at the Path field's caret would start from, and the typed path's hexes after it,
     //which typing there shifts
     fn typed_caret(&self) -> Option<(Pos, Vec<Pos>)>{
@@ -617,7 +633,7 @@ impl Loaded{
             let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
                 area: &world.area_touched, float_world: &self.float_world, hidden: None};
-            render.draw(ctx, &self.camera, self.show_area, &scene);
+            render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
             if let Some(part) = self.highlighted_part(){
                 render.draw_hex_rings(ctx, &self.camera, &world.part_footprint(part), SELECT_COLOR);
             }
@@ -640,7 +656,7 @@ impl Loaded{
         let tracks = self.scene_tracks.as_ref().map_or(&self.timeline.base().track_maps, |(_, t)| t);
         let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, area: &world.area_touched,
             float_world, hidden: Some(part)};
-        render.draw(ctx, &self.camera, self.show_area, &scene);
+        render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
         match part{
             PartId::Glyph(i) => render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[i],
                 preview.polymer.as_ref(), preview.track.as_ref(), extra),
@@ -662,13 +678,10 @@ impl Loaded{
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {
     use super::*;
+    use loaded::TEST_SCREEN as SCREEN;
 
-    const SCREEN: (f32, f32) = (1000., 800.);
-    //The pixel at a hex's center
     fn px(loaded: &Loaded, x: i32, y: i32) -> (f32, f32){
-        let scale = loaded.camera.scale(SCREEN);
-        let world = pos_to_xy(Pos::new(x, y)) + loaded.camera.offset;
-        ((world.x*scale.0 + 1.)/2.*SCREEN.0, (1. - world.y*scale.1)/2.*SCREEN.1)
+        loaded.test_px(x, y)
     }
     fn press(loaded: &mut Loaded, x: i32, y: i32, keymods: KeyMods){
         let at = px(loaded, x, y);
@@ -807,18 +820,19 @@ mod tests {
         assert_eq!(caret_at(7), Some((Pos::new(4, 0), vec![])));
     }
 
-    //The click happens before egui's frame, and on empty board it deselects the track, so the Path field
-    //was never drawn again to apply its text
     #[test]
-    fn clicking_empty_board_applies_the_typed_path() {
-        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
-        let mut loaded = Loaded::for_test(vec![track], vec![]);
-        loaded.select(Some(PartId::Glyph(0)));
-        loaded.path_text = Some(PathText{glyph: 0, shown: "d".into(), text: "dd".into(), editing: true, caret: 2});
-        press(&mut loaded, 5, 5, KeyMods::default());
-        loaded.release();
-        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
-        assert_eq!(loaded.selection, None);
+    fn board_input_waits_for_egui_while_typing() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        let at = px(&loaded, 0, 0);
+        loaded.board_input(BoardInput::Press{px: at, screen: SCREEN, keymods: KeyMods::default()}, true);
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.selection, None, "the press waits, and the release waits behind it");
+        loaded.flush_board_input();
+        assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
+
+        let empty = px(&loaded, 5, 5);
+        loaded.board_input(BoardInput::Press{px: empty, screen: SCREEN, keymods: KeyMods::default()}, false);
+        assert_eq!(loaded.selection, None, "without typing, it acts right away");
     }
 
     #[test]

@@ -11,6 +11,15 @@ pub(super) enum RunState{
 pub(super) enum StepKind{
     Layout, Tapes
 }
+//Hidden still checks collisions and counts area, so showing it again doesn't re-simulate
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum AreaMode{
+    Shown, Hidden, Off
+}
+//Saved solutions are named as edited by omclone
+pub(super) fn saved_solution_name(name: &str) -> String{
+    if name.contains("omclone") {name.to_owned()} else {format!("{name}(omclone)")}
+}
 pub(super) struct Loaded{
     pub(super) timeline: Timeline,
     pub(super) float_world: FloatWorld,
@@ -21,13 +30,15 @@ pub(super) struct Loaded{
     pub(super) message: Option<String>,
     //The solution changed since it was loaded or saved
     pub(super) dirty: bool,
+    //It changed since the emergency save was last updated (see recovery)
+    backup_stale: bool,
 
     pub(super) tape_mode: bool,
     pub(super) tape_sel: TapeSelection,
     //The arms and caret timestep after the last tape edit, while more typing there joins its undo step
     pub(super) tape_group: Option<(Range<usize>, usize)>,
     pub(super) run_state: RunState,
-    pub(super) show_area: bool,
+    pub(super) area_mode: AreaMode,
     pub(super) run_speed: f64,
     pub(super) popup_reload: bool,
 
@@ -43,27 +54,29 @@ pub(super) struct Loaded{
     pub(super) preview: Option<Preview>,
     pub(super) scene_tracks: Option<(usize, TrackMaps)>,
     pub(super) pointer_over_ui: bool,
+    //Board input waiting for egui to apply the text field being typed in (see board_input)
+    pub(super) waiting_input: Vec<BoardInput>,
     pub(super) history: UndoHistory<World, StepKind>,
 }
 impl Loaded{
     pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup) -> Self{
         //A solution that already overlaps can keep doing so
         let allow_overlap = world.has_overlap();
-        //Also enables collision checks, so edits that collide are caught
-        let show_area = true;
+        //Collision checks are on, so edits that collide are caught
         Loaded{
-            timeline: Timeline::new(world, show_area),
+            timeline: Timeline::new(world, true),
             float_world: FloatWorld::new(),
 
             max_timestep,camera,solution,
             message: None,
             dirty: false,
+            backup_stale: false,
 
             tape_mode: false,
             tape_sel: TapeSelection::default(),
             tape_group: None,
             run_state: RunState::Manual(0),
-            show_area,
+            area_mode: AreaMode::Shown,
             run_speed: 0.05,
             popup_reload: false,
 
@@ -76,6 +89,7 @@ impl Loaded{
             preview: None,
             scene_tracks: None,
             pointer_over_ui: false,
+            waiting_input: Vec::new(),
             history: UndoHistory::new(),
         }
     }
@@ -91,9 +105,30 @@ impl Loaded{
         self.drop_preview();
         let target = self.timeline.time().floor() as usize;
         self.timeline.replace_base(world);
-        self.dirty = true;
+        self.mark_changed();
         self.clear_crash();
         self.try_set_target_time(target);
+    }
+    fn mark_changed(&mut self){
+        self.dirty = true;
+        self.backup_stale = true;
+    }
+    //The solution as Save writes it
+    pub(super) fn solution_bytes(&self) -> Result<Vec<u8>>{
+        let solution = parser::create_solution(self.timeline.base(), self.solution.puzzle_name.clone(),
+            saved_solution_name(&self.solution.solution_name));
+        let mut data = Vec::new();
+        parser::write_solution(&mut data, &solution)?;
+        Ok(data)
+    }
+    //Keeps the emergency save up to date with the unsaved changes. `path` is where Save would write.
+    pub(super) fn update_backup(&mut self, path: impl FnOnce() -> PathBuf){
+        if self.backup_stale && self.dirty{
+            if let Ok(data) = self.solution_bytes(){
+                recovery::store(data, path());
+            }
+        }
+        self.backup_stale = false;
     }
     //Why undo and redo can't be used right now, if they can't
     pub(super) fn history_lock(&self) -> Option<&'static str>{
@@ -175,7 +210,7 @@ impl Loaded{
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.
     pub(super) fn apply_base_change(&mut self, earliest_step: usize){
-        self.dirty = true;
+        self.mark_changed();
         if self.timeline.program_changed(earliest_step as u64){
             self.clear_crash();
         }
@@ -193,6 +228,12 @@ impl Loaded{
         self.tape_group = None;
         let earliest_step = self.change_repeat_length(length);
         self.apply_base_change(earliest_step);
+    }
+    pub(super) fn set_area_mode(&mut self, mode: AreaMode){
+        self.area_mode = mode;
+        if self.timeline.set_mark_area(mode != AreaMode::Off){
+            self.clear_crash();
+        }
     }
     //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
     pub(super) fn clear_crash(&mut self){
@@ -243,7 +284,15 @@ impl Loaded{
         let solution = parser::create_solution(&world, String::new(), String::new());
         Loaded::new(world, solution, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
     }
+    //The pixel at a hex's center, on a screen of size TEST_SCREEN
+    pub(super) fn test_px(&self, x: i32, y: i32) -> (f32, f32){
+        let scale = self.camera.scale(TEST_SCREEN);
+        let world = pos_to_xy(Pos::new(x, y)) + self.camera.offset;
+        ((world.x*scale.0 + 1.)/2.*TEST_SCREEN.0, (1. - world.y*scale.1)/2.*TEST_SCREEN.1)
+    }
 }
+#[cfg(all(test, feature = "editor_ui"))]
+pub(super) const TEST_SCREEN: (f32, f32) = (1000., 800.);
 
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {
@@ -262,5 +311,17 @@ mod tests {
         assert_eq!(loaded.timeline.base().repeat_length, 2);
         loaded.redo();
         assert_eq!(loaded.timeline.base().repeat_length, 5);
+    }
+
+    #[test]
+    fn only_turning_collisions_back_on_starts_over() {
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::RotateClockwise; 2]));
+        let mut loaded = Loaded::for_test(vec![], vec![arm]);
+        loaded.timeline.advance_to(50.).unwrap();
+        loaded.set_area_mode(AreaMode::Hidden);
+        assert_eq!(loaded.timeline.time(), 50.);
+        loaded.set_area_mode(AreaMode::Off);
+        loaded.set_area_mode(AreaMode::Shown);
+        assert!(loaded.timeline.at_start());
     }
 }

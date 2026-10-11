@@ -21,6 +21,18 @@ pub struct Timeline {
     //Worlds at substep 0, before running their timestep, sorted by timestep. A checkpoint only holds state:
     //it gets the program from base when restored, so it stays valid for program changes at or after its timestep.
     checkpoints: Vec<World>,
+    //Known once the cursor has run that far. Every run is the same, so moving back keeps it.
+    completion: Option<Completion>,
+}
+//When the run filled every output
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Completion {
+    //Counted like the game does (see World::get_stats)
+    pub cycles: i32,
+    //Only counted while mark_area is on
+    pub area: i32,
+    //The timestep after the one that filled the last output
+    timestep: u64,
 }
 //Gives a world base's program
 fn sync_program(world: &mut World, base: &World){
@@ -32,7 +44,7 @@ fn sync_program(world: &mut World, base: &World){
 impl Timeline{
     pub fn new(base: World, mark_area: bool) -> Self{
         Timeline{curr: base.clone(), base, motion: WorldStepInfo::new(), substep: 0, substep_count: DEFAULT_SUBSTEPS,
-            time: 0., mark_area, checkpoints: Vec::new()}
+            time: 0., mark_area, checkpoints: Vec::new(), completion: None}
     }
     pub fn base(&self) -> &World{
         &self.base
@@ -53,6 +65,9 @@ impl Timeline{
     //Nothing has moved yet
     pub fn at_start(&self) -> bool{
         self.curr.timestep == self.base.timestep && self.substep == 0 && self.time <= self.curr.timestep as f64
+    }
+    pub fn completion(&self) -> Option<Completion>{
+        self.completion
     }
     #[cfg(test)]
     pub fn checkpoint_steps(&self) -> Vec<u64>{
@@ -80,6 +95,7 @@ impl Timeline{
     pub fn replace_base(&mut self, base: World){
         self.base = base;
         self.checkpoints.clear();
+        self.completion = None;
         self.rewind(0);
     }
     //The program (tapes or loop length) in base changed, starting from timestep `earliest`.
@@ -90,10 +106,15 @@ impl Timeline{
             //Every world started at the old first timestep, so none can be reused
             self.base.timestep = start;
             self.checkpoints.clear();
+            self.completion = None;
             self.rewind(0);
             return true;
         }
         self.checkpoints.retain(|c| c.timestep <= earliest);
+        //It still completes then if the step that filled the last output ran before `earliest`
+        if self.completion.is_some_and(|c| c.timestep > earliest){
+            self.completion = None;
+        }
         //A world at `earliest` hasn't run it yet, unless it has started to (or crashed partway through)
         if earliest <= self.curr.timestep{
             self.rewind(earliest);
@@ -110,6 +131,8 @@ impl Timeline{
         self.mark_area = on;
         if restart{
             self.checkpoints.clear();
+            //Collisions may now stop it from completing, and the area wasn't counted
+            self.completion = None;
             self.rewind(0);
         }
         restart
@@ -152,6 +175,10 @@ impl Timeline{
         if self.substep == self.substep_count{
             self.substep = 0;
             self.curr.finalize_step(&mut self.motion, self.mark_area)?;
+            if self.completion.is_none() && self.curr.is_complete(){
+                let stats = self.curr.get_stats();
+                self.completion = Some(Completion{cycles: stats.cycles, area: stats.area, timestep: self.curr.timestep});
+            }
             if self.curr.timestep % CHECKPOINT_SPACING == 0{
                 self.add_checkpoint();
             }

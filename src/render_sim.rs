@@ -103,6 +103,7 @@ const BOND_NORMAL_ID:usize = 3;
 const BOND_RED_ID:usize = 4;
 const BOND_WHITE_ID:usize = 5;
 const BOND_YELLOW_ID:usize = 6;
+const ORIGIN_COLOR: [f32; 3] = [0.3, 0.3, 0.3];
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -534,6 +535,10 @@ impl RenderDataBase {
             }));
             ctx.draw(0, 6, 1);
         }
+        //Mark the origin, under any part there
+        self.font.set_pipeline(ctx);
+        self.font.render_text_centered(ctx, &ORIGIN_MARK.to_string(), ORIGIN_COLOR, pos_to_xy(Pos::new(0, 0)),
+            world_offset, scale);
         //Draw glyphs (including half-transparent cover for input/outputs)
         ctx.apply_pipeline(&self.pipeline_textured);
         for (id, glyph) in shown_glyphs(){
