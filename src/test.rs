@@ -736,6 +736,38 @@ mod regression_tests {
     }
 }
 
+//The world shown partway through a step
+mod float_world_tests {
+    use crate::sim::*;
+    use Instr::*;
+
+    //An arm's grip a quarter of the way through `step` (counting from 0) of running `instructions`
+    fn grip_during(instructions: Vec<Instr>, step: usize) -> f32 {
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
+        let mut world = World::setup_sim(&InitialWorld { glyphs: vec![], arms: vec![arm] }).unwrap();
+        let mut motion = WorldStepInfo::new();
+        for _ in 0..step {
+            world.run_step(false, &mut motion).unwrap();
+        }
+        world.prepare_step(&mut motion, false).unwrap();
+        let mut float_world = FloatWorld::new();
+        float_world.regenerate(&world, &motion, 0.25);
+        float_world.arms_xy[0].grip
+    }
+
+    #[test]
+    fn grip_closes_and_opens_over_the_step() {
+        assert_eq!(grip_during(vec![Grab, Drop], 0), 0.25);
+        assert_eq!(grip_during(vec![Grab, Drop], 1), 0.75);
+    }
+
+    #[test]
+    fn grip_holds_when_grab_or_drop_changes_nothing() {
+        assert_eq!(grip_during(vec![Grab, Grab], 1), 1.);
+        assert_eq!(grip_during(vec![Drop], 0), 0.);
+    }
+}
+
 
 //Footprints, picking stacks, and overlap
 mod part_tests {

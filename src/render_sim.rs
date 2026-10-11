@@ -8,37 +8,21 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::f32::consts::PI;
 
 //note: 1 hex has inner radius of 1 (width of 2), see sim/coords.rs
-fn setup_arms(ctx: &mut dyn RenderingBackend) -> Bindings{
-    const ARM_VERT_BUF: [Vert;14] = [
-        //Arm Base
-        [ 0.,-0.4,],
-        [ 0., 0.4,],
-        //Arm edge
-        [ 2., 0.,],
-        [ 4., 0.,],
-        [ 6., 0.,],
-        //Grab markers
-        [ 1.8, 0.,],
-        [ 2.2, -0.4,],
-        [ 2.2, 0.4,],
-        [ 3.8, 0.,],
-        [ 4.2, -0.4,],
-        [ 4.2, 0.4,],
-        [ 5.8, 0.,],
-        [ 6.2, -0.4,],
-        [ 6.2, 0.4,],
-        ];
-    //First triangle is arm, 2nd triangle is optional grab marker
-    const ARM_INDEX_BUF: [u16;18] = [
-        0, 1, 2,    5, 6, 7,
-        0, 1, 3,    8, 9, 10,
-        0, 1, 4,    11, 12, 13,];
-    let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&ARM_VERT_BUF));
-    let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&ARM_INDEX_BUF));
-    Bindings {
-        vertex_buffers: vec![vb],
-        index_buffer,
-        images: vec![],
+//Appends the arm's triangles in world space: one from the base to each grabber's tip, and a grab marker at the tip
+//that grows from nothing as the grip closes
+fn arm_triangles(f_arm: &FloatArm, verts: &mut Vec<GFXPos>){
+    let tip = 2.*f_arm.len;
+    let g = f_arm.grip;
+    let shape: [Vert; 6] = [
+        [0., -0.4], [0., 0.4], [tip, 0.],
+        [tip-0.2*g, 0.], [tip+0.2*g, -0.4*g], [tip+0.2*g, 0.4*g],
+    ];
+    let shown = if g > 0. {&shape[..]} else {&shape[..3]};
+    for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
+        let rotation = nalgebra::Rotation2::new(f_arm.rot+rot_to_angle(r));
+        for &[x, y] in shown{
+            verts.push((f_arm.pos + rotation*XYVec::new(x, y)).into());
+        }
     }
 }
 
@@ -66,28 +50,29 @@ pub fn track_lines(tracks: &TrackMaps) -> Vec<GFXPos>{
     }
     verts
 }
-//Lines that can change every frame, drawn from a buffer that grows when they need more room
-struct LineBuffer{
+//Vertices that can change every frame (line pairs or triangles, drawn in order), from a buffer that grows when they
+//need more room
+struct VertexStream{
     bindings: Bindings,
     capacity: usize,
     count: usize,
 }
-impl LineBuffer{
+impl VertexStream{
     //As many vertices as 16-bit indices can reach (WebGL1 may not have 32-bit ones)
     const MAX_VERTS: usize = u16::MAX as usize + 1;
     fn new(ctx: &mut dyn RenderingBackend, capacity: usize) -> Self{
         let vb = ctx.new_buffer(BufferType::VertexBuffer, BufferUsage::Stream, BufferSource::empty::<GFXPos>(capacity));
         let indices: Vec<u16> = (0..capacity).map(|i| i as u16).collect();
         let index_buffer = ctx.new_buffer(BufferType::IndexBuffer, BufferUsage::Immutable, BufferSource::slice(&indices));
-        LineBuffer{bindings: Bindings{vertex_buffers: vec![vb], index_buffer, images: vec![]}, capacity, count: 0}
+        VertexStream{bindings: Bindings{vertex_buffers: vec![vb], index_buffer, images: vec![]}, capacity, count: 0}
     }
-    //Replaces the lines. Any past MAX_VERTS aren't drawn.
+    //Replaces the vertices. Any past MAX_VERTS aren't drawn.
     fn set(&mut self, ctx: &mut dyn RenderingBackend, verts: &[GFXPos]){
         let verts = &verts[..verts.len().min(Self::MAX_VERTS)];
         if verts.len() > self.capacity{
             ctx.delete_buffer(self.bindings.vertex_buffers[0]);
             ctx.delete_buffer(self.bindings.index_buffer);
-            *self = LineBuffer::new(ctx, verts.len().next_power_of_two().min(Self::MAX_VERTS));
+            *self = VertexStream::new(ctx, verts.len().next_power_of_two().min(Self::MAX_VERTS));
         }
         if !verts.is_empty(){
             ctx.buffer_update(self.bindings.vertex_buffers[0], BufferSource::slice(verts));
@@ -105,6 +90,7 @@ const BOND_WHITE_ID:usize = 5;
 const BOND_YELLOW_ID:usize = 6;
 const ORIGIN_COLOR: Color = [0.3, 0.3, 0.3, 1.];
 const WHITE: Color = [1., 1., 1., 1.];
+const ARM_COLOR: Color = [0., 0., 0., 1.];
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -213,7 +199,6 @@ fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
 struct ShapeStore{
     hex_ring_bindings: Bindings,
     hex_fill_bindings: Bindings,
-    arm_bindings: Bindings,
     circle_bindings: Bindings,
     texture_bindings: Vec<Bindings>,
     glyph_images: GlyphImages,
@@ -287,8 +272,11 @@ pub struct RenderDataBase {
     shapes: ShapeStore,
     font: FontStorage,
     //The board's tracks, and a track being dragged or reshaped
-    scene_tracks: LineBuffer,
-    dragged_track: LineBuffer,
+    scene_tracks: VertexStream,
+    dragged_track: VertexStream,
+    //The board's arms, and an arm being dragged
+    scene_arms: VertexStream,
+    dragged_arm: VertexStream,
 }
 
 impl RenderDataBase {
@@ -352,18 +340,19 @@ impl RenderDataBase {
         let shapes = ShapeStore{
             hex_ring_bindings: setup_hex_ring(ctx),
             hex_fill_bindings: setup_hex_fill(ctx),
-            arm_bindings: setup_arms(ctx),
             circle_bindings: setup_circle(ctx),
             texture_bindings: setup_textures(ctx),
             glyph_images: GlyphImages::new(ctx),
         };
         
         let font = FontStorage::new(ctx);
-        let scene_tracks = LineBuffer::new(ctx, 1024);
-        let dragged_track = LineBuffer::new(ctx, 256);
+        let scene_tracks = VertexStream::new(ctx, 1024);
+        let dragged_track = VertexStream::new(ctx, 256);
+        let scene_arms = VertexStream::new(ctx, 1024);
+        let dragged_arm = VertexStream::new(ctx, 64);
 
         Self {
-            pipeline,pipeline_textured,pipeline_tracks,shapes,font,scene_tracks,dragged_track
+            pipeline,pipeline_textured,pipeline_tracks,shapes,font,scene_tracks,dragged_track,scene_arms,dragged_arm
         }
     }
 }
@@ -485,31 +474,19 @@ impl RenderDataBase {
             self.font.render_text_centered(ctx, &id.to_string(), WHITE, offset, world_offset, scale);
         }
     }
-    fn draw_lines(&self, ctx: &mut Context, lines: &LineBuffer, world_offset: GFXPos, scale: (f32, f32)){
-        if lines.count == 0{
+    //`pipeline` is pipeline_tracks for line pairs or pipeline for triangles
+    fn draw_stream(&self, ctx: &mut Context, pipeline: &Pipeline, stream: &VertexStream, color: Color,
+        world_offset: GFXPos, scale: (f32, f32))
+    {
+        if stream.count == 0{
             return;
         }
-        ctx.apply_pipeline(&self.pipeline_tracks);
-        ctx.apply_bindings(&lines.bindings);
+        ctx.apply_pipeline(pipeline);
+        ctx.apply_bindings(&stream.bindings);
         ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-            color: WHITE, offset:[0.,0.], world_offset, angle:0., scale
+            color, offset:[0.,0.], world_offset, angle:0., scale
         }));
-        ctx.draw(0, lines.count as i32, 1);
-    }
-    //Basic pipeline with the arm bindings
-    fn draw_arm(&self, ctx: &mut Context, f_arm: &FloatArm, world_offset: GFXPos, scale: (f32, f32)){
-        let color = [0., 0., 0., 1.];
-        let offset = f_arm.pos.into();
-        let triangles_drawn = if f_arm.grabbing {6} else {3};
-        for r in (0..6).step_by(Arm::angles_between_arm(f_arm.arm_type) as usize) {
-            let angle = f_arm.rot+rot_to_angle(r);
-            ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-                color, offset, world_offset, angle, scale
-            }));
-            //Only whole lengths 1-3 have geometry, so a piston snaps halfway through its motion
-            let shown_len = f_arm.len.round().clamp(1., 3.) as i32;
-            ctx.draw((shown_len-1)*6, triangles_drawn, 1);
-        }
+        ctx.draw(0, stream.count as i32, 1);
     }
     //note: assumes ctx is in the middle of a render pass
     pub fn draw(&mut self, ctx: &mut Context, camera: &CameraSetup, show_area: bool, scene: &Scene){
@@ -574,7 +551,7 @@ impl RenderDataBase {
         }
 
         self.scene_tracks.set(ctx, &track_lines(scene.tracks));
-        self.draw_lines(ctx, &self.scene_tracks, world_offset, scale);
+        self.draw_stream(ctx, &self.pipeline_tracks, &self.scene_tracks, WHITE, world_offset, scale);
 
 		//Draw atoms
 		self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
@@ -582,11 +559,12 @@ impl RenderDataBase {
         //Draw arms
         let shown_arms = || scene.float_world.arms_xy.iter().enumerate()
             .filter(|&(num, _)| scene.hidden != Some(PartId::Arm(num)));
-        ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&self.shapes.arm_bindings);
+        let mut arm_verts = Vec::new();
         for (_, f_arm) in shown_arms() {
-            self.draw_arm(ctx, f_arm, world_offset, scale);
+            arm_triangles(f_arm, &mut arm_verts);
         }
+        self.scene_arms.set(ctx, &arm_verts);
+        self.draw_stream(ctx, &self.pipeline, &self.scene_arms, ARM_COLOR, world_offset, scale);
         self.font.set_pipeline(ctx);
         for (num, f_arm) in shown_arms() {
             let string = (num+1).to_string();
@@ -609,11 +587,11 @@ impl RenderDataBase {
         self.draw_conduit_number(ctx, glyph, world_offset, scale);
         if let Some(track) = track{
             self.dragged_track.set(ctx, &track_lines(track));
-            self.draw_lines(ctx, &self.dragged_track, world_offset, scale);
+            self.draw_stream(ctx, &self.pipeline_tracks, &self.dragged_track, WHITE, world_offset, scale);
         }
     }
     //Draws an arm being dragged (in its starting state), shifted by `extra` (world units) from its hex
-    pub fn draw_dragged_arm(&self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
+    pub fn draw_dragged_arm(&mut self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = (camera.offset + extra).into();
         let f_arm = FloatArm{
@@ -621,11 +599,12 @@ impl RenderDataBase {
             rot: rot_to_angle(arm.rot),
             len: arm.len as f32,
             arm_type: arm.arm_type,
-            grabbing: arm.arm_type.is_wheel(),
+            grip: steady_grip(arm.arm_type.is_wheel()),
         };
-        ctx.apply_pipeline(&self.pipeline);
-        ctx.apply_bindings(&self.shapes.arm_bindings);
-        self.draw_arm(ctx, &f_arm, world_offset, scale);
+        let mut verts = Vec::new();
+        arm_triangles(&f_arm, &mut verts);
+        self.dragged_arm.set(ctx, &verts);
+        self.draw_stream(ctx, &self.pipeline, &self.dragged_arm, ARM_COLOR, world_offset, scale);
         self.font.set_pipeline(ctx);
         self.font.render_text_centered(ctx, &(num+1).to_string(), WHITE, f_arm.pos, world_offset, scale);
     }
@@ -696,6 +675,15 @@ mod tests {
         assert_eq!(lines(&[(0, 0), (1, 0), (2, 0)]), 2*2*2);
         //A lone hex gets a three-line star
         assert_eq!(lines(&[(5, 5)]), 2*3);
+    }
+    #[test]
+    fn pistons_reach_partway_between_hexes() {
+        let piston = FloatArm{pos: XYPos::new(1., 2.), rot: 0.7, len: 1.5, arm_type: ArmType::Piston, grip: 0.};
+        let mut verts = Vec::new();
+        arm_triangles(&piston, &mut verts);
+        let reach = verts.iter().map(|&[x, y]| (XYPos::new(x, y) - piston.pos).norm()).fold(0., f32::max);
+        //Hexes are 2 world units apart
+        assert!((reach - 3.).abs() < 1e-4, "reaches {reach}");
     }
     #[test]
     fn zoom_keeps_the_point_under_the_cursor() {

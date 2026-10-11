@@ -118,6 +118,7 @@ pub struct WorldStepInfo{
     pub grabs: Vec<GrabMovement>,
     pub grab_atoms: Vec<SmallVec<[AtomKey; 8]>>, //atoms moved by each grab (parallel to grabs)
     pub arms: Vec<ArmMovement>,
+    pub grip_toggled: Vec<bool>, //whether each arm grabbed or dropped this step (parallel to arms)
     pub spawning_atoms: VecDeque<SpawnMolecule>, //One entry per molecule
     pub recent_bonds: FxHashSet<AtomKey>,
     pub drop_conduit_check: FxHashSet<AtomKey>, //contains one entry per arm
@@ -130,6 +131,7 @@ impl WorldStepInfo{
             grabs: Vec::new(),
             grab_atoms: Vec::new(),
             arms: Vec::new(),
+            grip_toggled: Vec::new(),
             spawning_atoms:VecDeque::new(),
             recent_bonds:FxHashSet::default(),
             drop_conduit_check:FxHashSet::default(),
@@ -141,6 +143,7 @@ impl WorldStepInfo{
         self.grabs.clear();
         self.grab_atoms.clear();
         self.arms.clear();
+        self.grip_toggled.clear();
         self.spawning_atoms.clear();
         self.recent_bonds.clear();
         self.drop_conduit_check.clear();

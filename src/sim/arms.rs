@@ -74,6 +74,7 @@ impl World {
         let tape = &arm.instruction_tape;
         let timestep = timestep as usize;
         let instruction = tape.get(timestep, self.repeat_length);
+        let was_grabbing = arm.grabbing;
         const STILL: ArmMovement = Move(HeldStill);
         let action = if arm.halted {STILL} else {match instruction {
             Extend => {
@@ -158,6 +159,7 @@ impl World {
             }
         }
         motion.arms.push(action);
+        motion.grip_toggled.push(arm.grabbing != was_grabbing);
         Ok(())
     }
 }

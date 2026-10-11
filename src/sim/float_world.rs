@@ -23,7 +23,11 @@ pub struct FloatArm{
     pub rot: f32,
     pub len: f32,//in hexes
     pub arm_type: ArmType,
-    pub grabbing: bool,
+    pub grip: f32,//how far the grabbers have closed: 0 open, 1 holding
+}
+//The grip of an arm that isn't grabbing or dropping
+pub fn steady_grip(grabbing: bool) -> f32 {
+    if grabbing {1.} else {0.}
 }
 pub struct FloatWorld{//Might add arms, maybe some other animation stuff too
     pub portion: f32,
@@ -76,8 +80,7 @@ impl FloatWorld{
         for a_index in 0..world.arms.len(){
             let arm = &world.arms[a_index];
             let mut arm_len = arm.len as f32;
-            let motion = motion.arms[a_index];
-            let new_motion = match motion{
+            let new_motion = match motion.arms[a_index]{
                 Move(m) => m,
                 LengthAdjust(l) => {
                     arm_len += (l as f32)*portion;
@@ -86,12 +89,18 @@ impl FloatWorld{
                 Pivot(_) => HeldStill,
             };
             let (xy, angle) = apply_movement(arm.pos, new_motion, portion);
+            //The instruction has already set grabbing to how the step ends
+            let grip = match (motion.grip_toggled[a_index], arm.grabbing){
+                (true, true) => portion,
+                (true, false) => 1.-portion,
+                (false, grabbing) => steady_grip(grabbing),
+            };
             let new_arm = FloatArm{
                 pos: xy,
                 rot: angle+rot_to_angle(arm.rot),
                 len: arm_len,
                 arm_type: arm.arm_type,
-                grabbing: arm.grabbing,
+                grip,
             };
             self.arms_xy.push(new_arm);
         }
@@ -116,7 +125,7 @@ impl FloatWorld{
                 rot: rot_to_angle(arm.rot),
                 len: arm.len as f32,
                 arm_type: arm.arm_type,
-                grabbing: arm.grabbing,
+                grip: steady_grip(arm.grabbing),
             };
             self.arms_xy.push(new_arm);
         }
