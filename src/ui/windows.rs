@@ -326,7 +326,7 @@ fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Response{
     }
 }
 pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
-    egui::Window::new("Part").show(egui_ctx, |ui| {
+    egui::Window::new("Part").min_width(readout_width(egui_ctx)).show(egui_ctx, |ui| {
         ui.horizontal(|ui| {
             let lock = loaded.history_lock();
             let undo = ui.add_enabled(lock.is_none() && loaded.history.can_undo(), egui::Button::new("Undo"));
@@ -346,22 +346,22 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             //First, so the readout changing length doesn't move it
             ui.toggle_value(&mut loaded.camera_window_open, "Camera")
                 .on_hover_text("Camera controls, for moving and zooming without a mouse wheel or right button");
-            let readout = egui::RichText::new(mouse_readout(loaded)).monospace();
-            //Over a window, it's where the mouse last was on the board
-            ui.label(if loaded.pointer_over_ui {readout.weak()} else {readout});
+            readout_label(ui, loaded, mouse_readout(loaded));
         });
+        //Kept, blank, while nothing is selected, so selecting a part doesn't move what's below
+        readout_label(ui, loaded, offset_readout(loaded).unwrap_or_default());
         ui.separator();
-        ui.label("Parts here:");
-        let highlighted = loaded.highlighted_part();
-        let mut clicked = None;
-        match &loaded.stack_view {
-            Some(stack) => for &part in stack {
-                if ui.selectable_label(highlighted == Some(part), part_label(loaded.timeline.base(), part)).clicked() {
-                    clicked = Some(part);
+        ui.horizontal(|ui| {
+            for (all, label, hover) in [
+                (false, "Parts here", "The parts on the hex last clicked, topmost first. Drag a glyph to reorder it."),
+                (true, "All glyphs", "Every glyph, topmost first. Drag one to reorder it."),
+            ]{
+                if ui.selectable_label(loaded.all_glyphs == all, label).on_hover_text(format!("{hover} {GLYPH_ORDER_HELP}")).clicked(){
+                    loaded.all_glyphs = all;
                 }
-            },
-            None => {ui.weak("(click the board)");}
-        }
+            }
+        });
+        let action = part_list(ui, loaded);
         ui.separator();
         //Each part's fields keep their own egui state, so text typed for one part is never applied to another
         match loaded.selection {
@@ -369,26 +369,150 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             None => {ui.weak("No part selected");}
         }
         //After the fields are drawn, so that one being typed in (which the click ends) goes to its own part first
-        if clicked.is_some() {
-            loaded.select(clicked);
+        match action {
+            Some(ListAction::Select(part)) => loaded.select(Some(part)),
+            Some(ListAction::Reorder(edit)) => if let Err(err) = loaded.apply_edit(&edit) {
+                loaded.message = Some(err);
+            },
+            None => {}
         }
     });
 }
-//The hex under the mouse, and how far it is from the selected part
-fn mouse_readout(loaded: &Loaded) -> String{
-    let Some(hex) = loaded.hovered_hex else {return String::from("Mouse: –")};
-    let mut text = format!("Mouse: ({:3}, {:3})", hex.x, hex.y);
-    if let Some(part) = loaded.selection{
-        let world = loaded.timeline.base();
-        let pos = match part{
-            PartId::Glyph(i) => world.glyphs[i].pos,
-            PartId::Arm(i) => world.arms[i].pos,
-        };
-        let offset = hex - pos;
-        text += &format!(" · ({:+3}, {:+3}) from {}, {} away", offset.x, offset.y, part_label(world, part),
-            hex_distance(pos, hex));
+const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
+    overlap, the lower-numbered track wins.";
+//What was done in the Part window's list of parts
+enum ListAction{
+    Select(PartId),
+    Reorder(LayoutEdit),
+}
+//The glyph being dragged in the list of parts
+struct DraggedGlyph(usize);
+//How many rows the list of parts shows before it scrolls
+const PART_LIST_ROWS: f32 = 12.;
+//The parts on the hex last clicked, or every glyph. Clicking one selects it, and glyphs can be dragged above or below
+//another glyph to reorder them.
+fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
+    let base = loaded.timeline.base();
+    let parts: Vec<PartId> = if loaded.all_glyphs {
+        (0..base.glyphs.len()).rev().map(PartId::Glyph).collect()
+    } else {
+        match loaded.list_hex {
+            //Arms are listed where they are now, as they're picked on the board
+            Some(hex) => loaded.timeline.curr().parts_at(hex),
+            None => {
+                ui.weak("(click the board)");
+                return None;
+            }
+        }
+    };
+    if parts.is_empty() {
+        ui.weak(if loaded.all_glyphs {"(no glyphs)"} else {"(nothing here now)"});
+        return None;
     }
-    text
+    let row_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    let ctx = ui.ctx().clone();
+    let dragged = egui::DragAndDrop::payload::<DraggedGlyph>(&ctx).map(|d| d.0);
+    //Scrolls to the selection when it, or the list shown, changes
+    let shown_id = egui::Id::new("part_list_shown");
+    let shown = (loaded.selection, loaded.all_glyphs);
+    let scroll_to_selection = ctx.data(|d| d.get_temp(shown_id)) != Some(shown);
+    ctx.data_mut(|d| d.insert_temp(shown_id, shown));
+    let highlighted = loaded.highlighted_part();
+    let can_reorder = loaded.edit_lock().is_none();
+    egui::ScrollArea::vertical().id_salt("part_list").max_height(PART_LIST_ROWS * row_height).show(ui, |ui| {
+        let mut action = None;
+        for &part in &parts {
+            //A dragged glyph's drop target is lit up under its label
+            let backdrop = ui.painter().add(egui::Shape::Noop);
+            let mut row = ui.selectable_label(highlighted == Some(part), part_label(base, part));
+            if scroll_to_selection && loaded.selection == Some(part) {
+                row.scroll_to_me(None);
+            }
+            if row.clicked() {
+                action = Some(ListAction::Select(part));
+            }
+            let PartId::Glyph(glyph) = part else {continue};
+            if can_reorder {
+                row = row.interact(egui::Sense::drag());
+                row.dnd_set_drag_payload(DraggedGlyph(glyph));
+            }
+            let Some(from) = dragged else {continue};
+            //The gaps between rows count as the nearer row's, so the target doesn't flicker off between them
+            let area = row.rect.expand2(egui::vec2(0., ui.spacing().item_spacing.y / 2.));
+            let Some(pointer) = ui.ctx().pointer_latest_pos().filter(|_| ui.rect_contains_pointer(area)) else {continue};
+            //Higher rows have higher numbers, so the top half puts it after this glyph
+            let after = pointer.y < row.rect.center().y;
+            let Some(to) = reorder_beside(from, glyph, after) else {continue};
+            let selection = ui.visuals().selection;
+            ui.painter().set(backdrop, egui::Shape::rect_filled(row.rect, 2., selection.bg_fill.gamma_multiply(0.4)));
+            let edge = if after {row.rect.top()} else {row.rect.bottom()};
+            ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
+            if ui.input(|i| i.pointer.any_released()) {
+                egui::DragAndDrop::clear_payload(&ctx);
+                action = Some(ListAction::Reorder(LayoutEdit::ReorderGlyph{from, to}));
+            }
+        }
+        if dragged.is_some() {
+            drag_edge_scroll(ui, ui.clip_rect());
+        }
+        action
+    }).inner
+}
+//While something is dragged, scrolls the scroll area `ui` is in when the pointer is near or past the top or bottom of
+//`rect` (its visible part), faster the further in it goes. egui doesn't scroll while dragging.
+pub(super) fn drag_edge_scroll(ui: &egui::Ui, rect: egui::Rect){
+    const MARGIN: f32 = 20.;
+    //Pixels a second at the edge. It's slower inside the margin, and faster past the edge, up to three times as fast.
+    const SPEED: f32 = 300.;
+    let Some(pointer) = ui.ctx().pointer_latest_pos().filter(|p| rect.x_range().contains(p.x)) else {return};
+    //Positive scrolls up
+    let depth = if pointer.y < rect.top() + MARGIN {
+        rect.top() + MARGIN - pointer.y
+    } else if pointer.y > rect.bottom() - MARGIN {
+        rect.bottom() - MARGIN - pointer.y
+    } else {
+        return
+    };
+    let speed = SPEED * (depth / MARGIN).clamp(-3., 3.);
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+    ui.scroll_with_delta_animation(egui::vec2(0., speed * dt), egui::style::ScrollAnimation::none());
+    ui.ctx().request_repaint();
+}
+//Over a window, the readout is where the mouse last was on the board
+fn readout_label(ui: &mut egui::Ui, loaded: &Loaded, text: String){
+    let text = egui::RichText::new(text).monospace();
+    ui.label(if loaded.pointer_over_ui {text.weak()} else {text});
+}
+//The hex under the mouse
+fn mouse_readout(loaded: &Loaded) -> String{
+    match loaded.hovered_hex{
+        Some(hex) => format!("Mouse: ({}, {})", hex.x, hex.y),
+        None => String::from("Mouse: –"),
+    }
+}
+//How far the hex under the mouse is from the selected part
+fn offset_readout(loaded: &Loaded) -> Option<String>{
+    let (hex, part) = loaded.hovered_hex.zip(loaded.selection)?;
+    let world = loaded.timeline.base();
+    let pos = match part{
+        PartId::Glyph(i) => world.glyphs[i].pos,
+        PartId::Arm(i) => world.arms[i].pos,
+    };
+    Some(offset_text(hex - pos, &part_label(world, part), hex_distance(pos, hex)))
+}
+//The part comes first, so it stays put as the numbers after it change length
+fn offset_text(offset: Pos, from: &str, distance: i32) -> String{
+    format!("From {from}: ({:+}, {:+}), {distance} away", offset.x, offset.y)
+}
+//Wide enough for the offset readout with the longest part names, so the Part window doesn't grow (and, against the
+//right edge of the screen, jump left) as the mouse moves or the selection changes
+fn readout_width(egui_ctx: &egui::Context) -> f32{
+    let longest = offset_text(Pos::new(-99, -99), "Polymer output 0 (glyph 99)", 999);
+    let style = egui_ctx.global_style();
+    let font = egui::TextStyle::Monospace.resolve(&style);
+    let text_width = egui_ctx.fonts_mut(|f| f.glyph_width(&font, '0')) * longest.chars().count() as f32;
+    //A window's width includes its frame
+    text_width + egui::Frame::window(&style).total_margin().sum().x
 }
 fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     let mut edit = None;
@@ -396,19 +520,25 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     if let Some(part_edit) = part_fields(ui, loaded.timeline.base(), part, locked) {
         edit = Some(LayoutEdit::Part(part_edit));
     }
-    if let PartId::Arm(i) = part{
-        let arm_count = loaded.timeline.base().arms.len();
-        let lock = loaded.part_lock(part, EditKind::Reorder);
-        ui.horizontal(|ui| {
-            ui.label("Arm #:");
-            let mut number = i+1;
-            let field = ui.add_enabled(lock.is_none(), typed_number(&mut number, 1..=arm_count));
-            locked_hover(field.on_hover_text("Arms run in this order"), lock);
-            if number != i+1{
-                edit = Some(LayoutEdit::MoveArm{from: i, to: number-1});
-            }
-        });
-    }
+    let base = loaded.timeline.base();
+    let (label, index, count, hover) = match part{
+        PartId::Arm(i) => ("Arm #:", i, base.arms.len(), "Arms run in this order"),
+        PartId::Glyph(i) => ("Glyph #:", i, base.glyphs.len(), GLYPH_ORDER_HELP),
+    };
+    let lock = loaded.part_lock(part, EditKind::Reorder);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let mut number = index+1;
+        let field = ui.add_enabled(lock.is_none(), typed_number(&mut number, 1..=count));
+        locked_hover(field.on_hover_text(hover), lock);
+        if number != index+1{
+            let (from, to) = (index, number-1);
+            edit = Some(match part{
+                PartId::Arm(_) => LayoutEdit::ReorderArm{from, to},
+                PartId::Glyph(_) => LayoutEdit::ReorderGlyph{from, to},
+            });
+        }
+    });
     let lock = loaded.part_lock(part, EditKind::Delete);
     let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
     if locked_hover(delete.on_hover_text("Delete or Backspace"), lock).clicked(){
@@ -676,13 +806,43 @@ mod tests {
         let _ = ctx.run_ui(RawInput{events, ..Default::default()}, |ui| part_window(ui.ctx(), loaded));
         loaded.flush_board_input();
     }
-    //The center of the first widget drawn last frame that matches
-    fn widget(ctx: &egui::Context, matches: impl Fn(&egui::WidgetInfo) -> bool) -> Pos2 {
+    //Where the first widget drawn last frame that matches is
+    fn widget_rect(ctx: &egui::Context, matches: impl Fn(&egui::WidgetInfo) -> bool) -> Option<egui::Rect> {
         ctx.viewport(|v| {
             let widgets = &v.prev_pass.widgets;
             widgets.layers().flat_map(|(_, rects)| rects)
-                .find(|w| widgets.info(w.id).is_some_and(&matches)).map(|w| w.rect.center())
-        }).expect("no such widget drawn")
+                .find(|w| widgets.info(w.id).is_some_and(&matches)).map(|w| w.rect)
+        })
+    }
+    //The center of the first widget drawn last frame that matches
+    fn widget(ctx: &egui::Context, matches: impl Fn(&egui::WidgetInfo) -> bool) -> Pos2 {
+        widget_rect(ctx, matches).expect("no such widget drawn").center()
+    }
+    //A row of the list of parts (or any widget with this label)
+    fn row(ctx: &egui::Context, label: &str) -> egui::Rect {
+        widget_rect(ctx, |w| w.label.as_deref() == Some(label)).unwrap_or_else(|| panic!("no row {label:?}"))
+    }
+    fn top_half(rect: egui::Rect) -> Pos2 {
+        rect.center() - egui::vec2(0., rect.height() / 4.)
+    }
+    fn bottom_half(rect: egui::Rect) -> Pos2 {
+        rect.center() + egui::vec2(0., rect.height() / 4.)
+    }
+    //A new window takes a few frames to settle into place
+    fn settle(ctx: &egui::Context, loaded: &mut Loaded) {
+        for _ in 0..3 {
+            frame(ctx, loaded, vec![]);
+        }
+    }
+    //Presses at `from`, moves to `to` over a few frames, and releases there
+    fn drag(ctx: &egui::Context, loaded: &mut Loaded, from: Pos2, to: Pos2) {
+        let button = |pos, pressed| Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed,
+            modifiers: egui::Modifiers::NONE};
+        frame(ctx, loaded, vec![Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            frame(ctx, loaded, vec![Event::PointerMoved(from + (to - from) * (i as f32 / 4.))]);
+        }
+        frame(ctx, loaded, vec![button(to, false)]);
     }
     //A press and release in one frame
     fn click(pos: Pos2) -> Vec<Event> {
@@ -692,10 +852,7 @@ mod tests {
     }
     //Clicks the first widget of this type and types `text` into it
     fn type_into(ctx: &egui::Context, loaded: &mut Loaded, typ: WidgetType, text: &str) {
-        //A new window takes a few frames to settle into place
-        for _ in 0..3 {
-            frame(ctx, loaded, vec![]);
-        }
+        settle(ctx, loaded);
         let at = widget(ctx, |w| w.typ == typ);
         frame(ctx, loaded, click(at));
         frame(ctx, loaded, vec![]);
@@ -716,6 +873,77 @@ mod tests {
     fn positions(loaded: &Loaded) -> Vec<Pos> {
         loaded.timeline.base().glyphs.iter().map(|g| g.pos).collect()
     }
+    fn glyph(x: i32, y: i32, glyph_type: GlyphType) -> Glyph {
+        Glyph{pos: Pos::new(x, y), rot: 0, glyph_type}
+    }
+    fn glyph_types(loaded: &Loaded) -> Vec<GlyphType> {
+        loaded.timeline.base().glyphs.iter().map(|g| g.glyph_type.clone()).collect()
+    }
+    //A solution with these glyphs, its Part window listing the parts at (0,0)
+    fn listing_origin(ctx: &egui::Context, glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Loaded {
+        let mut loaded = Loaded::for_test(glyphs, arms);
+        loaded.list_hex = Some(Pos::new(0, 0));
+        settle(ctx, &mut loaded);
+        loaded
+    }
+
+    #[test]
+    fn a_glyph_dropped_on_a_rows_top_half_goes_above_it() {
+        use GlyphType::*;
+        let ctx = context();
+        let mut loaded = listing_origin(&ctx, vec![glyph(0, 0, Bonding), glyph(0, 0, Calcification),
+            glyph(0, 0, Duplication)], vec![]);
+        let to = top_half(row(&ctx, "Duplication (glyph 3)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
+        assert_eq!(glyph_types(&loaded), vec![Calcification, Duplication, Bonding]);
+        assert_eq!(loaded.selection, Some(PartId::Glyph(2)));
+        frame(&ctx, &mut loaded, vec![]);
+        row(&ctx, "Bonder (glyph 3)");
+    }
+
+    #[test]
+    fn the_two_drop_points_between_rows_go_either_side_of_glyphs_elsewhere() {
+        use GlyphType::*;
+        //Glyphs 2 and 3 aren't on the hex, so they aren't listed between glyphs 4 and 1
+        let glyphs = vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification), glyph(9, 9, Disposal),
+            glyph(0, 0, Projection), glyph(0, 0, Duplication)];
+        let dropped = |target: &str, half: fn(egui::Rect) -> Pos2| {
+            let ctx = context();
+            let mut loaded = listing_origin(&ctx, glyphs.clone(), vec![]);
+            let to = half(row(&ctx, target));
+            drag(&ctx, &mut loaded, row(&ctx, "Duplication (glyph 5)").center(), to);
+            glyph_types(&loaded)
+        };
+        assert_eq!(dropped("Projection (glyph 4)", bottom_half),
+            vec![Bonding, Calcification, Disposal, Duplication, Projection]);
+        assert_eq!(dropped("Bonder (glyph 1)", top_half),
+            vec![Bonding, Duplication, Calcification, Disposal, Projection]);
+    }
+
+    #[test]
+    fn a_glyph_dropped_on_an_arm_stays_put() {
+        use GlyphType::*;
+        let ctx = context();
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = listing_origin(&ctx, vec![glyph(0, 0, Bonding), glyph(0, 0, Calcification)], vec![arm]);
+        let to = top_half(row(&ctx, "Arm 1 (Arm)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
+        assert_eq!(glyph_types(&loaded), vec![Bonding, Calcification]);
+        assert!(!loaded.history.can_undo());
+    }
+
+    #[test]
+    fn all_glyphs_lists_and_reorders_glyphs_elsewhere() {
+        use GlyphType::*;
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification)], vec![]);
+        loaded.list_hex = Some(Pos::new(0, 0));
+        loaded.all_glyphs = true;
+        settle(&ctx, &mut loaded);
+        let to = top_half(row(&ctx, "Calcification (glyph 2)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
+        assert_eq!(glyph_types(&loaded), vec![Calcification, Bonding]);
+    }
 
     #[test]
     fn a_typed_number_goes_to_its_part_when_the_board_selects_another() {
@@ -733,7 +961,7 @@ mod tests {
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(4, 0)], vec![]);
         loaded.select(Some(PartId::Glyph(0)));
-        loaded.stack_view = Some(vec![PartId::Glyph(0), PartId::Glyph(1)]);
+        loaded.all_glyphs = true;
         type_into(&ctx, &mut loaded, WidgetType::DragValue, "2");
         let other = widget(&ctx, |w| w.label.as_deref() == Some("Bonder (glyph 2)"));
         frame(&ctx, &mut loaded, click(other));

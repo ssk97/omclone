@@ -70,7 +70,9 @@ pub(super) enum LayoutEdit{
     //A copy of the edited part (an arm's copy has the same tape), with the edit applied to the copy
     Duplicate(PartEdit),
     Delete(PartId),
-    MoveArm{from: usize, to: usize},
+    //Renumbers a part, shifting the ones between; nothing changes position on the board
+    ReorderArm{from: usize, to: usize},
+    ReorderGlyph{from: usize, to: usize},
     //Gives a track this path (absolute hexes), or adds a new track if `glyph` is None
     SetTrack{glyph: Option<usize>, path: Vec<Pos>},
 }
@@ -115,10 +117,15 @@ impl LayoutEdit{
                 }
                 None
             }
-            LayoutEdit::MoveArm{from, to} => {
+            LayoutEdit::ReorderArm{from, to} => {
                 let arm = layout.arms.remove(*from);
                 layout.arms.insert(*to, arm);
                 Some(PartId::Arm(*to))
+            }
+            LayoutEdit::ReorderGlyph{from, to} => {
+                let glyph = layout.glyphs.remove(*from);
+                layout.glyphs.insert(*to, glyph);
+                Some(PartId::Glyph(*to))
             }
             LayoutEdit::SetTrack{glyph, path} => {
                 //The track's position is its first hex
@@ -143,6 +150,20 @@ impl LayoutEdit{
     pub(super) fn is_structural(&self) -> bool{
         !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..})
     }
+    pub(super) fn is_reorder(&self) -> bool{
+        matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..})
+    }
+}
+//The number (as an index) that puts the part numbered `dragged` directly after `anchor` (or before it, if not
+//`after`), with the parts between shifting over. None if it's already there.
+pub(super) fn reorder_beside(dragged: usize, anchor: usize, after: bool) -> Option<usize>{
+    if dragged == anchor{
+        return None;
+    }
+    //Taking out a part before the anchor shifts the anchor down one
+    let anchor_after_removal = if dragged < anchor {anchor - 1} else {anchor};
+    let to = if after {anchor_after_removal + 1} else {anchor_after_removal};
+    (to != dragged).then_some(to)
 }
 //A track's hexes, in global positions
 pub(super) fn track_path(world: &World, glyph: usize) -> Vec<Pos>{
@@ -356,15 +377,59 @@ mod tests {
     }
 
     #[test]
-    fn moved_arms_take_their_tapes() {
+    fn reordered_arms_take_their_tapes() {
         let arms = (0..3).map(|i| Arm::new(Pos::new(i*2, 0), 0, 1, ArmType::PlainArm,
             Tape::new(i as usize, vec![Instr::Grab]))).collect();
         let w = world(vec![], arms);
-        let edit = LayoutEdit::MoveArm{from: 0, to: 2};
+        let edit = LayoutEdit::ReorderArm{from: 0, to: 2};
         assert_eq!(edit.apply(&w).1, Some(PartId::Arm(2)));
         let moved = round_trip(&applied(&w, edit));
         let order: Vec<(i32, usize)> = moved.arms.iter().map(|a| (a.pos.x, a.instruction_tape.first)).collect();
         assert_eq!(order, vec![(2, 1), (4, 2), (0, 0)]);
+    }
+
+    #[test]
+    fn reordered_glyphs_are_saved_in_their_new_order() {
+        let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Calcification),
+            glyph(0, 0, 0, GlyphType::Disposal)], vec![]);
+        let edit = LayoutEdit::ReorderGlyph{from: 2, to: 0};
+        assert_eq!(edit.apply(&w).1, Some(PartId::Glyph(0)));
+        let reordered = round_trip(&applied(&w, edit));
+        let types: Vec<GlyphType> = reordered.glyphs.iter().map(|g| g.glyph_type.clone()).collect();
+        assert_eq!(types, vec![GlyphType::Disposal, GlyphType::Bonding, GlyphType::Calcification]);
+    }
+
+    #[test]
+    fn reordering_overlapping_tracks_changes_which_one_wins() {
+        //They cross at (1,0): the first goes right from there, the second up
+        let across = glyph(0, 0, 0, GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]));
+        let up = glyph(1, -1, 0, GlyphType::Track(vec![Pos::new(0, 0), Pos::new(0, 1), Pos::new(0, 2)]));
+        let w = world(vec![across, up], vec![]);
+        let crossing = Pos::new(1, 0);
+        assert_eq!(w.track_maps.plus.get(&crossing), Some(&Pos::new(1, 0)));
+        let reordered = applied(&w, LayoutEdit::ReorderGlyph{from: 1, to: 0});
+        assert_eq!(reordered.track_maps.plus.get(&crossing), Some(&Pos::new(0, 1)));
+    }
+
+    #[test]
+    fn reorder_beside_puts_the_part_next_to_the_anchor() {
+        //Parts 0..6; each case is where part `dragged` ends up, and the order that gives
+        let order = |dragged: usize, anchor: usize, after: bool| {
+            let to = reorder_beside(dragged, anchor, after)?;
+            let mut parts: Vec<usize> = (0..6).collect();
+            let part = parts.remove(dragged);
+            parts.insert(to, part);
+            Some(parts)
+        };
+        assert_eq!(order(1, 4, true), Some(vec![0, 2, 3, 4, 1, 5]));
+        assert_eq!(order(1, 4, false), Some(vec![0, 2, 3, 1, 4, 5]));
+        assert_eq!(order(4, 1, true), Some(vec![0, 1, 4, 2, 3, 5]));
+        assert_eq!(order(4, 1, false), Some(vec![0, 4, 1, 2, 3, 5]));
+        assert_eq!(order(5, 0, false), Some(vec![5, 0, 1, 2, 3, 4]));
+        assert_eq!(order(0, 5, true), Some(vec![1, 2, 3, 4, 5, 0]));
+        assert_eq!(order(2, 2, true), None, "beside itself");
+        assert_eq!(order(2, 3, false), None, "already just before it");
+        assert_eq!(order(2, 1, true), None, "already just after it");
     }
 
     #[test]

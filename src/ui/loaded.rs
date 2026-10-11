@@ -45,8 +45,10 @@ pub(super) struct Loaded{
 
     //Part editing
     pub(super) selection: Option<PartId>,
-    //The parts at the hex last pressed, top first
-    pub(super) stack_view: Option<Vec<PartId>>,
+    //The hex last pressed, whose parts the Part window lists as they are now
+    pub(super) list_hex: Option<Pos>,
+    //The Part window lists every glyph instead
+    pub(super) all_glyphs: bool,
     pub(super) allow_overlap: bool,
     pub(super) tool: BoardTool,
     pub(super) allow_gaps: bool,
@@ -85,7 +87,8 @@ impl Loaded{
             popup_reload: false,
 
             selection: None,
-            stack_view: None,
+            list_hex: None,
+            all_glyphs: false,
             allow_overlap,
             tool: BoardTool::Select(None),
             allow_gaps: false,
@@ -169,7 +172,6 @@ impl Loaded{
     //back to the caret
     fn restore_base(&mut self, world: World){
         self.replace_base(world);
-        self.stack_view = None;
         self.select(None);
         self.tape_sel.collapse();
     }

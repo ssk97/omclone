@@ -23,6 +23,8 @@ pub(super) struct TapeSelection{
     pub(super) caret: usize,
     //The cell a drag started on
     drag_from: Option<(usize, usize)>,
+    //The arm whose number a drag started on, which dragging reorders
+    reorder_from: Option<usize>,
     //The caret's arm and timestep when it was last scrolled into view
     shown: (usize, usize),
 }
@@ -217,9 +219,12 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
                     (sel.anchor_arm, sel.arm, sel.anchor_step) = (0, arm_count-1, Some(0));
                     move_caret(loaded, end);
                 }
-                //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it
-                Key::Z if modifiers.command => if modifiers.shift {loaded.redo()} else {loaded.undo()},
-                Key::Y if modifiers.command => loaded.redo(),
+                //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it. It can
+                //renumber the arms, so it ends a reorder that would otherwise take the wrong arm.
+                Key::Z | Key::Y if modifiers.command => {
+                    sel.reorder_from = None;
+                    if key == Key::Y || modifiers.shift {loaded.redo()} else {loaded.undo()}
+                }
                 Key::Backspace => edit(loaded, TapeOp::EraseBack, true),
                 Key::Delete => edit(loaded, TapeOp::EraseForward, true),
                 Key::Insert => loaded.tape_mode = !loaded.tape_mode,
@@ -275,6 +280,21 @@ impl Layout{
     fn cell_rect(&self, arm: usize, step: usize) -> Rect{
         Rect::from_min_size(pos2(self.x(step), self.y(arm)), self.cell)
     }
+    //The visible part of the arms' rows, between the rulers (including the arm numbers)
+    fn rows_view(&self) -> Rect{
+        Rect::from_x_y_ranges(self.view.x_range(), self.view.min.y + self.ruler..=self.view.max.y - self.ruler_below)
+    }
+    //Where dropping the arm numbered `from` (as an index) at `pos` would put it: the arm it goes beside, whether after
+    //it, and its new index. Only a drop on the rows counts.
+    fn reorder_target(&self, pos: Pos2, from: usize, arms: usize, steps: usize) -> Option<(usize, bool, usize)>{
+        if !self.rows_view().contains(pos){
+            return None;
+        }
+        let (anchor, _) = self.cell_at(pos, arms, steps);
+        //Lower rows have higher numbers, so the bottom half puts it after this arm
+        let after = pos.y >= self.cell_rect(anchor, 0).center().y;
+        Some((anchor, after, reorder_beside(from, anchor, after)?))
+    }
     //The cell at `pos`, clamped to the grid
     fn cell_at(&self, pos: Pos2, arms: usize, steps: usize) -> (usize, usize){
         let index = |offset: f32, size: f32, count: usize| ((offset / size).max(0.) as usize).min(count-1);
@@ -300,6 +320,7 @@ impl Layout{
     }
 }
 fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
+    let can_reorder = loaded.edit_lock().is_none();
     let sel = &mut loaded.tape_sel;
     let step = match hit{
         Hit::Cell(arm, step) => {
@@ -320,7 +341,11 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
                 sel.collapse();
                 sel.drag_from = Some((arm, step));
             }
-            Hit::Gutter(_) => sel.collapse(),
+            Hit::Gutter(arm) => {
+                sel.collapse();
+                //Clicking only selects its row; dragging reorders it
+                sel.reorder_from = can_reorder.then_some(arm);
+            }
         }
     }
     let Some(step) = step else {return};
@@ -419,8 +444,27 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             let (arm, step) = layout.cell_at(pos, arm_count, step_count);
             drag(loaded, arm, step);
         }
+        //Where an arm number being dragged would go. A press that egui doesn't take as a drag only selected its row.
+        let reordering = loaded.tape_sel.reorder_from.is_some() && (response.dragged() || response.drag_stopped());
+        let reorder = loaded.tape_sel.reorder_from.filter(|_| reordering).zip(pointer)
+            .and_then(|(from, pos)| layout.reorder_target(pos, from, arm_count, step_count));
+        let over_numbers = matches!(response.hover_pos().and_then(|p| layout.hit(p, arm_count, step_count)),
+            Some(Hit::Gutter(_)));
+        if reordering || (over_numbers && loaded.edit_lock().is_none()){
+            //miniquad has no grab hand, and this shows which way they go
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        if reordering{
+            windows::drag_edge_scroll(ui, layout.rows_view());
+        }
+        let drop_beside = reorder.filter(|_| down).map(|(anchor, after, _)| (anchor, after));
         if !down{
             loaded.tape_sel.drag_from = None;
+            if let (Some(from), Some((_, _, to))) = (loaded.tape_sel.reorder_from.take(), reorder){
+                if let Err(err) = loaded.apply_edit(&LayoutEdit::ReorderArm{from, to}){
+                    loaded.message = Some(err);
+                }
+            }
         }
         if response.has_focus(){
             //Like a text box, it keeps the arrow keys and gives up focus on a press elsewhere
@@ -445,12 +489,13 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             let y = if arm_moved {Rangef::new(layout.y(sel.arm) - ruler, layout.y(sel.arm + 1) + ruler_below)} else {view.y_range()};
             ui.scroll_to_rect(Rect::from_x_y_ranges(x, y), None);
         }
-        paint(ui, loaded, &layout, step_count, &font, &small, response.has_focus());
+        paint(ui, loaded, &layout, step_count, &font, &small, response.has_focus(), drop_beside);
     });
     size.y
 }
+//`drop_beside` is the arm a dragged arm number would go beside, and whether after it
 fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, font: &egui::FontId, small: &egui::FontId,
-    focused: bool)
+    focused: bool, drop_beside: Option<(usize, bool)>)
 {
     let painter = ui.painter();
     let visuals = ui.visuals();
@@ -474,6 +519,12 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
         if !tape.halts() && !tape.instructions.is_empty(){
             painter.rect_filled(row(tape.first, tape.first + base.repeat_length), 0., Color32::from_rgba_unmultiplied(128, 128, 128, 45));
         }
+    }
+    //The arm row a dragged arm number would go beside is lit up, here and in the arm numbers
+    let drop_row = drop_beside.map(|(anchor, _)| Rect::from_x_y_ranges(view.x_range(), layout.y(anchor)..=layout.y(anchor + 1)));
+    let drop_fill = visuals.selection.bg_fill.gamma_multiply(0.4);
+    if let Some(row) = drop_row{
+        painter.rect_filled(row, 0., drop_fill);
     }
     painter.rect_filled(column(sel.caret, view.min.y), 0., visuals.selection.bg_fill.gamma_multiply(0.35));
     if let RunState::Crashed(step) = loaded.run_state{
@@ -532,6 +583,9 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
     paint_ruler(Rect::from_min_max(pos2(view.min.x, view.max.y - layout.ruler_below), view.max), false);
     let gutter = Rect::from_min_size(view.min, vec2(layout.gutter, view.height()));
     painter.rect_filled(gutter, 0., fill);
+    if let Some(row) = drop_row{
+        painter.rect_filled(row.intersect(gutter), 0., drop_fill);
+    }
     let selected_arms = sel.arms();
     for arm in arms{
         let color = if selected_arms.contains(&arm) {text_color} else {visuals.weak_text_color()};
@@ -541,6 +595,13 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
     painter.vline(gutter.max.x, gutter.y_range(), border);
     painter.rect_filled(Rect::from_min_size(view.min, vec2(layout.gutter, layout.ruler)), 0., fill);
     painter.rect_filled(Rect::from_min_max(pos2(view.min.x, view.max.y - layout.ruler_below), pos2(gutter.max.x, view.max.y)), 0., fill);
+    //Where the dragged arm number would go: the edge of the lit-up row, unless that's under a ruler
+    if let Some((anchor, after)) = drop_beside{
+        let edge = layout.y(if after {anchor + 1} else {anchor});
+        if layout.rows_view().y_range().contains(edge){
+            painter.hline(view.x_range(), edge, Stroke::new(2., visuals.selection.stroke.color));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -750,6 +811,59 @@ mod editing_tests {
         let below = cell + vec2(0., 1000.);
         grid_frame(&ctx, &mut loaded, vec![Event::PointerMoved(below), button(below, true)]);
         assert!(!has_focus(&ctx));
+    }
+
+    //Arms whose tapes start at their original index, to tell them apart
+    fn numbered_arms(count: i32) -> Vec<Arm> {
+        (0..count).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm, Tape::new(i as usize, vec![Instr::Grab]))).collect()
+    }
+    fn arm_order(loaded: &Loaded) -> Vec<usize> {
+        loaded.timeline.base().arms.iter().map(|a| a.instruction_tape.first).collect()
+    }
+    //An arm's number, in the gutter
+    fn number(layout: &Layout, arm: usize) -> Pos2 {
+        pos2(layout.origin.x + layout.gutter / 2., layout.cell_rect(arm, 0).center().y)
+    }
+    //Presses at `from` and moves to `to` over a few frames, with `before_release` sent there before releasing
+    fn drag_grid(ctx: &egui::Context, loaded: &mut Loaded, from: Pos2, to: Pos2, before_release: Vec<Event>) {
+        grid_frame(ctx, loaded, vec![Event::PointerMoved(from), button(from, true)]);
+        for i in 1..=4 {
+            grid_frame(ctx, loaded, vec![Event::PointerMoved(from + (to - from) * (i as f32 / 4.))]);
+        }
+        grid_frame(ctx, loaded, before_release);
+        grid_frame(ctx, loaded, vec![button(to, false)]);
+    }
+
+    #[test]
+    fn dragging_an_arms_number_reorders_it() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], numbered_arms(4));
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        //The bottom half of arm 3's row puts it after arm 3
+        let to = number(&layout, 2) + vec2(0., layout.cell.y / 4.);
+        drag_grid(&ctx, &mut loaded, number(&layout, 0), to, vec![]);
+        assert_eq!(arm_order(&loaded), vec![1, 2, 0, 3]);
+        assert_eq!(loaded.tape_sel.arms(), 2..3, "the caret is on its new row");
+    }
+
+    #[test]
+    fn arm_number_drags_that_dont_reorder() {
+        let to = |layout: &Layout| number(layout, 2) + vec2(0., layout.cell.y / 4.);
+        let escape = key(Key::Escape, Modifiers::NONE);
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], numbered_arms(4));
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        drag_grid(&ctx, &mut loaded, number(&layout, 0), to(&layout), vec![escape]);
+        assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3], "Esc drops it");
+
+        loaded.run_state = RunState::FreeRun;
+        drag_grid(&ctx, &mut loaded, number(&layout, 0), to(&layout), vec![]);
+        assert_eq!((arm_order(&loaded), &loaded.message), (vec![0, 1, 2, 3], &None), "not while running");
+        loaded.run_state = RunState::Manual(0);
+
+        grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
+        assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3]);
+        assert_eq!(loaded.tape_sel.arms(), 1..2, "a click only selects the row");
     }
 
     #[test]
