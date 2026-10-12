@@ -218,8 +218,8 @@ impl World {
                     let atom_type = atom_setup[i];
                     let molecule_key = world.atoms.create_molecule([Atom {
                         pos, atom_type, connections: [Bonds::NO_BOND; 6], immutable_wheel: true,
-                        molecule: MoleculeKey::null(),
-                    }])?;
+                        molecule: MoleculeKey::null(), disjoint_safe: false,
+                    }]);
                     a.atoms_grabbed[i] = world.atoms.molecules[molecule_key].atoms[0];
                 }
             }
@@ -230,7 +230,7 @@ impl World {
             GlyphType::Input(variants, _) if variants.len() > 1 => Some((id, variants.clone())),
             _ => None,
         }).collect();
-        world.process_inputs(&mut WorldStepInfo::new())?;
+        world.process_inputs();
         let mut unfinished_conduit_count = 0;
         for (id, glyph) in world.glyphs.iter_mut().enumerate() {
             if let GlyphType::Conduit(_pos,conduit_id) = &glyph.glyph_type {

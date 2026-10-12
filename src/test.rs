@@ -210,7 +210,7 @@ mod molecule_tests {
         world
     }
     fn key_at(world: &World, x: i32, y: i32) -> Option<AtomKey> {
-        world.atoms.locs.get(&Pos::new(x, y)).copied()
+        world.atoms.visible(Pos::new(x, y))
     }
     fn molecule_at(world: &World, x: i32, y: i32) -> MoleculeKey {
         world.atoms.atom_map[key_at(world, x, y).expect("expected an atom")].molecule
@@ -311,6 +311,322 @@ mod molecule_tests {
         glyphs.push(input(vec![atom(0, 0, Salt), atom(4, 0, Salt)]));
         let kept = run(glyphs, vec![arm(vec![Grab, Drop])], 2);
         assert!(key_at(&kept, 10, 0).is_none(), "a molecule partly off the conduit must not be sent");
+    }
+}
+
+//Overlapping atoms: stacks, molecule order, products and conduits (the requirements in OVERLAP.md, mostly from
+//game experiments, whose numbers the comments give)
+mod overlap_tests {
+    use crate::sim::*;
+    use smallvec::smallvec;
+    use AtomType::*;
+    use Instr::*;
+
+    fn atom(x: i32, y: i32, atom_type: AtomType) -> Atom {
+        Atom::new(Pos::new(x, y), atom_type)
+    }
+    fn bonded(mut atoms: Vec<Atom>, bonds: &[(usize, usize)]) -> Vec<Atom> {
+        for &(a, b) in bonds {
+            let rot = pos_to_rot(atoms[b].pos - atoms[a].pos).expect("test bond must be adjacent");
+            atoms[a].connections[rot as usize] = Bonds::NORMAL;
+            atoms[b].connections[normalize_dir(rot + 3) as usize] = Bonds::NORMAL;
+        }
+        atoms
+    }
+    fn pair(atom_type: AtomType) -> Vec<Atom> {
+        bonded(vec![atom(0, 0, atom_type), atom(1, 0, atom_type)], &[(0, 1)])
+    }
+    fn glyph(x: i32, y: i32, rot: Rot, glyph_type: GlyphType) -> Glyph {
+        Glyph { pos: Pos::new(x, y), rot, glyph_type }
+    }
+    fn input(x: i32, y: i32, rot: Rot, atoms: Vec<Atom>) -> Glyph {
+        glyph(x, y, rot, GlyphType::Input(smallvec![atoms], 0))
+    }
+    fn lone(x: i32, y: i32, atom_type: AtomType) -> Glyph {
+        input(x, y, 0, vec![atom(0, 0, atom_type)])
+    }
+    fn output(x: i32, y: i32, rot: Rot, atoms: Vec<Atom>) -> Glyph {
+        glyph(x, y, rot, GlyphType::Output(smallvec![atoms], 6, 0))
+    }
+    fn conduit(x: i32, y: i32, hexes: &[(i32, i32)]) -> Glyph {
+        glyph(x, y, 0, GlyphType::Conduit(hexes.iter().map(|&(a, b)| Pos::new(a, b)).collect(), 100))
+    }
+    fn arm(x: i32, y: i32, rot: Rot, instructions: Vec<Instr>) -> Arm {
+        Arm::new(Pos::new(x, y), rot, 1, ArmType::PlainArm, Tape::new(0, instructions))
+    }
+    fn world(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> World {
+        World::setup_sim(&InitialWorld { glyphs, arms }).unwrap()
+    }
+    //Runs whole steps, checking collisions if `collide`
+    fn run(world: &mut World, steps: usize, collide: bool) -> SimResult<()> {
+        let mut motion = WorldStepInfo::new();
+        for _ in 0..steps {
+            world.run_step(collide, &mut motion)?;
+        }
+        Ok(())
+    }
+    fn error(result: SimResult<()>) -> &'static str {
+        result.expect_err("expected an error").error_str
+    }
+    //The atoms on a hex, from the visible one up
+    fn stack(world: &World, x: i32, y: i32) -> Vec<AtomType> {
+        let mut atoms: Vec<&Atom> = world.atoms.atom_map.values().filter(|a| a.pos == Pos::new(x, y)).collect();
+        atoms.sort_by_key(|a| world.atoms.molecules[a.molecule].z);
+        atoms.iter().map(|a| a.atom_type).collect()
+    }
+    fn visible_atom(world: &World, x: i32, y: i32) -> &Atom {
+        &world.atoms.atom_map[world.atoms.visible(Pos::new(x, y)).expect("expected an atom")]
+    }
+    fn output_count(world: &World) -> i32 {
+        world.glyphs.iter().find_map(|g| match g.glyph_type {
+            GlyphType::Output(_, count, _) => Some(count),
+            _ => None,
+        }).expect("no output")
+    }
+
+    #[test]
+    fn overlapping_inputs_both_spawn() {
+        let mut w = world(vec![lone(0, 0, Salt), lone(0, 0, Air)], vec![]);
+        assert_eq!(stack(&w, 0, 0), [Salt, Air], "the input earlier in the file is visible");
+        assert_eq!(error(run(&mut w, 1, false)), "Overlapping atoms before motion!");
+    }
+
+    #[test]
+    fn output_reveals_the_next_atom() {
+        let mut w = world(vec![lone(0, 0, Salt), lone(0, 0, Air), output(0, 0, 0, vec![atom(0, 0, Salt)])], vec![]);
+        run(&mut w, 1, false).unwrap();
+        //The Air left behind blocks the Salt input from refilling the hex
+        assert_eq!(stack(&w, 0, 0), [Air]);
+        assert_eq!(output_count(&w), 5);
+    }
+
+    //A Salt with an Air pair's input over it, whose other Air is visible at (1,0), and an output for the pair (exp11b)
+    fn under_pair(arms: Vec<Arm>) -> World {
+        world(vec![lone(0, 0, Salt), input(1, 0, 3, pair(Air)), output(1, 0, 3, pair(Air))], arms)
+    }
+
+    #[test]
+    fn output_takes_a_molecule_with_a_hidden_atom() {
+        let mut w = under_pair(vec![]);
+        assert_eq!(stack(&w, 0, 0), [Salt, Air]);
+        run(&mut w, 1, false).unwrap();
+        assert_eq!(output_count(&w), 5);
+        assert_eq!(stack(&w, 0, 0), [Salt]);
+    }
+
+    #[test]
+    fn grabbing_from_a_stack_is_an_error() {
+        //The output could take the pair otherwise (exp11)
+        let mut w = under_pair(vec![arm(-1, 0, 0, vec![Grab, RotateCounterClockwise])]);
+        assert_eq!(error(run(&mut w, 1, false)), "Overlapping atoms before motion!");
+    }
+
+    #[test]
+    fn inputs_refill_under_deliveries() {
+        //Two arms drop an atom on each end of a conduit pair at once
+        let mut w = world(vec![lone(0, 0, Salt), lone(5, 0, Air), conduit(0, 0, &[(0, 0)]), conduit(5, 0, &[(0, 0)])],
+            vec![arm(-1, 0, 0, vec![Grab, Drop]), arm(6, 0, 3, vec![Grab, Drop])]);
+        run(&mut w, 2, false).unwrap();
+        //Each input refills its hex before the atom from the other end arrives on top
+        assert_eq!(stack(&w, 0, 0), [Salt, Air]);
+        assert_eq!(stack(&w, 5, 0), [Air, Salt]);
+    }
+
+    #[test]
+    fn two_products_on_one_hex_collide() {
+        //Two Purifications output to (0,1) (exp3)
+        let mut w = world(vec![glyph(0, 0, 0, GlyphType::Purification), glyph(0, 2, 3, GlyphType::Purification),
+            lone(0, 0, Lead), lone(1, 0, Lead), lone(0, 2, Lead), lone(-1, 2, Lead)], vec![]);
+        assert_eq!(error(run(&mut w, 1, true)), "atom/spawning atom collision!");
+    }
+
+    #[test]
+    fn product_onto_a_wheel_atom_collides() {
+        //The Van Berlo's Fire is on the Purification's output (exp9)
+        let wheel = Arm::new(Pos::new(0, 2), 0, 1, ArmType::VanBerlo, Tape::new(0, vec![]));
+        let mut w = world(vec![glyph(0, 0, 0, GlyphType::Purification), lone(0, 0, Lead), lone(1, 0, Lead)], vec![wheel]);
+        assert_eq!(error(run(&mut w, 1, true)), "atom/spawning atom collision!");
+    }
+
+    #[test]
+    fn merge_moves_above_a_newer_atom_at_once() {
+        //The bond lifts the Air's molecule above the newer Water, so the calcifier after it sees the Water (exp5)
+        let mut w = world(vec![lone(0, 0, Air), input(1, 0, 0, pair(Fire)), lone(0, 0, Water),
+            glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Calcification)], vec![]);
+        assert_eq!(error(run(&mut w, 1, false)), "Overlapping atoms before motion!");
+        assert_eq!(stack(&w, 0, 0), [Salt, Air]);
+    }
+
+    #[test]
+    fn bond_within_a_molecule_doesnt_move_it() {
+        //Closing an open Fire triangle leaves it below the Salt, so the disposal can't clear the stack (exp7)
+        let triangle = bonded(vec![atom(0, 0, Fire), atom(1, 0, Fire), atom(0, 1, Fire)], &[(0, 1), (1, 2)]);
+        let mut w = world(vec![input(0, 0, 0, triangle), lone(0, 0, Salt),
+            glyph(0, 0, 1, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Disposal)], vec![]);
+        assert_eq!(error(run(&mut w, 1, false)), "Overlapping atoms before motion!");
+        assert_eq!(stack(&w, 0, 0), [Fire, Salt]);
+        assert_ne!(visible_atom(&w, 0, 0).connections[1], Bonds::NO_BOND, "the ring should be closed");
+    }
+
+    #[test]
+    fn unbonded_molecule_moves_up_after_all_glyphs() {
+        //The disposal still sees the just-unbonded Fire (and can't take it); only then does it move above the Salt (exp6)
+        let mut w = world(vec![input(0, 0, 0, pair(Fire)), lone(0, 0, Salt),
+            glyph(0, 0, 0, GlyphType::Unbonding), glyph(0, 0, 0, GlyphType::Disposal)], vec![]);
+        assert_eq!(error(run(&mut w, 1, false)), "Overlapping atoms before motion!");
+        assert_eq!(stack(&w, 0, 0), [Salt, Fire]);
+    }
+
+    #[test]
+    fn disposal_leaves_an_atom_unbonded_this_half() {
+        let mut w = world(vec![input(0, 0, 0, pair(Fire)), glyph(0, 0, 0, GlyphType::Unbonding),
+            glyph(0, 0, 0, GlyphType::Disposal)], vec![]);
+        w.prepare_step(&mut WorldStepInfo::new(), false).unwrap();
+        assert_eq!(stack(&w, 0, 0), [Fire]);
+    }
+
+    #[test]
+    fn stacked_unbonded_molecules_need_a_safe_upper_atom() {
+        //Two Salt chains cross at (0,0), and an unbonder cuts each. The game accepts it only when the upper Salt there
+        //has no bond pointing right in its input's frame (omsim's debonding-z-order tests 1 and 3).
+        let chain = || bonded(vec![atom(0, 0, Salt), atom(1, 0, Salt), atom(2, 0, Salt)], &[(0, 1), (1, 2)]);
+        let crossing = |diagonal: Glyph| {
+            let mut w = world(vec![input(-2, 0, 0, chain()), diagonal,
+                glyph(-1, 0, 0, GlyphType::Unbonding), glyph(-2, 2, 5, GlyphType::Unbonding)], vec![]);
+            error(run(&mut w, 1, false))
+        };
+        //Here the upper Salt is the end of its chain, bonded leftward; the stack just stays
+        assert_eq!(crossing(input(-2, 2, 5, chain())), "Overlapping atoms before motion!");
+        //Here it's the start, bonded rightward
+        assert_eq!(crossing(input(0, 0, 2, chain())), "Disjoint bonds aren't supported!");
+    }
+
+    #[test]
+    fn first_overlapping_conduit_in_the_file_claims() {
+        //Conduits 101 and 100 both cover (0,0), with partners at (0,5) and (5,0) (exp4, exp4b)
+        let deliveries = |first: i32, second: i32| {
+            let pair_end = |x, y, id| glyph(x, y, 0, GlyphType::Conduit(vec![Pos::new(0, 0)], id));
+            let mut w = world(vec![pair_end(0, 0, first), pair_end(0, 0, second), pair_end(5, 0, 100), pair_end(0, 5, 101),
+                lone(0, 0, Salt)], vec![arm(-1, 0, 0, vec![Grab, Drop])]);
+            run(&mut w, 2, false).unwrap();
+            (stack(&w, 5, 0), stack(&w, 0, 5))
+        };
+        assert_eq!(deliveries(101, 100), (vec![], vec![Salt]));
+        assert_eq!(deliveries(100, 101), (vec![Salt], vec![]));
+    }
+
+    #[test]
+    fn dropped_atom_taken_before_its_conduit_isnt_sent() {
+        let mut w = world(vec![lone(0, 0, Salt), glyph(0, 0, 0, GlyphType::Disposal), conduit(0, 0, &[(0, 0)]),
+            conduit(5, 0, &[(0, 0)])], vec![arm(-1, 0, 0, vec![Grab, Drop])]);
+        run(&mut w, 2, false).unwrap();
+        assert!(stack(&w, 5, 0).is_empty());
+    }
+
+    //An arm carries a Salt from (0,0) to a conduit at (-1,1) and drops it there in the third step, next to an Air at
+    //(-2,2). `glyphs` go after the inputs; the conduit's partner is at (6,0).
+    fn carried_to_conduit(salt: Glyph, glyphs: Vec<Glyph>) -> World {
+        let mut all = vec![salt, lone(-2, 2, Air)];
+        all.extend(glyphs);
+        all.push(conduit(6, 0, &[(0, 0)]));
+        let mut w = world(all, vec![arm(-1, 0, 0, vec![Grab, RotateCounterClockwise, Drop])]);
+        run(&mut w, 3, false).unwrap();
+        w
+    }
+
+    #[test]
+    fn bond_made_after_the_claim_makes_a_clone() {
+        //The unbonder after the conduit keeps them apart until the drop
+        let w = carried_to_conduit(lone(0, 0, Salt), vec![glyph(-1, 1, 2, GlyphType::Bonding),
+            conduit(-1, 1, &[(0, 0)]), glyph(-1, 1, 2, GlyphType::Unbonding)]);
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Salt], vec![Salt]));
+    }
+
+    #[test]
+    fn bond_removed_before_the_conduit_still_makes_a_clone() {
+        //exp10
+        let w = carried_to_conduit(lone(0, 0, Salt), vec![glyph(-1, 1, 2, GlyphType::Bonding),
+            glyph(-1, 1, 2, GlyphType::Unbonding), conduit(-1, 1, &[(0, 0)])]);
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Salt], vec![Salt]));
+    }
+
+    //An atom with a bond in direction `dir` that leads nowhere, as a puzzle input can have
+    fn dangling(atom_type: AtomType, dir: usize) -> Atom {
+        let mut a = atom(0, 0, atom_type);
+        a.connections[dir] = Bonds::NORMAL;
+        a
+    }
+
+    #[test]
+    fn dangling_bond_doesnt_make_a_clone() {
+        //Carried to the conduit, the Salt's bond points at (-1,2)
+        let neighbors = [
+            ("an empty hex (exp14)", vec![]),
+            ("an atom (exp15a)", vec![lone(-1, 2, Air)]),
+            ("an atom's dangling bond pointing back (exp21c)", vec![input(-1, 2, 0, vec![dangling(Salt, 4)])]),
+        ];
+        for (neighbor, mut glyphs) in neighbors {
+            glyphs.push(conduit(-1, 1, &[(0, 0)]));
+            let w = carried_to_conduit(input(0, 0, 0, vec![dangling(Salt, 0)]), glyphs);
+            assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![], vec![Salt]), "a bond toward {neighbor}");
+        }
+    }
+
+    #[test]
+    fn bond_completed_after_the_claim_makes_a_clone() {
+        //The second arm brings the Iron to the Rejection in the second step, so its quicksilver lands where the Salt's
+        //dangling bond points after the bonder's turn. In the third step, the bonder completes the bond after the
+        //claim (exp21b).
+        let mut w = world(vec![input(0, 0, 0, vec![dangling(Salt, 0)]), lone(-2, 1, Iron),
+            glyph(-1, 1, 1, GlyphType::Bonding), glyph(-2, 2, 0, GlyphType::Rejection),
+            conduit(-1, 1, &[(0, 0)]), conduit(6, 0, &[(0, 0)])],
+            vec![arm(-1, 0, 0, vec![Grab, RotateCounterClockwise, Drop]), arm(-3, 2, 5, vec![Grab, RotateCounterClockwise, Noop])]);
+        run(&mut w, 3, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Salt], vec![Salt]));
+    }
+
+    #[test]
+    fn bond_removed_between_two_claims_makes_both_clone() {
+        //A Salt and an Air dropped on one conduit are two claims. The bonder joins them and the unbonder parts them
+        //before the conduit's turn (and also keeps them apart until the drop). Both are cloned, so neither leaves.
+        let mut w = world(vec![lone(0, 0, Salt), lone(1, 0, Air), glyph(0, 0, 0, GlyphType::Bonding),
+            glyph(0, 0, 0, GlyphType::Unbonding), conduit(0, 0, &[(0, 0), (1, 0)]), conduit(0, 5, &[(0, 0), (1, 0)])],
+            vec![arm(-1, 0, 0, vec![Grab, Drop]), arm(2, 0, 3, vec![Grab, Drop])]);
+        let mut motion = WorldStepInfo::new();
+        w.run_step(false, &mut motion).unwrap();
+        //Only the first half of the drop step, since the inputs would refill an emptied hex in the second
+        w.prepare_step(&mut motion, false).unwrap();
+        assert_eq!((stack(&w, 0, 0), stack(&w, 1, 0)), (vec![Salt], vec![Air]));
+    }
+
+    #[test]
+    fn unbonded_pieces_are_all_sent_and_arrive_unbonded() {
+        //The bonder after the conduit keeps re-bonding the pair, so it's claimed whole; the unbonder before the conduit
+        //separates it, and a disposal waits at the receiving end (exp12)
+        let mut w = world(vec![input(0, 0, 0, pair(Fire)), glyph(0, 0, 0, GlyphType::Unbonding),
+            conduit(0, 0, &[(0, 0), (1, 0)]), glyph(0, 0, 0, GlyphType::Bonding), conduit(0, 5, &[(0, 0), (1, 0)]),
+            glyph(0, 5, 0, GlyphType::Disposal)], vec![arm(-1, 0, 0, vec![Grab, Drop])]);
+        run(&mut w, 2, false).unwrap();
+        //Just unbonded, the Fire on the disposal is safe for the rest of the half it arrives in
+        assert_eq!((stack(&w, 0, 5), stack(&w, 1, 5)), (vec![Fire], vec![Fire]));
+        assert_eq!(visible_atom(&w, 0, 5).connections, [Bonds::NO_BOND; 6]);
+        run(&mut w, 1, false).unwrap();
+        assert_eq!((stack(&w, 0, 5), stack(&w, 1, 5)), (vec![], vec![Fire]));
+    }
+
+    #[test]
+    fn delivery_appears_at_the_receivers_turn() {
+        //A disposal on the receiving hex, between the conduits in file order (exp13a, exp13b)
+        let delivered = |receiver_first: bool| {
+            let (sender, receiver) = (conduit(0, 0, &[(0, 0)]), conduit(0, 5, &[(0, 0)]));
+            let (a, b) = if receiver_first {(receiver, sender)} else {(sender, receiver)};
+            let mut w = world(vec![lone(0, 0, Salt), a, glyph(0, 5, 0, GlyphType::Disposal), b],
+                vec![arm(-1, 0, 0, vec![Grab, Drop])]);
+            run(&mut w, 2, false).unwrap();
+            stack(&w, 0, 5)
+        };
+        assert_eq!(delivered(false), [Salt], "a disposal before the receiver doesn't see the delivery");
+        assert!(delivered(true).is_empty(), "one after the receiver takes it in the same half");
     }
 }
 
@@ -524,7 +840,7 @@ mod regression_tests {
         world
     }
     fn type_at(world: &World, x: i32, y: i32) -> Option<AtomType> {
-        world.atoms.locs.get(&Pos::new(x, y)).map(|&key| world.atoms.atom_map[key].atom_type)
+        world.atoms.visible(Pos::new(x, y)).map(|key| world.atoms.atom_map[key].atom_type)
     }
     fn empty_puzzle() -> FullPuzzle {
         FullPuzzle {

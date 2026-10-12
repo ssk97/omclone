@@ -192,7 +192,7 @@ impl Polymer {
     }
     //Validates as many additional monomers as the molecule at the center allows
     pub(super) fn update(&mut self, atoms: &WorldAtoms) {
-        let Some(&key) = atoms.locs.get(&self.center) else {return};
+        let Some(key) = atoms.visible(self.center) else {return};
         let molecule_key = atoms.atom_map[key].molecule;
         let mut monomer_count = self.validated + 1;
         while self.check(atoms, molecule_key, monomer_count) {

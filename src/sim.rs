@@ -113,16 +113,31 @@ pub struct GrabMovement {
     pub atom: AtomKey,
     pub movement: Movement,
 }
+//A molecule filed in the first half of the timestep, created in the second half at the turn of `glyph`
+#[derive(Debug, Clone)]
+pub struct Product {
+    //The conversion glyph that made it, or the conduit that receives it
+    pub glyph: usize,
+    pub atoms: SpawnMolecule,
+    //A molecule a conduit sent after it was unbonded this half arrives whole, and stays "just unbonded" until it
+    //splits at the end of the half it arrives in
+    pub unbonded: bool,
+}
 pub struct WorldStepInfo{
     pub atoms: SecondaryMap<AtomKey, Movement>,
     pub grabs: Vec<GrabMovement>,
     pub grab_atoms: Vec<SmallVec<[AtomKey; 8]>>, //atoms moved by each grab (parallel to grabs)
     pub arms: Vec<ArmMovement>,
     pub grip_toggled: Vec<bool>, //whether each arm grabbed or dropped this step (parallel to arms)
-    pub spawning_atoms: VecDeque<SpawnMolecule>, //One entry per molecule
+    //In order of glyph once the first half's glyphs are done (they're sorted then)
+    pub products: VecDeque<Product>,
+    //The atoms unbonded this half
     pub recent_bonds: FxHashSet<AtomKey>,
     pub drop_conduit_check: FxHashSet<AtomKey>, //contains one entry per arm
-    pub active_glyphs: VecDeque<usize>, //One entry per glyph activation; conduits add one per molecule sent
+    //The conduit glyph and a copy of the molecule (as dropped) for each claim, in glyph order
+    pub conduit_claims: VecDeque<(usize, SpawnMolecule)>,
+    //The atoms conduit clones left behind this half, whose molecules split at the end of the glyph pass
+    pub clone_leftovers: Vec<AtomKey>,
 }
 impl WorldStepInfo{
     pub fn new() -> Self{
@@ -132,10 +147,11 @@ impl WorldStepInfo{
             grab_atoms: Vec::new(),
             arms: Vec::new(),
             grip_toggled: Vec::new(),
-            spawning_atoms:VecDeque::new(),
+            products: VecDeque::new(),
             recent_bonds:FxHashSet::default(),
             drop_conduit_check:FxHashSet::default(),
-            active_glyphs:VecDeque::new(),
+            conduit_claims: VecDeque::new(),
+            clone_leftovers: Vec::new(),
         }
     }
     pub fn clear(&mut self) {
@@ -144,10 +160,11 @@ impl WorldStepInfo{
         self.grab_atoms.clear();
         self.arms.clear();
         self.grip_toggled.clear();
-        self.spawning_atoms.clear();
+        self.products.clear();
         self.recent_bonds.clear();
         self.drop_conduit_check.clear();
-        self.active_glyphs.clear();
+        self.conduit_claims.clear();
+        self.clone_leftovers.clear();
     }
 }
 
@@ -188,11 +205,8 @@ impl World {
         }
         //remove all grabbed atoms from the grid
         for (atom_key, _action) in motion.atoms.iter() {
-            let atom = &mut self.atoms.atom_map[atom_key];
-            let loc_check = self.atoms.locs.remove(&atom.pos);
-            if loc_check != Some(atom_key) {
-                panic!("Inconsistent atoms (move loc)!");
-            }
+            let pos = self.atoms.atom_map[atom_key].pos;
+            self.atoms.remove_from_hex(atom_key, pos);
         }
         //add them back in at their new locations
         for (atom_key, action) in motion.atoms.iter() {
@@ -205,13 +219,15 @@ impl World {
                 }
                 Movement::HeldStill => (),
             }
+            let pos = atom.pos;
             if mark_area {
-                self.area_touched.insert(atom.pos);
+                self.area_touched.insert(pos);
             }
-            let current = self.atoms.locs.insert(atom.pos, atom_key);
-            if current != None {
+            let occupied = self.atoms.is_occupied(pos);
+            self.atoms.add_to_hex(atom_key, pos);
+            if occupied {
                 let error_str = &"Multiple atoms in same hex!";
-                return Err(sim_error_pos(error_str,atom.pos));
+                return Err(sim_error_pos(error_str,pos));
             }
         }
         Ok(())
@@ -322,10 +338,15 @@ impl World {
         if mark_area {
             self.mark_arm_area();
         }
-        self.process_inputs(motion)?;
+        self.claim_conduits(motion);
+        self.process_inputs();
         self.process_glyphs(motion, true)?;
         self.process_outputs(motion);
-        
+        //Atoms can only share a hex until motion
+        if let Some(pos) = self.atoms.any_stack() {
+            return Err(sim_error_pos("Overlapping atoms before motion!", pos));
+        }
+
         for i in 0..self.arms.len() {
             let position = self.arms[i].pos;
             for j in i+1..self.arms.len() {
@@ -348,7 +369,7 @@ impl World {
         if mark_area {
             self.mark_arm_area();
         }
-        self.process_inputs(motion)?;
+        self.process_inputs();
         self.process_glyphs(motion, false)?;
         motion.clear();
         for arm in &self.arms {

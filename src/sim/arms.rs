@@ -113,14 +113,14 @@ impl World {
                     arm.grabbing = true;
                     for r in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
                         let grab_pos = arm.pos + (rot_to_pos(arm.rot + r) * arm.len);
-                        let null_key = AtomKey::null();
-                        let mut current = self.atoms.locs.get(&grab_pos).unwrap_or(&null_key);
-                        if current != &null_key{
-                            if self.atoms.atom_map[*current].immutable_wheel{
-                                current = &null_key;
-                            }
+                        //The arm would take the visible atom, but in the game nothing can then take the atoms
+                        //above it, so the stack can't clear before motion
+                        if self.atoms.is_stacked(grab_pos) {
+                            return Err(sim_error_pos("Overlapping atoms before motion!", grab_pos));
                         }
-                        arm.atoms_grabbed[r as usize] = *current;
+                        let current = self.atoms.visible(grab_pos)
+                            .filter(|&key| !self.atoms.atom_map[key].immutable_wheel);
+                        arm.atoms_grabbed[r as usize] = current.unwrap_or(AtomKey::null());
                     }
                 }
                 STILL

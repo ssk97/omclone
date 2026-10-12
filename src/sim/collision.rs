@@ -102,7 +102,8 @@ impl<'a> ColliderList<'a> {
         //Mark area and check against the board (atoms that aren't moving)
         for hex in hexes_near(collider.center, collider.radius + ATOM_RADIUS) {
             self.area.insert(hex);
-            if let Some(&key) = self.board.locs.get(&hex) {
+            //Hexes aren't stacked during motion, so the visible atom is the only one
+            if let Some(key) = self.board.visible(hex) {
                 let moving = matches!(self.motion.atoms.get(key), Some(m) if *m != Movement::HeldStill);
                 if !moving {
                     let error_str = collision_message(collider.kind, ColliderKind::Atom);
@@ -171,7 +172,8 @@ impl World {
             motion,
             area: &mut self.area_touched,
         };
-        //Fixed colliders: stationary arm bases (which can collide with each other), then atoms being produced
+        //Fixed colliders: stationary arm bases, then atoms being produced. Each can collide with the others of its
+        //kind (two products can land on one hex).
         let mut moving_arms = Vec::new();
         for (arm, arm_motion) in self.arms.iter().zip(&motion.arms) {
             if let ArmMovement::Move(Movement::Linear(translation)) = arm_motion {
@@ -181,10 +183,10 @@ impl World {
             list.add(Collider { center: to_xy(arm.pos), radius: ARM_BASE_RADIUS, kind: ColliderKind::ArmBase })?;
             list.commit();
         }
-        for atom in motion.spawning_atoms.iter().flatten() {
+        for atom in motion.products.iter().flat_map(|p| &p.atoms) {
             list.add(Collider { center: to_xy(atom.pos), radius: PRODUCED_ATOM_RADIUS, kind: ColliderKind::ProducedAtom })?;
+            list.commit();
         }
-        list.commit();
         //Arm bases moving along tracks
         for (final_pos, translation) in moving_arms {
             let mut xy = to_xy(final_pos);
