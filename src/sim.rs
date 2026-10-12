@@ -380,6 +380,8 @@ impl World {
         }
         self.process_outputs(motion);
         motion.clear();
+        //Nothing is on its way through a conduit between steps
+        self.atoms.drop_lone_links();
         self.timestep += 1;
         Ok(())
     }

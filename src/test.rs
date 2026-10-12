@@ -291,7 +291,7 @@ mod molecule_tests {
         let projected = run(vec![input(vec![atom(0, 0, Quicksilver), atom(3, 0, Salt)]),
                 glyph(1, 0, GlyphType::Input(smallvec![vec![atom(0, 0, Lead)]], 1)),
                 glyph(0, 0, GlyphType::Projection)], vec![], 1);
-        assert_eq!(projected.atoms.atom_map[key_at(&projected, 1, 0).unwrap()].atom_type, Lead,
+        assert_eq!(projected.atoms.type_of(&projected.atoms.atom_map[key_at(&projected, 1, 0).unwrap()]), Lead,
             "projection must not consume quicksilver that is part of a molecule");
     }
 
@@ -372,7 +372,7 @@ mod overlap_tests {
     fn stack(world: &World, x: i32, y: i32) -> Vec<AtomType> {
         let mut atoms: Vec<&Atom> = world.atoms.atom_map.values().filter(|a| a.pos == Pos::new(x, y)).collect();
         atoms.sort_by_key(|a| world.atoms.molecules[a.molecule].z);
-        atoms.iter().map(|a| a.atom_type).collect()
+        atoms.iter().map(|a| world.atoms.type_of(a)).collect()
     }
     fn visible_atom(world: &World, x: i32, y: i32) -> &Atom {
         &world.atoms.atom_map[world.atoms.visible(Pos::new(x, y)).expect("expected an atom")]
@@ -628,6 +628,80 @@ mod overlap_tests {
         assert_eq!(delivered(false), [Salt], "a disposal before the receiver doesn't see the delivery");
         assert!(delivered(true).is_empty(), "one after the receiver takes it in the same half");
     }
+
+    //The conduit pair of the clone tests below
+    fn sender() -> Glyph {
+        conduit(-1, 1, &[(0, 0)])
+    }
+    fn receiver() -> Glyph {
+        conduit(6, 0, &[(0, 0)])
+    }
+    //Exp10's clone, as the fourth round of experiments (exp22) uses it. A `carried` atom is dropped on the sender at
+    //(-1,1) in the third step, and bonded to the Salt at (-2,2) and unbonded again before the sender's turn, so a copy
+    //goes to (6,0). `glyphs` go after the bonders and include both conduits. `arms` go after the carrying arm.
+    fn cloned(carried: AtomType, glyphs: Vec<Glyph>, mut arms: Vec<Arm>) -> World {
+        let mut all = vec![lone(0, 0, carried), lone(-2, 2, Salt),
+            glyph(-1, 1, 2, GlyphType::Bonding), glyph(-1, 1, 2, GlyphType::Unbonding)];
+        all.extend(glyphs);
+        arms.insert(0, arm(-1, 0, 0, vec![Grab, RotateCounterClockwise, Drop]));
+        world(all, arms)
+    }
+
+    #[test]
+    fn changing_a_clone_changes_its_original() {
+        //The calcifier turns the Fire's copy into Salt as it arrives, and the Fire left behind with it (exp22a)
+        let mut w = cloned(Fire, vec![sender(), receiver(), glyph(6, 0, 0, GlyphType::Calcification)], vec![]);
+        run(&mut w, 3, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Salt], vec![Salt]));
+    }
+
+    //A clone of a Lead with a projection on the sender. A second arm holds a Quicksilver on the projection until both
+    //arms drop in the third step, so the projection turns the Lead into Tin once, after the claim.
+    fn projected_clone(glyphs: Vec<Glyph>) -> World {
+        let mut all = vec![lone(0, 2, Quicksilver)];
+        all.extend(glyphs);
+        cloned(Lead, all, vec![arm(-1, 3, 5, vec![Grab, RotateClockwise, Drop])])
+    }
+
+    #[test]
+    fn clone_has_its_originals_type_at_the_conduits_turn() {
+        //The projection comes before the sender (exp22b)
+        let mut w = projected_clone(vec![glyph(-1, 2, 4, GlyphType::Projection), sender(), receiver()]);
+        run(&mut w, 3, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Tin], vec![Tin]));
+    }
+
+    #[test]
+    fn type_change_reaches_a_clone_on_its_way() {
+        //The projection comes after the sender, while the copy is on its way (exp22c)
+        let mut w = projected_clone(vec![sender(), glyph(-1, 2, 4, GlyphType::Projection), receiver()]);
+        run(&mut w, 3, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Tin], vec![Tin]));
+    }
+
+    #[test]
+    fn consuming_a_clone_leaves_its_original() {
+        //The disposal before the receiver takes the copy in the step after it arrives (exp22d)
+        let mut w = cloned(Fire, vec![sender(), glyph(6, 0, 0, GlyphType::Disposal), receiver()], vec![]);
+        run(&mut w, 3, false).unwrap();
+        assert_eq!(stack(&w, 6, 0), [Fire]);
+        run(&mut w, 1, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Fire], vec![]));
+    }
+
+    #[test]
+    fn world_copies_keep_their_own_linked_types() {
+        //With the calcifier before the receiver, the copy arrives as a Fire and is calcified in the next step
+        let mut w = cloned(Fire, vec![sender(), glyph(6, 0, 0, GlyphType::Calcification), receiver()], vec![]);
+        run(&mut w, 3, false).unwrap();
+        let mut copy = w.clone();
+        run(&mut w, 1, false).unwrap();
+        assert_eq!((stack(&w, -1, 1), stack(&w, 6, 0)), (vec![Salt], vec![Salt]));
+        assert_eq!((stack(&copy, -1, 1), stack(&copy, 6, 0)), (vec![Fire], vec![Fire]),
+            "running a world mustn't change a copy of it");
+        run(&mut copy, 1, false).unwrap();
+        assert_eq!((stack(&copy, -1, 1), stack(&copy, 6, 0)), (vec![Salt], vec![Salt]));
+    }
 }
 
 //Repeating ("infinite") output expansion and matching
@@ -668,7 +742,7 @@ mod polymer_tests {
         let world = polymer_world(vec![Glyph { pos: Pos::new(0, 0), rot: 0,
             glyph_type: GlyphType::OutputRepeating(smallvec![monomer], 6, 0) }]);
         let shown = displayed(&world);
-        let markers: Vec<Pos> = shown.iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
+        let markers: Vec<Pos> = shown.iter().filter(|a| a.pattern_type() == RepeatingOutputMarker).map(|a| a.pos).collect();
         assert_eq!(shown.len(), 12 + markers.len());
         assert_eq!(markers, vec![Pos::new(6, 0), Pos::new(6, 1)], "placeholders go where the 6th repeat's bonds lead");
         let middle = at(&shown, 3, 0);
@@ -688,10 +762,10 @@ mod polymer_tests {
         let shown = displayed(&world);
         let step = rotate(Pos::new(1, 1), 2);
         for i in 0..6 {
-            assert_eq!(at(&shown, (origin + step * i).x, (origin + step * i).y).atom_type, Salt);
+            assert_eq!(at(&shown, (origin + step * i).x, (origin + step * i).y).pattern_type(), Salt);
         }
         let marker = origin + step * 6;
-        assert_eq!(at(&shown, marker.x, marker.y).atom_type, RepeatingOutputMarker);
+        assert_eq!(at(&shown, marker.x, marker.y).pattern_type(), RepeatingOutputMarker);
         assert_eq!(shown.len(), 7);
     }
 
@@ -840,7 +914,7 @@ mod regression_tests {
         world
     }
     fn type_at(world: &World, x: i32, y: i32) -> Option<AtomType> {
-        world.atoms.visible(Pos::new(x, y)).map(|key| world.atoms.atom_map[key].atom_type)
+        world.atoms.visible(Pos::new(x, y)).map(|key| world.atoms.type_of(&world.atoms.atom_map[key]))
     }
     fn empty_puzzle() -> FullPuzzle {
         FullPuzzle {
@@ -915,7 +989,7 @@ mod regression_tests {
         let world = run(vec![glyph(0, 0, 0, GlyphType::OutputRepeating(
             smallvec![vec![a, Atom::new(Pos::new(1, 0), RepeatingOutputMarker)]], 6, 0))], vec![], 0);
         let shown = &world.polymers[&0].display;
-        let markers: Vec<Pos> = shown.iter().filter(|a| a.atom_type == RepeatingOutputMarker).map(|a| a.pos).collect();
+        let markers: Vec<Pos> = shown.iter().filter(|a| a.pattern_type() == RepeatingOutputMarker).map(|a| a.pos).collect();
         assert_eq!(markers, vec![Pos::new(6, 0)]);
     }
 
@@ -1381,7 +1455,7 @@ mod timeline_tests {
     //What two worlds should agree on
     fn summary(world: &World) -> (u64, Vec<(i32, i32, String)>, Vec<(Pos, Rot, i32, bool)>, usize, Vec<i32>) {
         let mut atoms: Vec<_> = world.atoms.atom_map.values()
-            .map(|a| (a.pos.x, a.pos.y, format!("{:?}", a.atom_type))).collect();
+            .map(|a| (a.pos.x, a.pos.y, format!("{:?}", world.atoms.type_of(a)))).collect();
         atoms.sort();
         let arms = world.arms.iter().map(|a| (a.pos, a.rot, a.len, a.grabbing)).collect();
         let outputs = world.glyphs.iter().filter_map(|g| match g.glyph_type {

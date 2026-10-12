@@ -2,11 +2,11 @@
 
 This document records how we worked out what omclone's sim has to do when parts overlap. It covers the evidence,
 the design decisions, and the game experiments that settled the open questions. It ends with the behavior spec
-as requirements **R1–R13**. The sim implements them, and the `overlap_tests` module in `src/test.rs` checks them,
+as requirements **R1–R14**. The sim implements them, and the `overlap_tests` module in `src/test.rs` checks them,
 mostly with the layouts of the game experiments.
 
 omsim (`C:\Users\Steven\Documents\programming\temp\zachlike\omsim`) was the main reference. It's an independent
-reimplementation and isn't authoritative: the game experiments below showed it's wrong in seven places.
+reimplementation and isn't authoritative: the game experiments below showed it's wrong in eight places.
 
 ## Summary
 
@@ -30,8 +30,9 @@ reimplementation and isn't authoritative: the game experiments below showed it's
     points at an atom
   - how long atoms a conduit delivers stay "just unbonded"
   - whether a multi-bonder looks up all its atoms before making any of its bonds
+  - whether a conduit clone's copy shares its original's type: in the game, a change to either changes both (R14)
 
-  We follow the game in all seven.
+  We follow the game in all eight.
 
 ## How we got here
 
@@ -322,6 +323,33 @@ omsim is wrong about exp15a, exp15b, exp19, exp21b and exp21c.
 exp21a also showed that the game doesn't rotate a one-atom input. omclone does, which only matters for a one-atom
 input with a dangling bond.
 
+#### Fourth round
+
+In the game, a conduit clone links each copied atom's type to the atom it was copied from: a type change to either
+changes both. Neither sim did this. The working model is that the copy shares the original's atom objects, while
+bonds belong to the molecule, which is how a clone can carry the bonds as claimed (R13b). Four more solutions tested
+what that model predicts. They use one more puzzle:
+- **`c100000000000006`, "OMCLONE OVERLAP EXPERIMENTS 6".** Inputs: P0 Fire, P1 Salt, P2 Lead and P3 Quicksilver.
+  Output: Gold.
+
+All four clone as exp10 does:
+- The carried atom's input is at (0,0), and a Salt at (−2,2).
+- A bonder, then an unbonder, at (−1,1)–(−2,2); conduit 100 at (−1,1) and (6,0).
+- Arm (−1,0): grab, rotate, drop. The atom is dropped on (−1,1) in cycle 3, and a copy goes to (6,0).
+
+Tapes are padded as in the second round. In exp22b and exp22c, a second arm at (−1,3) carries a Quicksilver from
+(0,2) onto the Projection's other hex and holds it there until both arms drop in cycle 3. Glyphs can't consume a
+held atom, so the Projection fires once, after the claim.
+
+| Exp | Layout | omsim | Game | Conclusion |
+|---|---|---|---|---|
+| 22a | carry the Fire; Calcification at (6,0) after the receiving conduit | the copy arrives as Fire and is calcified; the Fire at (−1,1) stays | both turn Salt in cycle 3 | a change to the copy changes the atom it was copied from |
+| 22b | carry the Lead; Projection at (−1,2) rot 4, onto the Lead at (−1,1), before the sending conduit | the copy arrives as Lead | both are Tin in cycle 3 | the copy has its original's type at the conduit's turn, not the type claimed |
+| 22c | as 22b, with the Projection after the sending conduit | the copy arrives as Lead | both are Tin in cycle 3 | a change made while the copy is on its way reaches it |
+| 22d | carry the Fire; Disposal at (6,0) before the receiving conduit | the copy is never disposed: omsim keeps it "just unbonded" | the copy is disposed in cycle 4; the Fire at (−1,1) stays | consuming one atom leaves the other |
+
+omsim has no linking, and its clone sends the atoms as claimed. omclone now keeps linked types in groups (R14).
+
 ## Requirements
 
 Each requirement lists its evidence. "Sweep" means game-verified solutions that only pass with it.
@@ -428,6 +456,15 @@ Each requirement lists its evidence. "Sweep" means game-verified solutions that 
       until it splits at the end of the half it arrives in.
     - Evidence: omsim; sweep: 2 solutions; Game: exp12.
     - omsim never clears that state on a delivered atom, which is wrong.
+- **R14. Linked types.**
+  - When a conduit clones (R13b), each copied atom's type is linked to the atom it was copied from. From then on, a
+    type change to either one changes both, wherever they are. The changes are Calcification, Projection, Rejection
+    and Duplication. (Game: exp22a)
+  - The copy has its original's type at the conduit's turn, not the type claimed, and gets any change made while
+    it's on its way. (Game: exp22b and exp22c)
+  - Consuming one leaves the other. (Game: exp22d)
+  - Cloning a linked atom again links the new copy to the same group. (The model; untested.)
+  - omsim doesn't link, and sends the types claimed.
 
 **Unchanged on purpose:**
 - Reset on overlapping track (omclone follows the game).
@@ -449,6 +486,9 @@ Each requirement lists its evidence. "Sweep" means game-verified solutions that 
   a collision (R2).
 - Whether a clone's copy, taken at the claim, keeps a "just unbonded" state from the previous half. omsim's copy
   does; omclone's doesn't.
+- Whether anything besides the type is linked between a clone's copy and its original, such as that "just
+  unbonded" state.
+- Whether cloning a linked atom again links all three (R14). It follows from the model, but no experiment tried it.
 
 ## Files and tools
 
@@ -460,13 +500,15 @@ All of these are in `test/experiments/`, which is gitignored:
   `c100000000000003.puzzle` with `exp14`.
 - `c100000000000004.puzzle` with `exp15a`, `exp15b`, `exp16`, `exp17a`, `exp17b`, `exp17c`, `exp18`, `exp19`,
   `exp20`, `exp21a` and `exp21c`; `c100000000000005.puzzle` with `exp21b`.
+- `c100000000000006.puzzle` with `exp22a`, `exp22b`, `exp22c` and `exp22d`.
 - `tools/exp_gen/`: a scratch crate that writes the puzzles and solutions using omclone's writer, then runs each
   in omclone. After every cycle it prints the atoms with their bond directions, what each arm holds, and each
   output's remaining count.
   - It depends on omclone by absolute path.
-  - Run it with `cargo run --release`, with `CARGO_TARGET_DIR` pointing outside the repo.
+  - Run it with `cargo run --release`, with `CARGO_TARGET_DIR` pointing outside the repo. It runs 6 cycles of each,
+    or as many as the `CYCLES` environment variable says.
 - `tools/omsim-instrumentation.patch`: the logging added to omsim's `sim.c`. It also logs each atom a disposal
-  removes. To use it:
+  removes, and the type of each atom a conduit delivers. To use it:
   1. Copy omsim's sources to a scratch folder.
   2. Apply the patch with `patch -p0 --binary`, from the folder that holds `omsim_instr/`.
   3. Build: `gcc -O2 -std=c11 -Wno-missing-braces -D_DEFAULT_SOURCE -o omsim_instr.exe collision.c decode.c
@@ -480,3 +522,4 @@ All of these are in `test/experiments/`, which is gitignored:
   `tools/failing_lines.txt`, `tools/omsim_results.txt` and `tools/instr_results.txt`.
 - `tools/omsim_round3.txt`: the instrumented omsim's output for the third round, which gives that table's omsim
   column. No conduit event means nothing was sent.
+- `tools/omsim_round4.txt`: the same for the fourth round, including the type of each delivered atom.

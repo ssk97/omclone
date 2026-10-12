@@ -45,10 +45,10 @@ impl Polymer {
     //- Like omsim, a placeholder goes where a bond from the 6th repetition reaches the 7th repetition.
     pub fn build(origin: Pos, raw: &[Atom], outputs_per_repetition: i32) -> Result<Polymer> {
         use AtomType::RepeatingOutputMarker;
-        let mut markers = raw.iter().filter(|a| a.atom_type == RepeatingOutputMarker);
+        let mut markers = raw.iter().filter(|a| a.pattern_type() == RepeatingOutputMarker);
         let marker = markers.next().ok_or_else(|| eyre!("Repeating atom marker expected but not found!"))?;
         ensure!(markers.next().is_none(), "Multiple repeating atom markers!");
-        let monomer: Vec<Atom> = raw.iter().filter(|a| a.atom_type != RepeatingOutputMarker).cloned().collect();
+        let monomer: Vec<Atom> = raw.iter().filter(|a| a.pattern_type() != RepeatingOutputMarker).cloned().collect();
         ensure!(!monomer.is_empty(), "Empty infinite product!");
         let offset = marker.pos - origin;
         let divisor = gcd(offset.x, offset.y).abs();
@@ -68,7 +68,9 @@ impl Polymer {
         let mut expanded = Vec::with_capacity(n * POLYMER_REPETITIONS as usize);
         for i in 0..POLYMER_REPETITIONS {
             for a in &polymer.monomer {
-                expanded.push(Atom { pos: a.pos + offset * i, ..a.clone() });
+                let mut repeated = a.clone();
+                repeated.pos += offset * i;
+                expanded.push(repeated);
             }
         }
         //Fix up bonds between adjacent atoms in different monomers (one-directional, as in omsim)
@@ -177,7 +179,7 @@ impl Polymer {
                 monomer_index >= 0 && monomer_index < monomer_count
             });
             let Some(target) = target else {return false};
-            if atom.atom_type != target.atom_type {
+            if atoms.type_of(atom) != target.pattern_type() {
                 return false;
             }
             for dir in 0..6 {

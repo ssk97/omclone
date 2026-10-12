@@ -93,10 +93,11 @@ impl World {
             let glyph = &self.glyphs[id];
             let Input(meta_pattern, _) = &glyph.glyph_type else {unreachable!()};
             //The whole input is one molecule, even if it's disjoint
-            self.atoms.create_molecule(meta_pattern[0].iter().map(|a| Atom {
+            self.atoms.create_molecule(meta_pattern[0].iter().map(|a| {
+                let mut atom = glyph.place_atom(a);
                 //The pattern's bonds are in the input's own frame
-                disjoint_safe: !a.has_rightward_bonds(),
-                ..glyph.place_atom(a)
+                atom.disjoint_safe = !a.has_rightward_bonds();
+                atom
             }));
             if let Input(meta_pattern, _) = &mut self.glyphs[id].glyph_type {
                 let tmp = meta_pattern.remove(0);
@@ -114,8 +115,7 @@ impl World {
         let molecule_key = atoms.atom_map[atoms.visible(glyph.reposition(center.pos))?].molecule;
         let molecule = &atoms.molecules[molecule_key].atoms;
         let matches = molecule.len() == pattern.len() && molecule.iter().all(|&key| {
-            let atom = &atoms.atom_map[key];
-            !motion.atoms.contains_key(key) && pattern.iter().any(|a| atom.matches_pattern(a, glyph))
+            !motion.atoms.contains_key(key) && pattern.iter().any(|a| atoms.matches_pattern(key, a, glyph))
         });
         matches.then_some(molecule_key)
     }
@@ -151,9 +151,9 @@ impl World {
         fn add_bond(atoms: &mut WorldAtoms, loc1: &Pos, loc2: &Pos, bond_type: Bonds, unless: Bonds, need_fire: bool) {
             let rot = pos_to_rot(loc2 - loc1).unwrap() as usize;
             if let (Some(key1), Some(key2)) = (atoms.visible(*loc1), atoms.visible(*loc2)) {
+                if need_fire && [key1, key2].iter().any(|&key| atoms.type_of(&atoms.atom_map[key]) != AtomType::Fire) {return;}
                 let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
                 if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
-                if need_fire && (atom1.atom_type != AtomType::Fire || atom2.atom_type != AtomType::Fire) {return;}
                 if atom1.connections[rot].intersects(unless) || atom2.connections[(rot + 3) % 6].intersects(unless) {return;}
                 atom1.connections[rot] |= bond_type;
                 atom2.connections[(rot + 3) % 6] |= bond_type;
@@ -208,9 +208,9 @@ impl World {
             let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
             match &mut glyph.glyph_type{
                 Calcification => {
-                    if let Some(atom) = atoms.get_atom_mut(pos) {
-                        if atom.atom_type.is_element() && !atom.immutable_wheel{
-                            atom.atom_type = AtomType::Salt;
+                    if let Some(element) = atoms.get_nonwheel_type(pos) {
+                        if element.is_element() {
+                            atoms.set_type(pos, Salt);
                         }
                     }
                 }
@@ -234,7 +234,7 @@ impl World {
                     if let (Some(Quicksilver), Some(metal)) = (qs, metal){
                         if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x + 1)){
                             atoms.destroy_atom_at(pos);
-                            atoms.get_atom_mut(pos_bi).unwrap().atom_type = newtype;
+                            atoms.set_type(pos_bi, newtype);
                         }
                     }
                 }
@@ -243,7 +243,7 @@ impl World {
                     let open = atoms.can_produce_at(pos_bi);
                     if let (true, Some(metal)) = (open, metal){
                         if let Some(newtype) = metal.metal_id().and_then(|x:u8| AtomType::id_to_metal(x - 1)){
-                            atoms.get_atom_mut(pos).unwrap().atom_type = newtype;
+                            atoms.set_type(pos, newtype);
                             atoms.create_molecule([Atom::new(pos_bi, Quicksilver)]);
                         }
                     }
@@ -322,7 +322,7 @@ impl World {
                     let salt = atoms.get_nonwheel_type(pos_bi);
                     if let (Some(elem), Some(Salt)) = (source, salt){
                         if elem.is_element() {
-                            atoms.get_atom_mut(pos_bi).unwrap().atom_type = elem;
+                            atoms.set_type(pos_bi, elem);
                         }
                     }
                 }
@@ -419,7 +419,11 @@ impl World {
                 let claimable = molecule.iter().all(|&a|
                     !motion.atoms.contains_key(a) && hexes.contains(&self.atoms.atom_map[a].pos));
                 if claimable {
-                    let copy = molecule.iter().map(|&a| Atom { molecule: MoleculeKey::null(), ..self.atoms.atom_map[a].clone() }).collect();
+                    let copy = molecule.iter().map(|&a| {
+                        let mut atom = self.atoms.atom_map[a].clone();
+                        atom.molecule = MoleculeKey::null();
+                        atom
+                    }).collect();
                     for a in molecule {
                         motion.drop_conduit_check.remove(a);
                     }
@@ -430,7 +434,7 @@ impl World {
     }
     //At the conduit's first-half turn, sends what it claimed to the other conduit of its pair, where it appears at
     //that conduit's turn in the second half. The claimed hexes are the ones the copy's atoms are on.
-    fn send_claim(atoms: &mut WorldAtoms, motion: &mut WorldStepInfo, claim: SpawnMolecule, sender: usize, origin: Pos, conduit_info: &ConduitInfo) {
+    fn send_claim(atoms: &mut WorldAtoms, motion: &mut WorldStepInfo, mut claim: SpawnMolecule, sender: usize, origin: Pos, conduit_info: &ConduitInfo) {
         //Something took one of the atoms
         if claim.iter().any(|a| !atoms.is_occupied(a.pos)) {
             return;
@@ -445,7 +449,10 @@ impl World {
         if joined_outside {
             //The atoms left behind lose the bonds the copy has, which can split their molecule at the end of the glyph
             //pass. Splitting it now would hide the join from a later claim on it.
-            for (copied, &key) in claim.iter().zip(&on_claim) {
+            //Their types are linked to the copy's from now on, so the copy has the type they have now, not the one
+            //claimed, and gets any change made while it's on its way (game: exp22a–c).
+            for (copied, &key) in claim.iter_mut().zip(&on_claim) {
+                atoms.link_copy(key, copied);
                 let atom = &mut atoms.atom_map[key];
                 for dir in 0..6 {
                     atom.connections[dir].remove(copied.connections[dir]);

@@ -215,11 +215,9 @@ impl World {
                 };
                 for i in 0..6 {
                     let pos = a.pos + rot_to_pos((i as Rot) + a.rot);
-                    let atom_type = atom_setup[i];
-                    let molecule_key = world.atoms.create_molecule([Atom {
-                        pos, atom_type, connections: [Bonds::NO_BOND; 6], immutable_wheel: true,
-                        molecule: MoleculeKey::null(), disjoint_safe: false,
-                    }]);
+                    let mut atom = Atom::new(pos, atom_setup[i]);
+                    atom.immutable_wheel = true;
+                    let molecule_key = world.atoms.create_molecule([atom]);
                     a.atoms_grabbed[i] = world.atoms.molecules[molecule_key].atoms[0];
                 }
             }

@@ -56,10 +56,19 @@ impl AtomType {
         }
     }
 }
+//Where an atom's type is kept. When a conduit clones a molecule, the game links each copied atom's type to its
+//original's: any change to one changes both, wherever they are. Consuming one doesn't affect the other.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum TypeRef {
+    Own(AtomType),
+    //The type of a group of linked atoms, in WorldAtoms::links
+    Linked(LinkKey),
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Atom {
     pub pos: Pos,
-    pub atom_type: AtomType,
+    //Private, so that only this module can change a type, keeping linked atoms linked. Patterns are always Own.
+    type_ref: TypeRef,
     pub connections: [Bonds; 6],
     pub immutable_wheel: bool,
     //Null for atoms that aren't on the board (patterns, spawn queue)
@@ -75,21 +84,23 @@ impl Atom {
     pub fn new(pos: Pos, atom_type: AtomType) -> Atom {
         Atom {
             pos,
-            atom_type,
+            type_ref: TypeRef::Own(atom_type),
             connections: [Bonds::NO_BOND; 6],
             immutable_wheel: false,
             molecule: MoleculeKey::null(),
             disjoint_safe: false,
         }
     }
+    //The type of an atom in a pattern (an input, output or polymer), which is never linked. Atoms in the world are
+    //read through WorldAtoms::type_of.
+    pub fn pattern_type(&self) -> AtomType {
+        match self.type_ref {
+            TypeRef::Own(atom_type) => atom_type,
+            TypeRef::Linked(_) => panic!("Pattern atom is linked!"),
+        }
+    }
     pub fn has_rightward_bonds(&self) -> bool {
         RIGHTWARD.iter().any(|&dir| self.connections[dir] != Bonds::NO_BOND)
-    }
-    //Compares type, bonds and wheel status against a pattern atom placed by the glyph
-    pub fn matches_pattern(&self, pattern: &Atom, glyph: &Glyph) -> bool {
-        self.pos == glyph.reposition(pattern.pos) && self.atom_type == pattern.atom_type
-            && self.immutable_wheel == pattern.immutable_wheel
-            && (0..6).all(|i| self.connections[normalize_dir(i + glyph.rot) as usize] == pattern.connections[i as usize])
     }
     pub fn rotate_connections(&mut self, r: Rot) {
         let mut new_connections = [Bonds::NO_BOND; 6];
@@ -100,7 +111,7 @@ impl Atom {
     }
 }
 
-new_key_type! { pub struct AtomKey; pub struct MoleculeKey; }
+new_key_type! { pub struct AtomKey; pub struct MoleculeKey; pub struct LinkKey; }
 //A molecule is a set of atoms that always move together. Usually it's the atoms connected by bonds,
 //but it can also be disjoint (e.g. from a disjoint input). Bonding merges molecules. Unbonding recalculates the
 //molecule from its bonds, splitting off every disconnected part, but (like the game) only once the half-step's
@@ -123,6 +134,8 @@ pub struct WorldAtoms {
     pub molecules: SlotMap<MoleculeKey, Molecule>,
     //Above every molecule's z so far
     next_z: u64,
+    //The type of each group of linked atoms. It's part of the world, so a copy of the world has its own groups.
+    links: SlotMap<LinkKey, AtomType>,
 }
 impl WorldAtoms {
     pub(super) fn new() -> WorldAtoms {
@@ -132,7 +145,65 @@ impl WorldAtoms {
             stacked: Default::default(),
             molecules: SlotMap::with_key(),
             next_z: 0,
+            links: SlotMap::with_key(),
         }
+    }
+    //The type of an atom in the world (or on its way through a conduit)
+    pub fn type_of(&self, atom: &Atom) -> AtomType {
+        match atom.type_ref {
+            TypeRef::Own(atom_type) => atom_type,
+            TypeRef::Linked(link) => self.links[link],
+        }
+    }
+    //Changes the type of the visible atom, and of every atom linked to it
+    pub(super) fn set_type(&mut self, loc: Pos, atom_type: AtomType) {
+        let key = self.visible(loc).expect("Changing a nonatom!");
+        match self.atom_map[key].type_ref {
+            TypeRef::Own(_) => self.atom_map[key].type_ref = TypeRef::Own(atom_type),
+            TypeRef::Linked(link) => self.links[link] = atom_type,
+        }
+    }
+    //Links a copy of an atom to it, as a conduit clone does: from now on, a change to either one's type changes both
+    //(and any atoms already linked to it). The copy takes the atom's current type.
+    pub(super) fn link_copy(&mut self, key: AtomKey, copy: &mut Atom) {
+        let atom = &mut self.atom_map[key];
+        let link = match atom.type_ref {
+            TypeRef::Linked(link) => link,
+            TypeRef::Own(atom_type) => {
+                let link = self.links.insert(atom_type);
+                atom.type_ref = TypeRef::Linked(link);
+                link
+            }
+        };
+        copy.type_ref = TypeRef::Linked(link);
+    }
+    //Gives an atom whose linked atoms are all gone its own type again, and forgets that group, which keeps `links`
+    //small. Only call it between steps: a copy on its way through a conduit still needs its group.
+    pub(super) fn drop_lone_links(&mut self) {
+        if self.links.is_empty() {
+            return;
+        }
+        let mut counts: FxHashMap<LinkKey, u32> = Default::default();
+        for atom in self.atom_map.values() {
+            if let TypeRef::Linked(link) = atom.type_ref {
+                *counts.entry(link).or_insert(0) += 1;
+            }
+        }
+        for atom in self.atom_map.values_mut() {
+            if let TypeRef::Linked(link) = atom.type_ref {
+                if counts[&link] == 1 {
+                    atom.type_ref = TypeRef::Own(self.links[link]);
+                }
+            }
+        }
+        self.links.retain(|link, _| counts.get(&link).is_some_and(|&count| count > 1));
+    }
+    //Compares type, bonds and wheel status against a pattern atom placed by the glyph
+    pub(super) fn matches_pattern(&self, key: AtomKey, pattern: &Atom, glyph: &Glyph) -> bool {
+        let atom = &self.atom_map[key];
+        atom.pos == glyph.reposition(pattern.pos) && self.type_of(atom) == pattern.pattern_type()
+            && atom.immutable_wheel == pattern.immutable_wheel
+            && (0..6).all(|i| atom.connections[normalize_dir(i + glyph.rot) as usize] == pattern.connections[i as usize])
     }
     //The atom glyphs, arms, conduits and outputs see on a hex: the one from the lowest molecule in molecule order,
     //which is the oldest. Newer molecules go on top (and the game draws them over it). Two atoms of one molecule on
@@ -215,18 +286,14 @@ impl WorldAtoms {
         }
         pieces
     }
-    pub(super) fn get_atom_mut(&mut self, loc: Pos) -> Option<&mut Atom> {
-        let key = self.visible(loc)?;
-        Some(&mut self.atom_map[key])
-    }
     pub(super) fn get_type(&self, loc: Pos) -> Option<AtomType> {
-        Some(self.atom_map[self.visible(loc)?].atom_type)
+        Some(self.type_of(&self.atom_map[self.visible(loc)?]))
     }
     //Like get_type, but wheel atoms are invisible (as they are to most glyphs)
     pub(super) fn get_nonwheel_type(&self, loc: Pos) -> Option<AtomType> {
         let atom = &self.atom_map[self.visible(loc)?];
         if atom.immutable_wheel {return None};
-        Some(atom.atom_type)
+        Some(self.type_of(atom))
     }
     pub fn molecule_len(&self, key: AtomKey) -> usize {
         self.molecules[self.atom_map[key].molecule].atoms.len()
@@ -245,7 +312,7 @@ impl WorldAtoms {
             return None
         }
         //Don't need to check is_berlo since the berlo arm will always be grabbing it (applying a motion)
-        Some(self.atom_map[key].atom_type)
+        Some(self.type_of(&self.atom_map[key]))
     }
 
     //Removes the atom from the board and from its molecule (deleting the molecule if now empty)

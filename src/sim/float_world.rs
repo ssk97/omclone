@@ -8,12 +8,13 @@ pub struct FloatAtom{
     pub atom_type: AtomType,
     pub connections: [Bonds; 6],
 }
+//For pattern atoms (inputs, outputs and polymers)
 impl From<&Atom> for FloatAtom{
 	fn from(a: &Atom) -> FloatAtom {
 		return FloatAtom{
 			pos: pos_to_xy(a.pos),
 			rot: 0.,
-			atom_type: a.atom_type,
+			atom_type: a.pattern_type(),
 			connections: a.connections,
 		}
 	}
@@ -71,7 +72,7 @@ impl FloatWorld{
             let f_atom = FloatAtom{
                 pos: xy,
                 rot: angle,
-                atom_type: atom.atom_type,
+                atom_type: world.atoms.type_of(atom),
                 connections: atom.connections,
             };
             self.atoms_xy.push(f_atom);
@@ -113,7 +114,7 @@ impl FloatWorld{
             let f_atom = FloatAtom{
                 pos: xy,
                 rot: 0.,
-                atom_type: atom.atom_type,
+                atom_type: world.atoms.type_of(atom),
                 connections: atom.connections,
             };
             self.atoms_xy.push(f_atom);
