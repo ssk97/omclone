@@ -6,10 +6,17 @@ use super::*;
 fn typed_number<N: egui::emath::Numeric>(value: &mut N, range: std::ops::RangeInclusive<N>) -> egui::DragValue<'_>{
     egui::DragValue::new(value).range(range).clamp_existing_to_range(false).speed(0.).update_while_editing(false)
 }
-//The selected part's fields, returning an edit if one was changed
+//The selected part's fields (where it starts, in `world`), returning an edit if one was changed. An arm also shows
+//where it is in `now`, the current timestep's world.
 //`locked` explains why the fields can't be edited, if they can't
-fn part_fields(ui: &mut egui::Ui, world: &World, part: PartId, locked: Option<&str>) -> Option<PartEdit>{
+fn part_fields(ui: &mut egui::Ui, world: &World, now: &World, part: PartId, locked: Option<&str>) -> Option<PartEdit>{
     ui.label(part_label(world, part));
+    //Shown even when it matches the fields, so the window doesn't change height as the timeline runs
+    if let PartId::Arm(i) = part{
+        let arm = &now.arms[i];
+        ui.weak(format!("Now: ({}, {}), rot {}, length {}", arm.pos.x, arm.pos.y, arm.rot, arm.len))
+            .on_hover_text("Where it is at this timestep. The fields are where it starts.");
+    }
     if let Some(reason) = locked{
         ui.weak(reason);
     }
@@ -535,7 +542,7 @@ fn readout_width(egui_ctx: &egui::Context) -> f32{
 fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     let mut edit = None;
     let locked = loaded.part_lock(part, EditKind::Move);
-    if let Some(part_edit) = part_fields(ui, loaded.timeline.base(), part, locked) {
+    if let Some(part_edit) = part_fields(ui, loaded.timeline.base(), loaded.timeline.curr(), part, locked) {
         edit = Some(LayoutEdit::Part(part_edit));
     }
     let base = loaded.timeline.base();

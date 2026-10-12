@@ -25,6 +25,19 @@ fn arm_triangles(f_arm: &FloatArm, verts: &mut Vec<GFXPos>){
         }
     }
 }
+//The triangles of an arm drawn on its own, at rest on its hex (wheels hold their atoms, other arms are open)
+fn lone_arm_triangles(arm: &Arm) -> Vec<GFXPos>{
+    let f_arm = FloatArm{
+        pos: pos_to_xy(arm.pos),
+        rot: rot_to_angle(arm.rot),
+        len: arm.len as f32,
+        arm_type: arm.arm_type,
+        grip: steady_grip(arm.arm_type.is_wheel()),
+    };
+    let mut verts = Vec::new();
+    arm_triangles(&f_arm, &mut verts);
+    verts
+}
 
 //The tracks as line segments (pairs of vertices): from each hex halfway to where Forward and Back move an arm.
 //A hex no track leads to or from (like a one-hex track) gets a small star, so it can be seen.
@@ -91,6 +104,8 @@ const BOND_YELLOW_ID:usize = 6;
 const ORIGIN_COLOR: Color = [0.3, 0.3, 0.3, 1.];
 const WHITE: Color = [1., 1., 1., 1.];
 const ARM_COLOR: Color = [0., 0., 0., 1.];
+//How opaque the copy of a dragged arm in its starting pose is
+const ARM_START_OPACITY: f32 = 0.35;
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -278,9 +293,10 @@ pub struct RenderDataBase {
     //The board's tracks, and a track being dragged or reshaped
     scene_tracks: VertexStream,
     dragged_track: VertexStream,
-    //The board's arms, and an arm being dragged
+    //The board's arms, an arm being dragged, and how that arm starts
     scene_arms: VertexStream,
     dragged_arm: VertexStream,
+    arm_start: VertexStream,
 }
 
 impl RenderDataBase {
@@ -354,9 +370,11 @@ impl RenderDataBase {
         let dragged_track = VertexStream::new(ctx, 256);
         let scene_arms = VertexStream::new(ctx, 1024);
         let dragged_arm = VertexStream::new(ctx, 64);
+        let arm_start = VertexStream::new(ctx, 64);
 
         Self {
-            pipeline,pipeline_textured,pipeline_tracks,shapes,font,scene_tracks,dragged_track,scene_arms,dragged_arm
+            pipeline,pipeline_textured,pipeline_tracks,shapes,font,scene_tracks,dragged_track,scene_arms,dragged_arm,
+            arm_start
         }
     }
 }
@@ -594,23 +612,26 @@ impl RenderDataBase {
             self.draw_stream(ctx, &self.pipeline_tracks, &self.dragged_track, WHITE, world_offset, scale);
         }
     }
-    //Draws an arm being dragged (in its starting state), shifted by `extra` (world units) from its hex
+    //Draws an arm being dragged (in its own state, not the board's), shifted by `extra` (world units) from its hex
     pub fn draw_dragged_arm(&mut self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
+        self.dragged_arm.set(ctx, &lone_arm_triangles(arm));
+        self.draw_lone_arm(ctx, camera, &self.dragged_arm, arm, num, extra, 1.);
+    }
+    //Draws faintly, on its hex, how an arm being dragged starts
+    pub fn draw_arm_start(&mut self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize){
+        self.arm_start.set(ctx, &lone_arm_triangles(arm));
+        self.draw_lone_arm(ctx, camera, &self.arm_start, arm, num, XYVec::zeros(), ARM_START_OPACITY);
+    }
+    //Draws an arm from `stream` (holding its lone_arm_triangles) with its number, shifted by `extra` (world units)
+    fn draw_lone_arm(&self, ctx: &mut Context, camera: &CameraSetup, stream: &VertexStream, arm: &Arm, num: usize,
+        extra: XYVec, opacity: f32)
+    {
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = (camera.offset + extra).into();
-        let f_arm = FloatArm{
-            pos: pos_to_xy(arm.pos),
-            rot: rot_to_angle(arm.rot),
-            len: arm.len as f32,
-            arm_type: arm.arm_type,
-            grip: steady_grip(arm.arm_type.is_wheel()),
-        };
-        let mut verts = Vec::new();
-        arm_triangles(&f_arm, &mut verts);
-        self.dragged_arm.set(ctx, &verts);
-        self.draw_stream(ctx, &self.pipeline, &self.dragged_arm, ARM_COLOR, world_offset, scale);
+        let fade = |[r, g, b, a]: Color| [r, g, b, a*opacity];
+        self.draw_stream(ctx, &self.pipeline, stream, fade(ARM_COLOR), world_offset, scale);
         self.font.set_pipeline(ctx);
-        self.font.render_text_centered(ctx, &(num+1).to_string(), WHITE, f_arm.pos, world_offset, scale);
+        self.font.render_text_centered(ctx, &(num+1).to_string(), fade(WHITE), pos_to_xy(arm.pos), world_offset, scale);
     }
     //Outlines each hex
     pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color){

@@ -1420,6 +1420,33 @@ mod track_tests {
         assert_eq!(normalized(&[&[(0, 0), (1, 0)]], (5, 5), vec![Forward, Reset]),
             vec![Forward, Empty]);
     }
+
+    #[test]
+    fn an_arms_moves_run_alone_match_the_sim() {
+        let arm = |x, y, arm_type, first, instructions| Arm::new(Pos::new(x, y), 0, 1, arm_type, Tape::new(first, instructions));
+        let arms = vec![
+            //Rides off the open end of the track, then back
+            arm(0, 0, ArmType::PlainArm, 1, vec![Forward, Forward, Forward, RotateCounterClockwise, Back, Back]),
+            //Extends past its longest, then retracts
+            arm(0, 3, ArmType::Piston, 2, vec![Extend, Extend, Extend, Retract, RotateClockwise, PivotClockwise]),
+            //Stops for good once it halts, so its tape doesn't loop
+            arm(5, 5, ArmType::DoubleArm, 3, vec![RotateClockwise, Halt, RotateClockwise]),
+        ];
+        let mut world = World::setup_sim(&InitialWorld { glyphs: vec![track(&[(0, 0), (1, 0), (2, 0)])], arms }).unwrap();
+        //Longer than the tapes, so they loop after a few empty steps
+        world.set_repeat_length(9);
+        let start = world.layout().arms;
+        let pose = |arm: &Arm| (arm.pos, arm.rot, arm.len);
+        let mut motion = WorldStepInfo::new();
+        for _ in 0..30 {
+            world.run_step(false, &mut motion).unwrap();
+            for (i, arm) in start.iter().enumerate() {
+                let mut alone = arm.clone();
+                alone.run_moves(world.timestep, world.repeat_length, &world.track_maps);
+                assert_eq!(pose(&alone), pose(&world.arms[i]), "arm {i} after timestep {}", world.timestep);
+            }
+        }
+    }
 }
 
 //Moving the editor's cursor around and editing tapes must give the same worlds as simulating straight through

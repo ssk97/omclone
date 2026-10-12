@@ -59,42 +59,55 @@ impl Arm {
             Move(HeldStill) | Pivot(_) => {},
         }
     }
+    //The move an instruction makes the arm itself do. Grabbing, dropping and halting don't move it
+    //(World::do_instruction does the rest of what they do).
+    fn movement(&self, instruction: Instr, track_maps: &TrackMaps) -> ArmMovement {
+        use Instr::*;
+        use Movement::*;
+        use ArmMovement::*;
+        let piston = self.arm_type == ArmType::Piston;
+        match instruction {
+            Extend if piston && self.len < 3 => LengthAdjust(1),
+            Retract if piston && self.len > 1 => LengthAdjust(-1),
+            RotateCounterClockwise => Move(Rotation(1, self.pos)),
+            RotateClockwise => Move(Rotation(-1, self.pos)),
+            PivotCounterClockwise => Pivot(1),
+            PivotClockwise => Pivot(-1),
+            Forward => track_maps.plus.get(&self.pos).map_or(STILL, |&x| Move(Linear(x))),
+            Back => track_maps.minus.get(&self.pos).map_or(STILL, |&x| Move(Linear(x))),
+            Repeat | Reset => panic!("Unprocessed instruction!"),
+            Extend | Retract | Grab | Drop | Halt | Noop | Empty => STILL,
+        }
+    }
+    //Runs only the arm's own moves for the timesteps before `until`. Atoms and other arms never change how an arm
+    //moves, so this puts it where a sim of those timesteps would (unless the sim crashes first).
+    pub fn run_moves(&mut self, until: u64, repeat_length: usize, track_maps: &TrackMaps) {
+        for step in 0..until {
+            if self.halted {
+                return;
+            }
+            match self.instruction_tape.get(step as usize, repeat_length) {
+                Instr::Halt => self.halted = true,
+                instruction => self.do_motion(self.movement(instruction, track_maps)),
+            }
+        }
+    }
 }
+const STILL: ArmMovement = ArmMovement::Move(Movement::HeldStill);
 
 impl World {
     //Returns the movement the arm is going to do. Returns size of the largest molecule rotated
     pub(super) fn do_instruction(&mut self, motion: &mut WorldStepInfo, arm_id: usize, timestep: u64) -> SimResult<()>{
         assert_eq!(motion.arms.len(), arm_id, "Arm motion array not same as arm ID");
         let arm = &mut self.arms[arm_id];
-        use ArmType::*;
         use Instr::*;
         use Movement::*;
-        use ArmMovement::*;
         let arm_type = arm.arm_type;
         let tape = &arm.instruction_tape;
         let timestep = timestep as usize;
         let instruction = tape.get(timestep, self.repeat_length);
         let was_grabbing = arm.grabbing;
-        const STILL: ArmMovement = Move(HeldStill);
         let action = if arm.halted {STILL} else {match instruction {
-            Extend => {
-                if arm_type == Piston && arm.len < 3 {
-                    LengthAdjust(1)
-                } else { STILL }
-            }
-            Retract => {
-                if arm_type == Piston && arm.len > 1 {
-                    LengthAdjust(-1)
-                } else { STILL }
-            }
-            RotateCounterClockwise => {
-                Move(Rotation(1, arm.pos))
-            }
-            RotateClockwise => {
-                Move(Rotation(-1, arm.pos))
-            }
-            PivotCounterClockwise => Pivot(1),
-            PivotClockwise => Pivot(-1),
             Drop => {
                 if !arm_type.is_wheel() {
                     for r in 0..6{
@@ -125,19 +138,8 @@ impl World {
                 }
                 STILL
             }
-            Forward => {
-                self.track_maps.plus.get(&arm.pos)
-                    .map_or(STILL, |&x| {Move(Linear(x))})
-            }
-            Back => {
-                self.track_maps.minus.get(&arm.pos)
-                    .map_or(STILL, |&x| {Move(Linear(x))})
-            }
-            Repeat | Reset => {
-                panic!("Unprocessed instruction!");
-            }
             Halt => {arm.halted = true; STILL}
-            Noop | Empty => STILL,
+            _ => arm.movement(instruction, &self.track_maps),
         }};
         let rotation_store = arm.rot;
         for (grabber, &atom) in arm.atoms_grabbed.iter().enumerate() {

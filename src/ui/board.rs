@@ -93,6 +93,9 @@ pub(super) struct Preview{
     float_world: FloatWorld,
     polymer: Option<Polymer>,
     track: Option<TrackMaps>,
+    //An arm as the edit would have it at `timestep`, the timeline's current one
+    arm_now: Option<Arm>,
+    timestep: u64,
     landing: SmallVec<[Pos; 8]>,
     overlaps: SmallVec<[Pos; 8]>,
 }
@@ -138,9 +141,6 @@ impl Loaded{
             return Some(reason);
         }
         match (part, kind){
-            //At a later step an arm isn't where it starts, so moving it there would be unclear
-            (PartId::Arm(_), Move | Duplicate) if !self.timeline.at_start() =>
-                Some("Arms can only be moved or copied at the initial timestep"),
             (PartId::Glyph(i), Delete | Duplicate) if is_puzzle_part(&self.timeline.base().glyphs[i].glyph_type) =>
                 Some("Inputs, outputs and conduits come with the puzzle"),
             _ => None,
@@ -596,17 +596,24 @@ impl Loaded{
         }
     }
     fn build_preview(&self, edit: LayoutEdit) -> Preview{
-        let (layout, part) = edit.apply(self.timeline.base());
+        let base = self.timeline.base();
+        let (layout, part) = edit.apply(base);
         let part = part.expect("a pending edit places or changes a part");
-        let (polymer, track, landing) = match part{
+        let timestep = self.timeline.curr().timestep;
+        let (polymer, track, arm_now, landing) = match part{
             PartId::Glyph(i) => {
                 let glyph = &layout.glyphs[i];
                 let polymer = glyph.build_polymer().ok().flatten();
                 let track = glyph.is_track().then(|| TrackMaps::build([glyph]).unwrap_or_default());
                 let landing = glyph.footprint(polymer.as_ref());
-                (polymer, track, landing)
+                (polymer, track, None, landing)
             }
-            PartId::Arm(i) => (None, None, smallvec![layout.arms[i].pos]),
+            //Edits to arms leave the tracks and the loop length as they are
+            PartId::Arm(i) => {
+                let mut arm = layout.arms[i].clone();
+                arm.run_moves(timestep, base.repeat_length, &base.track_maps);
+                (None, None, Some(arm), smallvec![layout.arms[i].pos])
+            }
         };
         let world = World::setup_sim(&layout).map_err(|e| e.to_string());
         let mut float_world = FloatWorld::new();
@@ -617,7 +624,7 @@ impl Loaded{
             }
             Err(_) => landing.clone(),
         };
-        Preview{edit, part, layout, world, float_world, polymer, track, landing, overlaps}
+        Preview{edit, part, layout, world, float_world, polymer, track, arm_now, timestep, landing, overlaps}
     }
     pub(super) fn drop_preview(&mut self){
         self.preview = None;
@@ -646,7 +653,8 @@ impl Loaded{
                 (i, TrackMaps::build(others).unwrap_or_default())
             });
         }
-        if self.preview.as_ref().is_some_and(|p| p.edit == edit){
+        //The timeline can still be on its way to the target while a part is dragged
+        if self.preview.as_ref().is_some_and(|p| p.edit == edit && p.timestep == self.timeline.curr().timestep){
             return;
         }
         self.preview = Some(self.build_preview(edit));
@@ -698,7 +706,13 @@ impl Loaded{
         match part{
             PartId::Glyph(i) => render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[i],
                 preview.polymer.as_ref(), preview.track.as_ref(), extra),
-            PartId::Arm(i) => render.draw_dragged_arm(ctx, &self.camera, &preview.layout.arms[i], i, extra),
+            //How it starts, on its hex, which is where the edit changes it (and shows where the drag snaps to). Then
+            //where it will be at this step, following the mouse.
+            PartId::Arm(i) => {
+                render.draw_arm_start(ctx, &self.camera, &preview.layout.arms[i], i);
+                let now = preview.arm_now.as_ref().expect("an arm's preview has it as it is now");
+                render.draw_dragged_arm(ctx, &self.camera, now, i, extra);
+            }
         }
         render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
         render.draw_hex_rings(ctx, &self.camera, &preview.landing, SELECT_COLOR);
@@ -942,5 +956,54 @@ mod tests {
         assert!(loaded.tool.track_mode().is_some(), "selecting its own track keeps it");
         loaded.select(Some(PartId::Glyph(0)));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
+    }
+
+    //An arm at (0,0) on a track along to (3,0), which it rides to (2,0) by timestep 2
+    fn carried_arm() -> Loaded{
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track((0..4).map(|x| Pos::new(x, 0)).collect())};
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Forward, Instr::Forward]));
+        let mut loaded = Loaded::for_test(vec![track], vec![arm]);
+        loaded.timeline.advance_to(2.).unwrap();
+        loaded
+    }
+    fn pose(arm: &Arm) -> (Pos, Rot, i32){
+        (arm.pos, arm.rot, arm.len)
+    }
+
+    #[test]
+    fn an_arm_dragged_at_a_later_step_starts_that_much_further_along() {
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::RotateCounterClockwise]));
+        let mut loaded = Loaded::for_test(vec![], vec![arm]);
+        loaded.timeline.advance_to(3.).unwrap();
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 2, 0);
+        loaded.release();
+        assert_eq!(pose(&loaded.timeline.base().arms[0]), (Pos::new(2, 0), 0, 1), "turned as it started");
+    }
+
+    //Grabbed far from where it starts, an arm turned around the hex it's dragged to would have its start moved too
+    #[test]
+    fn an_arm_a_track_carried_off_keeps_its_start_offset_and_turns_in_place() {
+        let mut loaded = carried_arm();
+        press(&mut loaded, 2, 0, KeyMods::default());
+        move_to(&mut loaded, 2, 1);
+        assert!(loaded.handle_key(KeyCode::A, KeyMods::default()));
+        loaded.release();
+        assert_eq!(pose(&loaded.timeline.base().arms[0]), (Pos::new(0, 1), 1, 1));
+    }
+
+    #[test]
+    fn the_drag_preview_shows_the_arm_where_it_will_be_at_this_step() {
+        let mut loaded = carried_arm();
+        //Its start moves from (0,0) to (2,0), so the end of the track stops it at (3,0)
+        press(&mut loaded, 2, 0, KeyMods::default());
+        move_to(&mut loaded, 4, 0);
+        loaded.refresh_preview();
+        let previewed = loaded.preview.as_ref().and_then(|p| p.arm_now.as_ref()).map(pose);
+        assert_eq!(previewed, Some((Pos::new(3, 0), 0, 1)));
+        loaded.release();
+        loaded.update();
+        assert_eq!(loaded.timeline.curr().timestep, 2, "it runs back to the step it was edited at");
+        assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
     }
 }

@@ -19,7 +19,8 @@ Ctrl also means Cmd on a Mac.
 Board
 - Click a hex to select a part on it: the topmost, unless the selected part is there. While the button is held,
   Tab/Shift+Tab or the mouse wheel picks another part under it.
-- Drag a part to move it, or Ctrl+drag to copy it. Arms can only be moved or copied at the starting timestep.
+- Drag a part to move it, or Ctrl+drag to copy it. At a later timestep, dragging an arm moves where it starts by the
+  same amount, so a track may carry it somewhere else; while dragging, a faint copy shows how it starts.
 - While dragging or placing a part, A/D turn it counterclockwise/clockwise and W/S lengthen/shorten an arm.
 - Delete or Backspace deletes the selected part. Ctrl+Z undoes, and Ctrl+Y or Ctrl+Shift+Z redoes.
 - Esc lets go of one thing at a time. Right-click stops placing parts or drawing track.
@@ -29,7 +30,8 @@ Part window
 - "Add part" picks a part to place: click the board to put it down, or Shift+click to keep placing more.
 - The list shows the parts on the hex last clicked, or every glyph. Click one to select it, or drag a glyph to
   reorder it.
-- Typed values (x, y, rot, length, Arm #, Glyph #) apply on Enter or when you click elsewhere.
+- Typed values (x, y, rot, length, Arm #, Glyph #) apply on Enter or when you click elsewhere. An arm's x, y, rot and
+  length are where it starts; the "Now" line shows where it is at the current timestep.
 - For a track, "Add to front", "Add to back" and "Remove hexes" work on the board: click or drag over hexes.
   Path is the track as text, one step per letter: w e a d z x (the keys around S), or (dx,dy) to jump. The board
   previews it as you type; Enter applies it and Esc drops it.

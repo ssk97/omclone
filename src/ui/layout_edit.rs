@@ -1,7 +1,8 @@
 //Edits to the layout (the parts and where they start), and how parts are named
 use super::*;
 
-//An edit to one part of the layout: it moves by `delta`, then rotates by `rot` around `pivot`.
+//An edit to one part of the layout: it moves by `delta`, then rotates by `rot`. A glyph rotates around `pivot`, and an
+//arm turns in place (it covers one hex, and at later timesteps it may be grabbed far from where it starts).
 //Arms can also change length and type.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct PartEdit{
@@ -38,7 +39,7 @@ fn edit_part(layout: &mut InitialWorld, edit: &PartEdit){
         }
         PartId::Arm(i) => {
             let arm = &mut layout.arms[i];
-            arm.pos = place(arm.pos);
+            arm.pos += edit.delta;
             arm.rot = (arm.rot + edit.rot) % 6;
             if let Some(arm_type) = edit.arm_type{
                 arm.arm_type = arm_type;
