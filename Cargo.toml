@@ -48,8 +48,11 @@ egui = {version = "0.35", optional = true}
 miniquad = { version = "0.4.11", optional = true}
 fontdue = { version = "0.9", optional = true}
 #egui-miniquad = {version = "0.14", optional = true}
-egui-miniquad = { git = "https://github.com/not-fl3/egui-miniquad", rev="47417e0293b0f3104f7d291e38b1d30d11768aa6", optional = true }
+egui-miniquad = { path = "../egui-miniquad", optional = true }
 image = {version = "0.25", optional = true, default-features = false, features = ["png"]}
 
 color-eyre = {version = "0.6", optional = true}
 simple-eyre = "0.3"
+
+[patch.crates-io]
+miniquad = { path = "../miniquad" }
