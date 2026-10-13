@@ -93,12 +93,7 @@ impl World {
             let glyph = &self.glyphs[id];
             let Input(meta_pattern, _) = &glyph.glyph_type else {unreachable!()};
             //The whole input is one molecule, even if it's disjoint
-            self.atoms.create_molecule(meta_pattern[0].iter().map(|a| {
-                let mut atom = glyph.place_atom(a);
-                //The pattern's bonds are in the input's own frame
-                atom.disjoint_safe = !a.has_rightward_bonds();
-                atom
-            }));
+            self.atoms.create_molecule(meta_pattern[0].iter().map(|a| glyph.place_atom(a)));
             if let Input(meta_pattern, _) = &mut self.glyphs[id].glyph_type {
                 let tmp = meta_pattern.remove(0);
                 meta_pattern.push(tmp);
@@ -394,12 +389,7 @@ impl World {
         //Molecules unbonded this half split into their pieces only now, after every glyph has seen them whole, and the
         //pieces go on top
         if !motion.recent_bonds.is_empty() {
-            let raised = self.atoms.split_and_raise(motion.recent_bonds.iter().copied());
-            //omsim's rule for stacked molecules unbonded together, which the game agrees with: it errors when the
-            //upper atom's own bonds could get mixed up with the lower one's
-            if let Some(pos) = self.atoms.unsafe_overlap(&raised) {
-                return Err(sim_error_pos("Disjoint bonds aren't supported!", pos));
-            }
+            self.atoms.split_and_raise(motion.recent_bonds.iter().copied());
         }
         Ok(())
     }
@@ -487,8 +477,6 @@ impl World {
         };
         for (mut molecule, unbonded) in pieces {
             for atom in &mut molecule {
-                //Judged in the frame the atoms leave from
-                atom.disjoint_safe |= !atom.has_rightward_bonds();
                 atom.pos = rotate_around(atom.pos,offset_rot,origin)+offset_pos;
                 atom.rotate_connections(offset_rot);
             }

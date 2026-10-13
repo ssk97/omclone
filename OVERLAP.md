@@ -6,7 +6,7 @@ as requirements **R1–R14**. The sim implements them, and the `overlap_tests` m
 mostly with the layouts of the game experiments.
 
 omsim (`C:\Users\Steven\Documents\programming\temp\zachlike\omsim`) was the main reference. It's an independent
-reimplementation and isn't authoritative: the game experiments below showed it's wrong in eight places.
+reimplementation and isn't authoritative: the game experiments below showed it's wrong in nine places.
 
 ## Summary
 
@@ -31,8 +31,10 @@ reimplementation and isn't authoritative: the game experiments below showed it's
   - how long atoms a conduit delivers stay "just unbonded"
   - whether a multi-bonder looks up all its atoms before making any of its bonds
   - whether a conduit clone's copy shares its original's type: in the game, a change to either changes both (R14)
+  - whether stacked molecules unbonded in the same half-cycle need a "disjoint-safe" upper atom: the game never
+    cares (R9)
 
-  We follow the game in all eight.
+  We follow the game in all nine.
 
 ## How we got here
 
@@ -79,8 +81,10 @@ The behaviors that differed:
   The log is `test/experiments/tools/sweep.log`.
 - **omsim on the failures:** omsim was built from source with Strawberry Perl's gcc. On all 91 failing solutions,
   it gives the recorded cycle count, or the expected collision for unsolved ones (`tools/omsim_results.txt`).
-- **The convention for unsolved files:** a solution file without stats is expected to collide in the game. So the
-  `debonding-z-order` tests 2, 3 and 5 collide in the game, and tests 1, 4 and 6 complete.
+- **The convention for unsolved files:** a solution file without stats is expected to collide in the game. That
+  marks `debonding-z-order` tests 2, 3 and 5 as collisions, and tests 1, 4 and 6 complete. Run in the game, tests 2
+  and 5 do collide, but test 3 completes (fifth round). Its local copy in `test/solution/edge-cases` now carries the
+  game's stats, so it differs from omsim's.
 
 ### 3. Tracing each failure to a cause
 
@@ -160,8 +164,8 @@ Grimy's sub-cycle notes (`https://github.com/Grimy/om_overlap`) don't cover this
 **Decision:** always report an error (R9). Then check whether any `debonding-z-order` test fails because of it,
 before adding anything more.
 
-**Outcome:** four game-verified solutions failed, so R9 now follows omsim's rule (see "What implementing it showed"
-under section 6).
+**Outcome:** four game-verified solutions failed, so R9 followed omsim's rule (see "What implementing it showed"
+under section 6). The fifth round then found that the game never errors here, so omclone dropped the rule.
 
 #### The pending-products structure
 
@@ -257,8 +261,9 @@ The sweep settled three more things.
   Refined Bronze 355g.
   - Tests 1 and 3 have the same atoms, bonds and glyphs. The only difference is which end of one input chain is that
     input's origin.
-  - The game completes test 1 and collides on test 3, which is exactly omsim's `DISJOINT_SAFE` distinction. So R9
-    now uses omsim's rule.
+  - Going by the convention for unsolved files, the game completes test 1 and collides on test 3, which is exactly
+    omsim's `DISJOINT_SAFE` distinction. So R9 took omsim's rule. Test 3 hadn't been run in the game, though, and
+    in the fifth round it completed.
 - **When unbonded molecules split (R3c).** Refined Bronze 355g still failed after that.
   - A multi-bonder there re-joins pieces of a molecule that earlier unbonders had cut in the same half.
   - If the pieces were already separate molecules, that merge would lift them on top (R3b). Unbonders later in the
@@ -350,6 +355,52 @@ held atom, so the Projection fires once, after the claim.
 
 omsim has no linking, and its clone sends the atoms as claimed. omclone now keeps linked types in groups (R14).
 
+#### Fifth round
+
+R9 was omsim's rule, and omsim's own comment calls it incomplete. Nine more solutions tested where it could be wrong.
+They use two more puzzles:
+- **`c100000000000007`, "OMCLONE OVERLAP EXPERIMENTS 7".**
+  - Inputs: P0 Air, P1 a Salt pair, P2 a Fire pair, and P3 a chain of three Fires.
+  - Outputs: O0 and O1 Salt, O2 a Fire with an Air bonded on its left, O3 a Fire pair, and O4 Fire.
+- **`c100000000000008`, "OMCLONE OVERLAP EXPERIMENTS 8".** omsim's `debonding-z-order` puzzle, with P0's bonds
+  listed right to left.
+
+The layouts:
+- **23a–d: a bond a bonder made on the upper atom.**
+  - The Air and one end of the Salt pair overlap on (0,0), the Air lowest.
+  - A bonder joins the Air to the Fire pair, which lifts it above the Salt. Unbonders then cut the Salt pair and the
+    Fire pair in the same half.
+  - O2 takes the Air with its Fire if their bond survives.
+  - The bond points right in a and b (the Fire on (1,0)), and left in c and d (on (0,−1)). The bonder's origin is
+    on the Air in a and c, and on the Fire in b and d.
+- **24a–b: listing order.** `debonding-z-order` tests 1 and 3, on puzzle 8.
+- **25a–c: a delivered upper atom.**
+  - An arm drops the Fire chain on a conduit at (0,6) in cycle 2. Its atom m0 lands on (0,0), above a Salt pair that
+    refilled there, and both molecules are cut in that half.
+  - m0's bond points right or left as the input made it, as it was sent, and as it landed: right, left, left in
+    25a; right, right, left in 25b, whose receiver is turned 180°; left, left, right in 25c.
+
+Tapes are padded as in the second round. 24a and 24b have no arms, like the tests they copy.
+
+| Exp | omsim | Game |
+|---|---|---|
+| 23a–d | runs clean | the same; no stray bonds |
+| 24a | completes in cycle 3 | the same |
+| 24b | "disjoint bonds" in cycle 1 | completes in cycle 3 |
+| 25a, 25c | runs clean | the same; the Fire pair output counts in cycle 2 |
+| 25b | "disjoint bonds" in cycle 2 | runs clean, as 25a |
+| `debonding-z-order` test 3 | "disjoint bonds" in cycle 1 | completes in cycle 3 |
+
+So the game never misbehaves when stacked molecules are unbonded in the same half. It doesn't matter what made the
+upper atom's bonds, or which way they point. omsim's rule may describe an older version of the game. Test 3 had
+only ever been assumed to collide, from the convention for unsolved files. omclone dropped R9: the pieces just rise
+(R3c). The game does collide on tests 2 and 5, as expected, but because the raise leaves a stack.
+
+Two more questions needed no experiment:
+- **The order of molecules that rise together (R3c).** Test 6 already settles it.
+- **A product as the upper atom.** A product can only be the upper atom by landing on an input spawned in the same
+  half, and getting it a bond as well takes several arms. With R9 gone, there's nothing left to test.
+
 ## Requirements
 
 Each requirement lists its evidence. "Sweep" means game-verified solutions that only pass with it.
@@ -380,6 +431,9 @@ Each requirement lists its evidence. "Sweep" means game-verified solutions that 
     - Its atoms aren't on their own, so R10 follows.
     - Every piece goes on top, and so does an unbonded molecule that doesn't come apart.
     - Evidence: Game, exp6, exp12 and exp17a–c; sweep: Refined Bronze 355g; omsim's `debonding-z-order` tests.
+    - The relative order: `debonding-z-order` test 6 stacks four chains A, B, C, D on (0,0), from the bottom, and
+      cuts B, then D, then A. The game completes it, which needs them to rise as A, B, D. Rising in the order they
+      were cut would leave A's piece and D's stacked on (0,0).
   - **d.** When a conduit clone strips bonds from the atoms it leaves behind, their molecule also splits only after
     the glyph pass, and its pieces keep their place.
     - The timing: splitting at once hides from a later claim that its molecule was joined to the first (R13b).
@@ -413,14 +467,11 @@ Each requirement lists its evidence. "Sweep" means game-verified solutions that 
   - A stack still present at the end of the first half-cycle is a collision.
   - Moving an atom onto an occupied hex stays a collision.
   - (omsim; Game: experiments 2, 6, 7 and 8)
-- **R9. Disjoint bonds.**
-  - After the glyphs of a half-cycle, take each hex holding atoms from molecules unbonded in that half-cycle. Every
-    such atom above the lowest one must be *disjoint-safe*, or it's an error.
-  - An atom is disjoint-safe when an input or a conduit delivery created it with no bond pointing right, up-right
-    or down-right in its own frame. For inputs that's the input's frame; for deliveries, the frame they leave from.
-  - This is omsim's rule. omsim's comment explains it: the game seems to store each bond on one of its two atoms,
-    and the upper atom's bonds can get attached to the atom beneath.
-  - Evidence: sweep, `debonding-z-order` 1, 3, 4 and 6, and Refined Bronze 355g. "Always error" fails four of them.
+- **R9. Stacked molecules unbonded together.** No extra rule. When molecules stacked on a hex are unbonded in the
+  same half-cycle, their pieces just rise (R3c), whatever bonds the upper atom has.
+  - Evidence: Game, the fifth round and `debonding-z-order` test 3; sweep: `debonding-z-order` 1, 4 and 6, and
+    Refined Bronze 355g.
+  - omsim reports "disjoint bonds are not supported" when the upper atom was created with a bond pointing right.
 - **R10. Disposal.** Disposal doesn't consume an atom unbonded earlier in the same half-cycle. (omsim; sweep: 21
   solutions; scratch test) R3c's deferred split gives this too.
 - **R11. Outputs.**
@@ -478,9 +529,6 @@ Each requirement lists its evidence. "Sweep" means game-verified solutions that 
 **Not known from the game:**
 - The order in R3d. Nothing can land on a held or dropped atom without colliding, so both orders look the same in
   practice.
-- What actually happens with disjoint bonds (R9). The rule fits every solution we have, but omsim admits it's
-  incomplete: bonds made by bonders never change whether an atom is disjoint-safe, and products are never
-  disjoint-safe.
 - Whether a triplex bonder, like a multi-bonder (exp19), makes its bonds one at a time.
 - Whether an arm grabbing at a stacked hex holds the atoms above, or only stops outputs taking them. Either way it's
   a collision (R2).
@@ -501,6 +549,8 @@ All of these are in `test/experiments/`, which is gitignored:
 - `c100000000000004.puzzle` with `exp15a`, `exp15b`, `exp16`, `exp17a`, `exp17b`, `exp17c`, `exp18`, `exp19`,
   `exp20`, `exp21a` and `exp21c`; `c100000000000005.puzzle` with `exp21b`.
 - `c100000000000006.puzzle` with `exp22a`, `exp22b`, `exp22c` and `exp22d`.
+- `c100000000000007.puzzle` with `exp23a`–`exp23d` and `exp25a`–`exp25c`; `c100000000000008.puzzle` with `exp24a`
+  and `exp24b`.
 - `tools/exp_gen/`: a scratch crate that writes the puzzles and solutions using omclone's writer, then runs each
   in omclone. After every cycle it prints the atoms with their bond directions, what each arm holds, and each
   output's remaining count.
@@ -523,3 +573,4 @@ All of these are in `test/experiments/`, which is gitignored:
 - `tools/omsim_round3.txt`: the instrumented omsim's output for the third round, which gives that table's omsim
   column. No conduit event means nothing was sent.
 - `tools/omsim_round4.txt`: the same for the fourth round, including the type of each delivered atom.
+- `tools/omsim_round5.txt`: the same for the fifth round.

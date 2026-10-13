@@ -491,19 +491,17 @@ mod overlap_tests {
     }
 
     #[test]
-    fn stacked_unbonded_molecules_need_a_safe_upper_atom() {
-        //Two Salt chains cross at (0,0), and an unbonder cuts each. The game accepts it only when the upper Salt there
-        //has no bond pointing right in its input's frame (omsim's debonding-z-order tests 1 and 3).
+    fn stacked_molecules_unbonded_together_just_rise() {
+        //omsim's debonding-z-order test 3: two Salt chains cross at (0,0), and an unbonder cuts each. omsim rejects it
+        //because the upper Salt there has a bond pointing right in its input's frame, but the game completes it in
+        //3 cycles, as it does test 1, where that Salt is the other end of its chain (round 5)
         let chain = || bonded(vec![atom(0, 0, Salt), atom(1, 0, Salt), atom(2, 0, Salt)], &[(0, 1), (1, 2)]);
-        let crossing = |diagonal: Glyph| {
-            let mut w = world(vec![input(-2, 0, 0, chain()), diagonal,
-                glyph(-1, 0, 0, GlyphType::Unbonding), glyph(-2, 2, 5, GlyphType::Unbonding)], vec![]);
-            error(run(&mut w, 1, false))
-        };
-        //Here the upper Salt is the end of its chain, bonded leftward; the stack just stays
-        assert_eq!(crossing(input(-2, 2, 5, chain())), "Overlapping atoms before motion!");
-        //Here it's the start, bonded rightward
-        assert_eq!(crossing(input(0, 0, 2, chain())), "Disjoint bonds aren't supported!");
+        let salt = || vec![atom(0, 0, Salt)];
+        let mut w = world(vec![output(-1, 1, 5, pair(Salt)), glyph(-1, 0, 0, GlyphType::Unbonding),
+            input(-2, 0, 0, chain()), glyph(-2, 2, 5, GlyphType::Unbonding), input(0, 0, 2, chain()),
+            output(0, 0, 0, salt()), output(-2, 2, 0, salt()), output(-2, 0, 0, pair(Salt))], vec![]);
+        run(&mut w, 3, true).unwrap();
+        assert!(w.is_complete());
     }
 
     #[test]

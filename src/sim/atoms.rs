@@ -73,13 +73,7 @@ pub struct Atom {
     pub immutable_wheel: bool,
     //Null for atoms that aren't on the board (patterns, spawn queue)
     pub molecule: MoleculeKey,
-    //Set on an atom an input or conduit creates with no bond pointing right, up-right or down-right in the frame it's
-    //created in. omsim's rule (which the game agrees with) lets such an atom sit above another when both their
-    //molecules were just unbonded; see process_glyphs.
-    pub disjoint_safe: bool,
 }
-//Directions 0, 1 and 5
-const RIGHTWARD: [usize; 3] = [0, 1, 5];
 impl Atom {
     pub fn new(pos: Pos, atom_type: AtomType) -> Atom {
         Atom {
@@ -88,7 +82,6 @@ impl Atom {
             connections: [Bonds::NO_BOND; 6],
             immutable_wheel: false,
             molecule: MoleculeKey::null(),
-            disjoint_safe: false,
         }
     }
     //The type of an atom in a pattern (an input, output or polymer), which is never linked. Atoms in the world are
@@ -98,9 +91,6 @@ impl Atom {
             TypeRef::Own(atom_type) => atom_type,
             TypeRef::Linked(_) => panic!("Pattern atom is linked!"),
         }
-    }
-    pub fn has_rightward_bonds(&self) -> bool {
-        RIGHTWARD.iter().any(|&dir| self.connections[dir] != Bonds::NO_BOND)
     }
     pub fn rotate_connections(&mut self, r: Rot) {
         let mut new_connections = [Bonds::NO_BOND; 6];
@@ -228,15 +218,6 @@ impl WorldAtoms {
     pub(super) fn any_stack(&self) -> Option<Pos> {
         self.stacked.iter().next().copied()
     }
-    //A hex where an atom of the given molecules sits above another of theirs, and isn't disjoint_safe
-    pub(super) fn unsafe_overlap(&self, molecules: &[MoleculeKey]) -> Option<Pos> {
-        self.stacked.iter().copied().find(|loc| {
-            let mut atoms: SmallVec<[&Atom; 4]> = self.locs[loc].iter().map(|&key| &self.atom_map[key])
-                .filter(|atom| molecules.contains(&atom.molecule)).collect();
-            atoms.sort_by_key(|atom| self.molecules[atom.molecule].z);
-            atoms.iter().skip(1).any(|atom| !atom.disjoint_safe)
-        })
-    }
     pub(super) fn add_to_hex(&mut self, key: AtomKey, loc: Pos) {
         let keys = self.locs.entry(loc).or_default();
         keys.push(key);
@@ -275,16 +256,13 @@ impl WorldAtoms {
         }
     }
     //Splits the molecules of these unbonded atoms into their pieces and puts the pieces on top, keeping the
-    //molecules' order. Returns the pieces.
-    pub(super) fn split_and_raise(&mut self, atoms: impl Iterator<Item=AtomKey>) -> SmallVec<[MoleculeKey; 4]> {
-        let mut pieces = SmallVec::new();
+    //molecules' order
+    pub(super) fn split_and_raise(&mut self, atoms: impl Iterator<Item=AtomKey>) {
         for m in self.molecules_of(atoms) {
-            pieces.extend(self.split_molecule(m));
+            for piece in self.split_molecule(m) {
+                self.molecules[piece].z = self.top_z();
+            }
         }
-        for &m in &pieces {
-            self.molecules[m].z = self.top_z();
-        }
-        pieces
     }
     pub(super) fn get_type(&self, loc: Pos) -> Option<AtomType> {
         Some(self.type_of(&self.atom_map[self.visible(loc)?]))
