@@ -67,6 +67,7 @@ enum ColliderKind {
     Atom,
     ArmBase,
     ProducedAtom,
+    Wall,
 }
 #[derive(Copy, Clone)]
 struct Collider {
@@ -78,6 +79,8 @@ fn collision_message(a: ColliderKind, b: ColliderKind) -> &'static str {
     use ColliderKind::*;
     match (a, b) {
         (ArmBase, ArmBase) => "Arm-Arm collision!",
+        (ArmBase, Wall) | (Wall, ArmBase) => "arm/wall collision!",
+        (Wall, _) | (_, Wall) => "atom/wall collision!",
         (ProducedAtom, _) | (_, ProducedAtom) => "atom/spawning atom collision!",
         (ArmBase, _) | (_, ArmBase) => "atom/arm collision!",
         (Atom, Atom) => "atom/atom collision!",
@@ -163,6 +166,7 @@ impl World {
         let remaining = 1. - progress;
         for (arm, &arm_motion) in self.arms.iter().zip(&motion.arms) {
             mark_arm_sweep(&mut self.area_touched, arm, arm_motion, remaining);
+            check_grabbers_off_walls(&self.chambers, arm, arm_motion, remaining)?;
         }
         let mut list = ColliderList {
             colliders: Vec::new(),
@@ -172,8 +176,8 @@ impl World {
             motion,
             area: &mut self.area_touched,
         };
-        //Fixed colliders: stationary arm bases, then atoms being produced. Each can collide with the others of its
-        //kind (two products can land on one hex).
+        //Fixed colliders: stationary arm bases, chamber walls, then atoms being produced. Arm bases and products can
+        //collide with others of their kind (two products can land on one hex).
         let mut moving_arms = Vec::new();
         for (arm, arm_motion) in self.arms.iter().zip(&motion.arms) {
             if let ArmMovement::Move(Movement::Linear(translation)) = arm_motion {
@@ -183,6 +187,11 @@ impl World {
             list.add(Collider { center: to_xy(arm.pos), radius: ARM_BASE_RADIUS, kind: ColliderKind::ArmBase })?;
             list.commit();
         }
+        //Committed together, so walls don't collide with each other
+        for &wall in &self.chambers.walls {
+            list.add(Collider { center: to_xy(wall), radius: ARM_BASE_RADIUS, kind: ColliderKind::Wall })?;
+        }
+        list.commit();
         for atom in motion.products.iter().flat_map(|p| &p.atoms) {
             list.add(Collider { center: to_xy(atom.pos), radius: PRODUCED_ATOM_RADIUS, kind: ColliderKind::ProducedAtom })?;
             list.commit();
@@ -272,43 +281,80 @@ impl World {
     }
 }
 
+//Where an arm is partway through its motion, with `remaining` of it still to go
+struct ArmPose {
+    base: Xy,
+    //The cosine and sine of the angle its first grabber points at
+    c: f32,
+    s: f32,
+    len: f32,
+}
+impl ArmPose {
+    fn new(arm: &Arm, arm_motion: ArmMovement, remaining: f32) -> Self {
+        let mut base = to_xy(arm.pos);
+        let mut final_rotation = arm.rot;
+        let mut swing = 0.;
+        let mut len = arm.len as f32;
+        match arm_motion {
+            ArmMovement::Move(Movement::Rotation(r, _)) => {
+                final_rotation = (final_rotation + r) % 6;
+                swing = rot_to_angle(r);
+            }
+            ArmMovement::Move(Movement::Linear(translation)) => {
+                let final_base = to_xy(arm.pos + translation);
+                let tr = to_xy(translation);
+                base = Xy { x: final_base.x - tr.x * remaining, y: final_base.y - tr.y * remaining };
+            }
+            ArmMovement::LengthAdjust(a) => len += a as f32 * (1. - remaining),
+            ArmMovement::Move(Movement::HeldStill) | ArmMovement::Pivot(_) => {}
+        }
+        let rotation = rot_to_angle(final_rotation) - swing * remaining;
+        ArmPose { base, c: cos(rotation), s: sin(rotation), len }
+    }
+    //The point `distance` hexes out from the base toward grabber `g`
+    fn point(&self, g: Rot, distance: f32) -> Xy {
+        let dir = to_xy(rot_to_pos(g));
+        Xy {
+            x: self.base.x + (dir.x * self.c - dir.y * self.s) * distance,
+            y: self.base.y + (dir.x * self.s + dir.y * self.c) * distance,
+        }
+    }
+}
+
 //Marks the area of a moving arm partway through its motion, treating the grabber and each hex-length
 //point along the arm like an atom. For the arm lengths that exist (1 to 3), sweeping this over a rotation
 //gives exactly the hexes of omsim's record_swing_area, while showing the area as the arm moves.
 fn mark_arm_sweep(area: &mut FxHashSet<Pos>, arm: &Arm, arm_motion: ArmMovement, remaining: f32) {
-    let mut base = to_xy(arm.pos);
-    let mut final_rotation = arm.rot;
-    let mut swing = 0.;
-    let mut len = arm.len as f32;
-    match arm_motion {
-        ArmMovement::Move(Movement::Rotation(r, _)) => {
-            final_rotation = (final_rotation + r) % 6;
-            swing = rot_to_angle(r);
-        }
-        ArmMovement::Move(Movement::Linear(translation)) => {
-            let final_base = to_xy(arm.pos + translation);
-            let tr = to_xy(translation);
-            base = Xy { x: final_base.x - tr.x * remaining, y: final_base.y - tr.y * remaining };
-        }
-        ArmMovement::LengthAdjust(a) => len += a as f32 * (1. - remaining),
-        ArmMovement::Move(Movement::HeldStill) | ArmMovement::Pivot(_) => return,
+    if matches!(arm_motion, ArmMovement::Move(Movement::HeldStill) | ArmMovement::Pivot(_)) {
+        return;
     }
-    let rotation = rot_to_angle(final_rotation) - swing * remaining;
-    let (c, s) = (cos(rotation), sin(rotation));
-    let mut distances: SmallVec<[f32; 4]> = (1..=len.floor() as i32).map(|d| d as f32).collect();
-    if len.fract() != 0. {
-        distances.push(len);
+    let pose = ArmPose::new(arm, arm_motion, remaining);
+    let mut distances: SmallVec<[f32; 4]> = (1..=pose.len.floor() as i32).map(|d| d as f32).collect();
+    if pose.len.fract() != 0. {
+        distances.push(pose.len);
     }
     for g in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
-        let dir = to_xy(rot_to_pos(g as Rot));
         for &d in &distances {
-            let point = Xy {
-                x: base.x + (dir.x * c - dir.y * s) * d,
-                y: base.y + (dir.x * s + dir.y * c) * d,
-            };
-            area.extend(hexes_near(point, ATOM_RADIUS + ATOM_RADIUS));
+            area.extend(hexes_near(pose.point(g, d), ATOM_RADIUS + ATOM_RADIUS));
         }
     }
+}
+
+//Fails if any of an arm's grabbers is over a chamber wall partway through its motion. Checking each substep gives
+//omsim's rules: as a grabber turns, it stays in its ring of hexes, except that a length 3 grabber bulges into the
+//hex one further out halfway through, and every substep count samples halfway (they're powers of two).
+fn check_grabbers_off_walls(chambers: &Chambers, arm: &Arm, arm_motion: ArmMovement, remaining: f32) -> SimResult<()> {
+    if chambers.walls.is_empty() {
+        return Ok(());
+    }
+    let pose = ArmPose::new(arm, arm_motion, remaining);
+    for g in (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize) {
+        let grabber = pose.point(g, pose.len);
+        if chambers.cell(from_xy(grabber)) == ChamberCell::Wall {
+            return Err(SimError { error_str: "Grabber hit a chamber wall!", location: to_sim_xy(grabber) });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -368,6 +414,32 @@ mod tests {
                             }
                             assert_eq!(swept, expected, "{arm_type:?} len {len} rot {rot} rotation {rotation} substeps {substep_count}");
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    //omsim checks a turning grabber's end hex and, at length 3 only, the hex at the middle of its arc, which is one
+    //further out. So the substep check must find a turning grabber over exactly that hex when it leaves its ring.
+    #[test]
+    fn turning_grabbers_leave_their_ring_where_omsim_checks() {
+        let base = Pos::new(2, -1);
+        for len in 1..=3 {
+            for rot in -6..6 {
+                for rotation in [1, -1] {
+                    //omsim's middle hex, from the earlier of the two directions going counterclockwise
+                    let first = if rotation == 1 {rot} else {rot - 1};
+                    let expected: FxHashSet<Pos> = (len == 3).then(|| base + (rot_to_pos(first) + rot_to_pos(first + 1)) * 2)
+                        .into_iter().collect();
+                    let arm = Arm::new(base, rot, len, ArmType::PlainArm, Tape::new(0, Vec::new()));
+                    for substep_count in [8, 16, 32, 64, 256] {
+                        let off_ring: FxHashSet<Pos> = (1..substep_count).map(|substep| {
+                            let remaining = 1. - substep as f32 / substep_count as f32;
+                            let pose = ArmPose::new(&arm, ArmMovement::Move(Movement::Rotation(rotation, base)), remaining);
+                            from_xy(pose.point(0, pose.len))
+                        }).filter(|&hex| hex_distance(base, hex) != len).collect();
+                        assert_eq!(off_ring, expected, "len {len} rot {rot} rotation {rotation} substeps {substep_count}");
                     }
                 }
             }

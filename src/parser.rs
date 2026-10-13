@@ -463,8 +463,8 @@ pub struct FullPuzzle {
     pub inputs: Vec<AtomPattern>,
     pub outputs: Vec<AtomPattern>,
     pub output_multiplier: i32,
-    pub production: bool,
-    //TODO: production data here
+    //Empty, unless it's a production puzzle
+    pub chambers: Chambers,
 }
 fn parse_molecule(f: &mut impl Read) -> Result<AtomPattern> {
     let mut atoms = Vec::new();
@@ -512,7 +512,7 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
     }
     let output_multiplier = parse_int(f)?;
     let production = parse_byte(f)? != 0;
-    //TODO: if production is true, read their stuff
+    let chambers = if production {parse_chambers(f)?} else {Chambers::default()};
     let puzzle_output = FullPuzzle {
         puzzle_name,
         creator_id,
@@ -520,9 +520,40 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
         inputs,
         outputs,
         output_multiplier,
-        production,
+        chambers,
     };
     Ok(puzzle_output)
+}
+//A production puzzle's data, in omsim's layout
+fn parse_chambers(f: &mut impl Read) -> Result<Chambers> {
+    //Whether the board shrinks at the left and right, which only changes how it's drawn
+    parse_byte(f)?;
+    parse_byte(f)?;
+    let isolate = parse_byte(f)? != 0;
+    let mut chambers = Vec::new();
+    for _ in 0..parse_int(f)? {
+        let pos = parse_bytepos(f)?;
+        let name = parse_str(f)?;
+        let shape = ChamberShape::from_name(&name).ok_or(eyre!("Unknown chamber type {name:?}"))?;
+        chambers.push((pos, shape));
+    }
+    let mut conduit_starts = Vec::new();
+    for _ in 0..parse_int(f)? {
+        let start_a = parse_bytepos(f)?;
+        let start_b = parse_bytepos(f)?;
+        //The conduit's hexes, which the solution has too
+        for _ in 0..parse_int(f)? {
+            parse_bytepos(f)?;
+        }
+        conduit_starts.push((start_a, start_b));
+    }
+    //Vials (position, style and count), which are only drawn
+    for _ in 0..parse_int(f)? {
+        parse_bytepos(f)?;
+        parse_byte(f)?;
+        parse_int(f)?;
+    }
+    Ok(Chambers::new(&chambers, &conduit_starts, isolate))
 }
 //Far past any real solution. The tape is allocated out to its last instruction, so a corrupt index past this would
 //take gigabytes.
@@ -631,7 +662,7 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
     }
     arms.sort_by(|a, b| a.1.cmp(&b.1));
     let arms = arms.into_iter().map(|a| a.0).collect();
-    Ok(InitialWorld { glyphs, arms })
+    Ok(InitialWorld { glyphs, arms, chambers: puzzle.chambers.clone() })
 }
 
 #[cfg(test)]
@@ -641,7 +672,7 @@ mod tests {
     fn empty_puzzle() -> FullPuzzle {
         FullPuzzle {
             puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(),
         }
     }
 
@@ -670,6 +701,7 @@ mod tests {
         let world = World::setup_sim(&InitialWorld {
             glyphs: vec![glyph(0, GlyphType::Bonding), conduit(3), conduit(6), track],
             arms: vec![Arm::new(Pos::new(9, 0), 0, 2, ArmType::PlainArm, Tape::new(0, vec![Instr::Grab]))],
+            ..Default::default()
         }).unwrap();
         let solution = create_solution(&world, String::new(), String::new());
         //Like the game: parts other than arms have size 1, and a conduit's id is only in its own block

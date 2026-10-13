@@ -355,7 +355,8 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             ui.separator();
             add_part_menu(ui, loaded);
             ui.separator();
-            ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"));
+            ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"))
+                .on_hover_text("Lets parts overlap each other, and break production puzzles' chamber rules");
         });
         ui.horizontal(|ui| {
             //First, so the readout changing length doesn't move it

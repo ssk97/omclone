@@ -34,6 +34,8 @@ pub use polymer::*;
 mod arms;
 pub use arms::*;
 mod setup;
+mod chambers;
+pub use chambers::*;
 mod float_world;
 pub use float_world::*;
 
@@ -81,10 +83,11 @@ pub enum PartId {
     Arm(usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct InitialWorld {
     pub glyphs: Vec<Glyph>,
     pub arms: Vec<Arm>,
+    pub chambers: Chambers,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +97,7 @@ pub struct World {
     pub area_touched: FxHashSet<Pos>,
     pub glyphs: Vec<Glyph>,
     pub arms: Vec<Arm>,
+    pub chambers: Chambers,
     pub repeat_length: usize,
     pub track_maps: TrackMaps,
     pub cost: i32,

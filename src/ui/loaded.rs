@@ -71,8 +71,8 @@ pub(super) struct Loaded{
 }
 impl Loaded{
     pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup) -> Self{
-        //A solution that already overlaps can keep doing so
-        let allow_overlap = world.has_overlap();
+        //A solution that already overlaps, or breaks its chambers' rules, can keep doing so
+        let allow_overlap = world.has_overlap() || world.breaks_chamber_rules();
         //Collision checks are on, so edits that collide are caught
         Loaded{
             timeline: Timeline::new(world, true),
@@ -296,7 +296,11 @@ impl Loaded{
 impl Loaded{
     //A solution with these parts, as if just loaded, with the board's origin in the middle of the screen
     pub(super) fn for_test(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Self{
-        let world = World::setup_sim(&InitialWorld{glyphs, arms}).unwrap();
+        Self::for_test_in_chambers(glyphs, arms, Chambers::default())
+    }
+    //The same, for a production puzzle with these chambers
+    pub(super) fn for_test_in_chambers(glyphs: Vec<Glyph>, arms: Vec<Arm>, chambers: Chambers) -> Self{
+        let world = World::setup_sim(&InitialWorld{glyphs, arms, chambers}).unwrap();
         let solution = parser::create_solution(&world, String::new(), String::new());
         Loaded::new(world, solution, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
     }

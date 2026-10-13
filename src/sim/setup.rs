@@ -3,6 +3,7 @@ use super::*;
 
 impl World {
     fn initial_area(&mut self) {
+        self.area_touched.extend(self.chambers.walls.iter().copied());
         for idx in 0..self.glyphs.len() {
             //Unlike glyph_footprint, an input with several variants counts the one it's on now
             let footprint = self.glyphs[idx].footprint(self.polymers.get(&idx));
@@ -174,6 +175,7 @@ impl World {
             area_touched: Default::default(),
             glyphs: init.glyphs.clone(),
             arms: init.arms.clone(),
+            chambers: init.chambers.clone(),
             repeat_length: 0,
             track_maps: Default::default(),
             cost: 0,
@@ -262,6 +264,7 @@ impl World {
         InitialWorld {
             glyphs,
             arms: self.arms.iter().map(|a| Arm::new(a.pos, a.rot, a.len, a.arm_type, a.instruction_tape.clone())).collect(),
+            chambers: self.chambers.clone(),
         }
     }
     pub fn get_first_timestep(&self) -> u64{

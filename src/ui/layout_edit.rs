@@ -258,7 +258,7 @@ mod tests {
         Arm::new(Pos::new(x, y), 0, len, arm_type, Tape::new(0, vec![Instr::RotateClockwise]))
     }
     fn world(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> World {
-        World::setup_sim(&InitialWorld { glyphs, arms }).unwrap()
+        World::setup_sim(&InitialWorld { glyphs, arms, ..Default::default() }).unwrap()
     }
     fn edited(w: &World, edit: PartEdit) -> World {
         applied(w, LayoutEdit::Part(edit))
@@ -277,7 +277,7 @@ mod tests {
         let parsed = parser::parse_solution(&mut data.as_slice()).unwrap();
         let puzzle = parser::FullPuzzle {
             puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(),
         };
         World::setup_sim(&parser::puzzle_prep(&puzzle, &parsed).unwrap()).unwrap()
     }

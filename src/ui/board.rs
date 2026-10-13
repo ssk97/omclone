@@ -3,6 +3,7 @@ use super::*;
 
 //Moving the mouse this far (in pixels) with the button held starts a drag
 pub(super) const DRAG_THRESHOLD_PX: f32 = 4.;
+const TRACK_OUTSIDE_CHAMBERS: &str = "That would put track outside the chambers (see \"Allow overlap\")";
 //What an edit does to a part, for checking whether it's allowed right now
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum EditKind{
@@ -183,6 +184,19 @@ impl Loaded{
             _ => Ok(()),
         }
     }
+    //Refuses a part that breaks a production puzzle's rules about chambers, unless overlap is allowed
+    fn check_chambers(&self, world: &World, part: PartId) -> std::result::Result<(), String>{
+        if self.allow_overlap{
+            return Ok(());
+        }
+        if let Some(hex) = world.chamber_conflicts(part).first(){
+            return Err(format!("That would put a part outside its chamber at {:?} (see \"Allow overlap\")", (hex.x, hex.y)));
+        }
+        if !world.isolation_conflicts(part).is_empty(){
+            return Err("Inputs and outputs can't share a chamber in this puzzle (see \"Allow overlap\")".to_owned());
+        }
+        Ok(())
+    }
     //Makes the edit if it's allowed. A part it adds or renumbers is selected.
     pub(super) fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
         if matches!(edit, LayoutEdit::Part(e) if e.is_noop()){
@@ -195,6 +209,7 @@ impl Loaded{
         let world = World::setup_sim(&layout).map_err(|e| e.to_string())?;
         if let Some(part) = part{
             self.check_overlap(&world.part_overlaps(part))?;
+            self.check_chambers(&world, part)?;
         }
         self.commit_world(world);
         self.follow_renumbering(edit);
@@ -329,6 +344,10 @@ impl Loaded{
                     self.message = Some(err);
                     return;
                 }
+                if !self.allow_overlap && !self.timeline.base().outside_chambers(&[hex]).is_empty(){
+                    self.message = Some(TRACK_OUTSIDE_CHAMBERS.to_owned());
+                    return;
+                }
                 TrackStroke{path: vec![hex], added: 0, last_hex: hex, refusal: None}
             }
         };
@@ -347,10 +366,12 @@ impl Loaded{
     //Applies the track tool to a hex the stroke entered
     fn stroke_hex(&self, stroke: &mut TrackStroke, hex: Pos){
         let Some(mode) = self.tool.track_mode() else {return};
-        let blocked = mode.tool != TrackTool::Remove && !self.allow_overlap && !stroke.path.contains(&hex)
-            && !self.timeline.base().track_overlaps(mode.glyph, &[hex]).is_empty();
-        let result = if blocked{
+        let checked = mode.tool != TrackTool::Remove && !self.allow_overlap && !stroke.path.contains(&hex);
+        let base = self.timeline.base();
+        let result = if checked && !base.track_overlaps(mode.glyph, &[hex]).is_empty(){
             Err("That would overlap another part (see \"Allow overlap\")")
+        } else if checked && !base.outside_chambers(&[hex]).is_empty(){
+            Err(TRACK_OUTSIDE_CHAMBERS)
         } else {
             stroke_hex(&mut stroke.path, &mut stroke.added, mode.tool, hex, self.allow_gaps, self.allow_overlap)
         };
@@ -620,7 +641,10 @@ impl Loaded{
         let overlaps = match &world{
             Ok(world) => {
                 float_world.generate_static(world);
-                world.part_overlaps(part)
+                let mut overlaps = world.part_overlaps(part);
+                overlaps.extend(world.chamber_conflicts(part));
+                overlaps.extend(world.isolation_conflicts(part));
+                overlaps
             }
             Err(_) => landing.clone(),
         };
@@ -677,7 +701,7 @@ impl Loaded{
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
             let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
-                area: &world.area_touched, float_world: &self.float_world, hidden: None};
+                walls: &world.chambers.walls, area: &world.area_touched, float_world: &self.float_world, hidden: None};
             render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
             render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
             if let Some(part) = self.highlighted_part(){
@@ -700,8 +724,8 @@ impl Loaded{
         };
         //Tracks are drawn as they are now, except a track being changed, which is drawn with the preview
         let tracks = self.scene_tracks.as_ref().map_or(&self.timeline.base().track_maps, |(_, t)| t);
-        let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, area: &world.area_touched,
-            float_world, hidden: Some(part)};
+        let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, walls: &world.chambers.walls,
+            area: &world.area_touched, float_world, hidden: Some(part)};
         render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
         match part{
             PartId::Glyph(i) => render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[i],
@@ -760,6 +784,48 @@ mod tests {
         assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
         assert!(loaded.dirty && loaded.history.can_undo());
+    }
+
+    fn small_chamber() -> Chambers {
+        Chambers::new(&[(Pos::new(0, 0), ChamberShape::Small)], &[], false)
+    }
+
+    #[test]
+    fn parts_stay_in_their_chambers_unless_overlap_is_allowed() {
+        let mut loaded = Loaded::for_test_in_chambers(vec![bonder(0, 0)], vec![], small_chamber());
+        assert!(!loaded.allow_overlap);
+        //One hex right puts the bonder's second hex on the wall at (2,0)
+        let drag_right = |loaded: &mut Loaded| {
+            press(loaded, 0, 0, KeyMods::default());
+            move_to(loaded, 1, 0);
+            loaded.release();
+        };
+        drag_right(&mut loaded);
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(0, 0));
+        assert!(loaded.message.as_ref().is_some_and(|m| m.contains("outside its chamber at (2, 0)")), "{:?}", loaded.message);
+        loaded.allow_overlap = true;
+        drag_right(&mut loaded);
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(1, 0));
+    }
+
+    #[test]
+    fn loading_a_part_outside_its_chamber_allows_overlap() {
+        assert!(!Loaded::for_test_in_chambers(vec![bonder(0, 0)], vec![], small_chamber()).allow_overlap);
+        assert!(Loaded::for_test_in_chambers(vec![bonder(1, 0)], vec![], small_chamber()).allow_overlap);
+    }
+
+    #[test]
+    fn track_stays_in_the_chambers() {
+        let mut loaded = Loaded::for_test_in_chambers(vec![], vec![], small_chamber());
+        loaded.start_new_track();
+        press(&mut loaded, 2, 0, KeyMods::default());
+        assert!(loaded.tool.stroke().is_none(), "it can't start on the wall");
+        assert_eq!(loaded.message.as_deref(), Some(TRACK_OUTSIDE_CHAMBERS));
+        //Drawn from inside, it stops at the wall
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 3, 0);
+        loaded.release();
+        assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0)]);
     }
 
     #[test]

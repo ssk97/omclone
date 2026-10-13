@@ -104,6 +104,7 @@ const BOND_YELLOW_ID:usize = 6;
 const ORIGIN_COLOR: Color = [0.3, 0.3, 0.3, 1.];
 const WHITE: Color = [1., 1., 1., 1.];
 const ARM_COLOR: Color = [0., 0., 0., 1.];
+const WALL_COLOR: Color = [0.42, 0.38, 0.33, 1.];
 //How opaque the copy of a dragged arm in its starting pose is
 const ARM_START_OPACITY: f32 = 0.35;
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
@@ -270,7 +271,8 @@ impl CameraSetup{
             let (base, reach) = (pos_to_xy(arm.pos), XYVec::repeat(arm.len as f32*2.));
             [base - reach, base + reach]
         });
-        let mut points: Vec<XYPos> = glyph_hexes.chain(arm_reach).collect();
+        let walls = world.chambers.walls.iter().copied().map(pos_to_xy);
+        let mut points: Vec<XYPos> = glyph_hexes.chain(arm_reach).chain(walls).collect();
         //With no parts, the bounds below would be infinite
         if points.is_empty(){
             points.push(XYPos::origin());
@@ -545,6 +547,7 @@ impl RenderDataBase {
             }));
             ctx.draw(0, 6, 1);
         }
+        self.draw_hex_fills(ctx, camera, scene.walls, WALL_COLOR);
         //Mark the origin, under any part there
         self.font.set_pipeline(ctx);
         self.font.render_text_centered(ctx, &ORIGIN_MARK.to_string(), ORIGIN_COLOR, pos_to_xy(Pos::new(0, 0)),
@@ -671,6 +674,8 @@ pub struct Scene<'a>{
     pub glyphs: &'a [Glyph],
     pub tracks: &'a TrackMaps,
     pub polymers: &'a FxHashMap<usize, Polymer>,
+    //Chamber walls, in a production puzzle
+    pub walls: &'a [Pos],
     pub area: &'a FxHashSet<Pos>,
     pub float_world: &'a FloatWorld,
     pub hidden: Option<PartId>,

@@ -35,6 +35,8 @@ struct TestResults{
     expected_collisions: usize,
     stat_mismatches: usize,
     area_mismatches: usize,
+    //Reported, not failed: solutions edited outside the game can break them
+    chamber_rule_breaks: usize,
     sim_errors: usize,
     setup_errors: usize,
     panics: usize,
@@ -81,6 +83,10 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         }
         world = rebuilt;
     }
+    if world.breaks_chamber_rules() {
+        println!("Breaks the chamber rules: {:?}", fpath);
+        results.chamber_rule_breaks += 1;
+    }
     //Stop a bit after the expected completion time, since running longer can't produce a match
     let first_timestep = world.timestep;
     let max_timestep = match &sol.stats {
@@ -108,8 +114,7 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
     }
     let mut newstats = world.get_stats();
     let oldstats = sol.stats.unwrap();
-    let area_checked = check_area && !puzzle.production;
-    if !area_checked {newstats.area = oldstats.area};
+    if !check_area {newstats.area = oldstats.area};
     let stats_ok = newstats.cycles == oldstats.cycles && newstats.cost == oldstats.cost
         && newstats.instructions == oldstats.instructions;
     if !stats_ok {
@@ -202,7 +207,7 @@ mod molecule_tests {
         Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions))
     }
     fn run(glyphs: Vec<Glyph>, arms: Vec<Arm>, steps: usize) -> World {
-        let mut world = World::setup_sim(&InitialWorld { glyphs, arms }).unwrap();
+        let mut world = World::setup_sim(&InitialWorld { glyphs, arms, ..Default::default() }).unwrap();
         let mut motions = WorldStepInfo::new();
         for _ in 0..steps {
             world.run_step(false, &mut motions).unwrap();
@@ -355,7 +360,7 @@ mod overlap_tests {
         Arm::new(Pos::new(x, y), rot, 1, ArmType::PlainArm, Tape::new(0, instructions))
     }
     fn world(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> World {
-        World::setup_sim(&InitialWorld { glyphs, arms }).unwrap()
+        World::setup_sim(&InitialWorld { glyphs, arms, ..Default::default() }).unwrap()
     }
     //Runs whole steps, checking collisions if `collide`
     fn run(world: &mut World, steps: usize, collide: bool) -> SimResult<()> {
@@ -723,7 +728,7 @@ mod polymer_tests {
         }
     }
     fn polymer_world(glyphs: Vec<Glyph>) -> World {
-        World::setup_sim(&InitialWorld { glyphs, arms: vec![] }).unwrap()
+        World::setup_sim(&InitialWorld { glyphs, ..Default::default() }).unwrap()
     }
     fn displayed(world: &World) -> Vec<Atom> {
         world.polymers.values().next().expect("no repeating output").display.clone()
@@ -906,7 +911,7 @@ mod regression_tests {
         Glyph { pos: Pos::new(x, y), rot, glyph_type }
     }
     fn run(glyphs: Vec<Glyph>, arms: Vec<Arm>, steps: usize) -> World {
-        let mut world = World::setup_sim(&InitialWorld { glyphs, arms }).unwrap();
+        let mut world = World::setup_sim(&InitialWorld { glyphs, arms, ..Default::default() }).unwrap();
         let mut motions = WorldStepInfo::new();
         for _ in 0..steps {
             world.run_step(false, &mut motions).unwrap();
@@ -919,7 +924,7 @@ mod regression_tests {
     fn empty_puzzle() -> FullPuzzle {
         FullPuzzle {
             puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, production: false,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(),
         }
     }
     //Saves the world as a solution file and loads it back
@@ -1134,7 +1139,7 @@ mod float_world_tests {
     //An arm's grip a quarter of the way through `step` (counting from 0) of running `instructions`
     fn grip_during(instructions: Vec<Instr>, step: usize) -> f32 {
         let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
-        let mut world = World::setup_sim(&InitialWorld { glyphs: vec![], arms: vec![arm] }).unwrap();
+        let mut world = World::setup_sim(&InitialWorld { arms: vec![arm], ..Default::default() }).unwrap();
         let mut motion = WorldStepInfo::new();
         for _ in 0..step {
             world.run_step(false, &mut motion).unwrap();
@@ -1171,7 +1176,7 @@ mod part_tests {
         Arm::new(Pos::new(x, y), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]))
     }
     fn world(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> World {
-        World::setup_sim(&InitialWorld { glyphs, arms }).unwrap()
+        World::setup_sim(&InitialWorld { glyphs, arms, ..Default::default() }).unwrap()
     }
     fn track(x: i32, y: i32, path: &[(i32, i32)]) -> Glyph {
         glyph(x, y, 0, GlyphType::Track(path.iter().map(|&(a, b)| Pos::new(a, b)).collect()))
@@ -1362,7 +1367,7 @@ mod track_tests {
     fn normalized(tracks: &[&[(i32, i32)]], arm_pos: (i32, i32), instructions: Vec<Instr>) -> Vec<Instr> {
         let arm = Arm::new(Pos::new(arm_pos.0, arm_pos.1), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
         let glyphs = tracks.iter().map(|t| track(t)).collect();
-        let world = World::setup_sim(&InitialWorld { glyphs, arms: vec![arm] }).unwrap();
+        let world = World::setup_sim(&InitialWorld { glyphs, arms: vec![arm], ..Default::default() }).unwrap();
         world.arms[0].instruction_tape.instructions.clone()
     }
 
@@ -1432,7 +1437,7 @@ mod track_tests {
             //Stops for good once it halts, so its tape doesn't loop
             arm(5, 5, ArmType::DoubleArm, 3, vec![RotateClockwise, Halt, RotateClockwise]),
         ];
-        let mut world = World::setup_sim(&InitialWorld { glyphs: vec![track(&[(0, 0), (1, 0), (2, 0)])], arms }).unwrap();
+        let mut world = World::setup_sim(&InitialWorld { glyphs: vec![track(&[(0, 0), (1, 0), (2, 0)])], arms, ..Default::default() }).unwrap();
         //Longer than the tapes, so they loop after a few empty steps
         world.set_repeat_length(9);
         let start = world.layout().arms;
@@ -1469,7 +1474,7 @@ mod timeline_tests {
         ];
         let tape = [Grab, RotateCounterClockwise, Drop, RotateClockwise].repeat(repeats);
         let arms = vec![Arm::new(Pos::new(-1, 0), 0, 1, ArmType::PlainArm, Tape::new(0, tape))];
-        InitialWorld { glyphs, arms }
+        InitialWorld { glyphs, arms, ..Default::default() }
     }
     fn straight(init: &InitialWorld, steps: usize) -> World {
         let mut world = World::setup_sim(init).unwrap();
