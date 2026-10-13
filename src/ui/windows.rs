@@ -813,8 +813,9 @@ pub(super) fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut Pa
     do_loading
 }
 
-//The Part window as the app's frames see it: fields typed in, clicks, and glyphs dragged in the list of parts
-#[cfg(all(test, feature = "editor_ui"))]
+//The Part window as the app's frames see it: fields typed in, clicks, and glyphs dragged in the list of parts.
+//Debug builds only: the tests find widgets by type and label, which egui records only with debug assertions on.
+#[cfg(all(test, feature = "editor_ui", debug_assertions))]
 mod tests {
     use super::*;
     use egui::{Event, Pos2, RawInput, WidgetType};
