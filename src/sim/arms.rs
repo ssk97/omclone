@@ -135,6 +135,12 @@ impl World {
                         let current = self.atoms.visible(grab_pos)
                             .filter(|&key| !self.atoms.atom_map[key].immutable_wheel);
                         arm.atoms_grabbed[r as usize] = current.unwrap_or(AtomKey::null());
+                        if let Some(key) = current {
+                            let atom_type = self.atoms.type_of(&self.atoms.atom_map[key]) as usize;
+                            if let Some(count) = atom_type.checked_sub(1).and_then(|i| self.atom_grabs.get_mut(i)) {
+                                *count = count.saturating_add(1);
+                            }
+                        }
                     }
                 }
                 STILL

@@ -31,7 +31,15 @@ pub(super) struct Loaded{
     //Opened by each crash, and closable until the next
     pub(super) crash_window_open: bool,
     pub(super) solution: parser::FullSolution,
+    //For checking the solution against the rules omsim applies when loading it
+    puzzle: parser::FullPuzzle,
     pub(super) message: Option<String>,
+    //What loading changed from the file, until Save writes the change. Only the editor shows these.
+    #[cfg_attr(not(feature = "editor_ui"), allow(dead_code))]
+    pub(super) load_notes: Vec<String>,
+    //What omsim would reject the solution for, as Save would write it
+    #[cfg_attr(not(feature = "editor_ui"), allow(dead_code))]
+    pub(super) rule_notes: Vec<String>,
     //The solution changed since it was loaded or saved
     pub(super) dirty: bool,
     //It changed since the emergency save was last updated (see recovery)
@@ -73,18 +81,23 @@ pub(super) struct Loaded{
     pub(super) numbering_version: u64,
 }
 impl Loaded{
-    pub(super) fn new(world: World, solution: parser::FullSolution, max_timestep: usize, camera: CameraSetup) -> Self{
+    pub(super) fn new(world: World, solution: parser::FullSolution, puzzle: parser::FullPuzzle, max_timestep: usize,
+        camera: CameraSetup) -> Self
+    {
         //A solution that already overlaps, or breaks its chambers' rules, can keep doing so
         let allow_overlap = world.has_overlap() || world.breaks_chamber_rules();
+        let load_notes = rules::adjustments(&solution).iter().map(|a| a.to_string()).collect();
         //Collision checks are on, so edits that collide are caught
-        Loaded{
+        let mut loaded = Loaded{
             timeline: Timeline::new(world, true),
             float_world: FloatWorld::new(),
 
-            max_timestep,camera,solution,
+            max_timestep,camera,solution,puzzle,
             camera_window_open: false,
             crash_window_open: false,
             message: None,
+            load_notes,
+            rule_notes: Vec::new(),
             dirty: false,
             backup_stale: false,
 
@@ -111,7 +124,13 @@ impl Loaded{
             waiting_input: Vec::new(),
             history: UndoHistory::new(),
             numbering_version: 0,
-        }
+        };
+        loaded.check_rules();
+        loaded
+    }
+    fn check_rules(&mut self){
+        let solution = parser::create_solution(self.timeline.base(), String::new(), String::new());
+        self.rule_notes = rules::rejections(&self.puzzle, &solution).iter().map(|r| r.note()).collect();
     }
     //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
     pub(super) fn commit_world(&mut self, mut world: World){
@@ -132,6 +151,7 @@ impl Loaded{
     fn mark_changed(&mut self){
         self.dirty = true;
         self.backup_stale = true;
+        self.check_rules();
     }
     //The solution as Save writes it
     pub(super) fn solution_bytes(&self) -> Result<Vec<u8>>{
@@ -304,9 +324,11 @@ impl Loaded{
     }
     //The same, for a production puzzle with these chambers
     pub(super) fn for_test_in_chambers(glyphs: Vec<Glyph>, arms: Vec<Arm>, chambers: Chambers) -> Self{
-        let world = World::setup_sim(&InitialWorld{glyphs, arms, chambers}).unwrap();
+        let world = World::setup_sim(&InitialWorld{glyphs, arms, chambers: chambers.clone()}).unwrap();
         let solution = parser::create_solution(&world, String::new(), String::new());
-        Loaded::new(world, solution, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
+        let puzzle = parser::FullPuzzle{puzzle_name: String::new(), creator_id: 0, allowed_bitfield: u64::MAX,
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers, conduits: vec![]};
+        Loaded::new(world, solution, puzzle, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
     }
     //The pixel at a hex's center, on a screen of size TEST_SCREEN
     pub(super) fn test_px(&self, x: i32, y: i32) -> (f32, f32){

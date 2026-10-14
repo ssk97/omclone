@@ -1,4 +1,4 @@
-use omclone::{parser, sim, timeline};
+use omclone::{parser, rules, sim, timeline};
 
 mod render_library;
 mod render_glyphs;

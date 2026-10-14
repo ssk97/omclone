@@ -48,8 +48,6 @@ impl Instr {
             b'C' => Some(Repeat),
             b'X' => Some(Reset),
             b'O' => Some(Noop),
-            //Found in some solution files; omsim treats it as a blank cell, the same as a noop
-            b'I' => Some(Noop),
             b'B' => Some(Halt),
             b' ' => Some(Empty),
             _ => None,

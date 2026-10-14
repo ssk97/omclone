@@ -16,6 +16,10 @@ name="omclone"
 required-features = ["display_ui"]
 path = "src/main.rs"
 
+#The omsim-style verifier library (see README)
+[workspace]
+members = ["verify"]
+
 [profile.dev]
 opt-level = 3
 [profile.dev.package."*"]
@@ -24,6 +28,11 @@ opt-level = 3
 [profile.release]
 opt-level = "s"
 lto = true
+
+#For the native verifier library, which is better fast than small
+[profile.verify]
+inherits = "release"
+opt-level = 3
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 sapp-jsutils = "0.1.5"

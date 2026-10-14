@@ -1,5 +1,5 @@
 use miniquad::*;
-use crate::{sim::*, parser, render_sim::*, render_library::{Color, GFXPos}, timeline::Timeline};
+use crate::{sim::*, parser, rules, render_sim::*, render_library::{Color, GFXPos}, timeline::Timeline};
 use smallvec::{SmallVec, smallvec};
 use std::{io::BufReader, io::prelude::*, path::PathBuf};
 
@@ -97,7 +97,7 @@ impl MyMiniquadApp {
         let max_timestep = last_start + world.repeat_length*2+100;
 
         let camera = CameraSetup::frame_center(&world, logical_screen_size());
-        self.app_state = Loaded(Loaded::new(world, solution, max_timestep, camera));
+        self.app_state = Loaded(Loaded::new(world, solution, puzzle, max_timestep, camera));
         //Unsaved changes to the solution it replaced were discarded
         recovery::clear();
         Ok(())

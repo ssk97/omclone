@@ -51,6 +51,11 @@ Timeline (the "World loaded" window)
 - Collide/Area: Show and Hide check collisions and count area (Show also shades it). Off skips both, which is
   faster.
 - A crash is circled in red on the board, and the Crash window's Show button centers the view on it.
+
+File info window
+- It notes anything omsim (and so the leaderboard) would reject the solution for, such as a part or instruction the
+  puzzle disables, and what loading changed from the file (an out-of-range arm length, an unknown part or
+  instruction, two instructions at one timestep), which Save writes as loaded.
 ----
 Enable feature "color-eyre" for more detailed error reports. Load and simulation errors are shown in the app either way.
 
@@ -61,6 +66,31 @@ Set OMCLONE_CHECK_AREA=1 to check area too (much slower).
 
 The puzzle-specific variant checkers ("hab_checker" and "cx_checker") have been removed.
 See CHECKERS.md for how they worked and what adding a new one would take.
+
+## Verifier library
+The "verify" folder builds a library with omsim's verifier API (omsim's verifier.h), so it can be loaded in place of
+omsim's libverify, measuring with omclone's sim:
+- Native: "cargo build -p omclone-verify --profile verify" makes target/verify/libverify.so on Linux, or verify.dll on
+  Windows (omsim's is named libverify.dll there, so rename it).
+- Web: "cargo build -p omclone-verify --release --target wasm32-unknown-unknown" makes
+  target/wasm32-unknown-unknown/release/verify.wasm. Like omsim's libverify.wasm, it exports the functions plus
+  malloc and free, but it needs no imports.
+
+It measures every metric omsim does at victory (@V), including "product N ..." and "cycle N ...", and supports the
+wrong-output checks. It rejects what omsim rejects when loading a solution, with omsim's messages. Not supported:
+- Anything about a solution running forever (@∞: throughput, "per repetition ...", "steady state ...", the visual loop
+  and the output intervals), since omclone has no loop detection. These return -1 with a "metric" error.
+- omsim's limit on collision checks: only the cycle limit (150,000 by default) bounds a run.
+
+Results differ from omsim's where omclone follows the game (see OVERLAP.md), and where omsim treats extending a
+non-piston arm or moving an arm off track as a crash. Crash messages are omclone's own. "number of atoms" counts every
+atom, where omsim counts one per hex. Like omsim, the library doesn't check its arguments: a null verifier stops the
+process (only verifier_disable_limits accepts one).
+
+verify/compare.py checks the library through its C API: "diff" compares every @V metric with omsim's library over a
+folder of solutions, and "leaderboard" checks the leaderboard's recorded scores (see its usage text). Build omsim's
+library with "make libverify.so", or on Windows (with MinGW) "gcc -O2 -std=c11 -shared -o libverify.dll collision.c
+decode.c parse.c sim.c steady-state.c verifier.c -lm".
 
 ----
 

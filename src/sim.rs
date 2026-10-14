@@ -104,6 +104,13 @@ pub struct World {
     //The variants of each input with several, as they were before setup spawned the first one (which moved
     //it on to the next), so layout() can restore them. Keyed by glyph index.
     input_variants: Vec<(usize, AtomPattern)>,
+    //How many atoms of each type arms have grabbed, indexed by the type's number in a puzzle file minus 1
+    pub atom_grabs: [u32; 16],
+    //Outputs that crash on a molecule of their product's shape with the wrong atoms or bonds, an option of omsim's
+    //verifier for puzzles whose products vary
+    pub wrong_output_checks: WrongOutputChecks,
+    //The output glyph that crashed that way
+    pub wrong_output: Option<usize>,
 }
 
 //A grabbed atom and the movement its arm gives it this timestep
@@ -318,6 +325,26 @@ impl World {
         }
         false
     }
+    //omsim's "overlap" metric: how many times a part covers a hex something already covers, where chamber walls
+    //come first and don't count against each other, and an arm's base may sit on track. Each extra time track
+    //covers a hex counts too.
+    pub fn overlap_count(&self) -> u64 {
+        let arm_bases: FxHashSet<Pos> = self.arms.iter().map(|a| a.pos).collect();
+        let mut track_hexes = 0;
+        let mut distinct_track = FxHashSet::default();
+        for glyph in self.glyphs.iter().filter(|g| g.is_track()) {
+            for hex in glyph.footprint(None) {
+                track_hexes += 1;
+                distinct_track.insert(hex);
+            }
+        }
+        let glyphs = (0..self.glyphs.len()).filter(|&i| !self.glyphs[i].is_track()).flat_map(|i| self.glyph_footprint(i));
+        let arms = self.arms.iter().map(|a| a.pos);
+        let track = distinct_track.iter().copied().filter(|hex| !arm_bases.contains(hex));
+        let mut covered: FxHashSet<Pos> = self.chambers.walls.iter().copied().collect();
+        let repeats = glyphs.chain(arms).chain(track).filter(|&hex| !covered.insert(hex)).count();
+        (repeats + track_hexes - distinct_track.len()) as u64
+    }
 
     //mark_area enables area tracking and collision checks
     pub fn run_step(&mut self, mark_area: bool, motion: &mut WorldStepInfo) -> SimResult<()> {
@@ -342,7 +369,7 @@ impl World {
         self.claim_conduits(motion);
         self.process_inputs();
         self.process_glyphs(motion, true)?;
-        self.process_outputs(motion);
+        self.process_outputs(motion)?;
         //Atoms can only share a hex until motion
         if let Some(pos) = self.atoms.any_stack() {
             return Err(sim_error_pos("Overlapping atoms before motion!", pos));
@@ -379,7 +406,7 @@ impl World {
                 //does nothing if atomkey is null
             }
         }
-        self.process_outputs(motion);
+        self.process_outputs(motion)?;
         motion.clear();
         //Nothing is on its way through a conduit between steps
         self.atoms.drop_lone_links();

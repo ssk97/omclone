@@ -154,7 +154,8 @@ let stats = world.get_stats();
      so the UI doesn't freeze.
    - **Standalone web page, as before.** Restore the `bindgen` dependencies and build with `wasm-pack`. The
      package's one `[lib]` is now the `omclone` library (`src/lib.rs`), so make the checker its own small
-     crate (a workspace member, say) with a `cdylib` target that depends on `omclone`.
+     crate with a `cdylib` target that depends on `omclone`: a workspace member like `verify/`, the omsim-style
+     verifier library, which builds for wasm too.
 3. **The puzzle file.** Either load it at runtime, or compile it in with `include_bytes!` and force-add it
    (`git add -f`), since `*.puzzle` is gitignored.
 4. **Results to report.** Show per-variant pass/fail with the failing step and error message, and the

@@ -1,7 +1,10 @@
-//The simulation and the file formats, without any UI. The app and the tests share them.
+//The simulation, the file formats and an omsim-style verifier, without any UI. The app, the verify library and the
+//tests share them.
 pub mod parser;
+pub mod rules;
 pub mod sim;
 pub mod timeline;
+pub mod verifier;
 #[cfg(test)]
 mod test;
 

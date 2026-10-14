@@ -1,0 +1,12 @@
+[package]
+name = "omclone-verify"
+version = "0.1.0"
+edition = "2021"
+
+#Named like omsim's library: libverify.so on Linux, verify.dll on Windows (omsim's is libverify.dll there)
+[lib]
+name = "verify"
+crate-type = ["cdylib"]
+
+[dependencies]
+omclone = { path = "..", default-features = false }

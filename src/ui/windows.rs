@@ -224,6 +224,7 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
                         //The name as saved
                         loaded.solution.solution_name = loaded::saved_solution_name(&loaded.solution.solution_name);
                         loaded.dirty = false;
+                        loaded.load_notes.clear();
                         recovery::clear();
                         String::from("Saved!")
                     }
@@ -238,9 +239,23 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
         if loaded.dirty{
             ui.weak("Unsaved changes");
         }
+        file_notes(ui, loaded);
         ui.separator();
         solution_stats(ui, loaded);
     });
+}
+//What loading changed, and what omsim would reject. A long list ends with how many more there are.
+#[cfg(feature = "editor_ui")]
+fn file_notes(ui: &mut egui::Ui, loaded: &Loaded){
+    const SHOWN: usize = 4;
+    let notes: Vec<&String> = loaded.load_notes.iter().chain(&loaded.rule_notes).collect();
+    let color = ui.visuals().warn_fg_color;
+    for note in notes.iter().take(SHOWN){
+        ui.colored_label(color, note.as_str());
+    }
+    if notes.len() > SHOWN{
+        ui.colored_label(color, format!("…and {} more", notes.len() - SHOWN));
+    }
 }
 //The solution's stats as the loaded file had them, and as they are now. Cycles and area are only known once the
 //timeline has run past the last output.

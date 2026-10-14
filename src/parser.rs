@@ -142,7 +142,13 @@ pub struct FullSolution {
     pub puzzle_name: String,
     pub solution_name: String,
     pub stats: Option<SolutionStats>,
-    part_list: Vec<Part>,
+    pub(crate) part_list: Vec<Part>,
+}
+impl FullSolution {
+    //The parts as the file lists them
+    pub fn parts(&self) -> &[Part] {
+        &self.part_list
+    }
 }
 
 fn parse_stats(f: &mut impl Read) -> Result<Option<SolutionStats>> {
@@ -180,8 +186,8 @@ fn write_stats(f: &mut impl Write, stats: &Option<SolutionStats>) -> Result<()> 
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum PartType {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PartType {
     TGlyph(GlyphType),
     TArm(ArmType),
     TTrack,
@@ -189,23 +195,46 @@ enum PartType {
     TOutput,
     TOutputRep,
     TConduit,
+    //A name omclone doesn't know. Like omsim, loading skips it.
+    TUnknown(String),
 }
 use PartType::*;
-struct Part {
-    part_type: PartType,
-    pos: Pos,
-    arm_size: i32,
-    rot: i32,
-    input_output_index: i32,
-    instructions: Vec<(i32, Instr)>,
-    tracks: Option<Vec<Pos>>,
-    arm_index: i32,
-    conduit: Option<(i32, Vec<Pos>)>,
+//A part as the solution file has it
+#[derive(Debug, Clone)]
+pub struct Part {
+    pub part_type: PartType,
+    pub pos: Pos,
+    pub arm_size: i32,
+    pub rot: i32,
+    pub input_output_index: i32,
+    //Each instruction's index and byte. Bytes that aren't instructions do nothing (see file_instruction).
+    pub instructions: Vec<(i32, u8)>,
+    pub tracks: Option<Vec<Pos>>,
+    pub arm_index: i32,
+    pub conduit: Option<(i32, Vec<Pos>)>,
 }
-fn name_to_part_type(name: String) -> Result<PartType> {
+impl Part {
+    //The part's name in the file. None only for a TGlyph of a glyph type with its own part type (an input, output,
+    //track or conduit), which nothing makes.
+    pub fn name(&self) -> Option<&str> {
+        match &self.part_type {
+            TUnknown(name) => Some(name),
+            known => part_type_to_name(known).ok(),
+        }
+    }
+}
+//What an instruction byte does when loaded. Like omsim, a byte that isn't an instruction (or a blank) takes a cycle
+//and does nothing, the same as a noop.
+pub fn file_instruction(byte: u8) -> Instr {
+    match Instr::from_byte(byte) {
+        Some(Instr::Empty) | None => Instr::Noop,
+        Some(instr) => instr,
+    }
+}
+fn name_to_part_type(name: String) -> PartType {
     use ArmType::*;
     use GlyphType::*;
-    Ok(match name.as_str() {
+    match name.as_str() {
         "glyph-calcification"  => TGlyph(Calcification),
         "glyph-life-and-death" => TGlyph(Animismus),
         "glyph-projection"     => TGlyph(Projection),
@@ -234,8 +263,8 @@ fn name_to_part_type(name: String) -> Result<PartType> {
         "out-std"              => TOutput,
         "out-rep"              => TOutputRep,
         "pipe"                 => TConduit,
-        _                      => return Err(eyre!("Arm/Glyph {:?} not recognized", name)),
-    })
+        _                      => TUnknown(name),
+    }
 }
 fn part_type_to_name(part: &PartType) -> Result<&'static str> {
     use ArmType::*;
@@ -284,7 +313,7 @@ pub fn parse_solution(f: &mut impl Read) -> Result<FullSolution> {
         part_list: Vec::new(),
     };
     for _ in 0..parse_int(f)? {
-        let part_type = name_to_part_type(parse_str(f)?)?;
+        let part_type = name_to_part_type(parse_str(f)?);
         expect_byte(f, 1)?;
         let pos = parse_pos(f)?;
         let arm_size = parse_int(f)?;
@@ -294,8 +323,7 @@ pub fn parse_solution(f: &mut impl Read) -> Result<FullSolution> {
         let mut instructions = Vec::new();
         for _ in 0..instruction_count {
             let instr_pos = parse_int(f)?;
-            let action = parse_byte(f)?;
-            instructions.push((instr_pos, Instr::from_byte(action).ok_or(eyre!("invalid instruction"))?));
+            instructions.push((instr_pos, parse_byte(f)?));
         }
         let tracks = if part_type == PartType::TTrack {
             let track_count = parse_int(f)?;
@@ -399,13 +427,13 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
         let mut step = tape.first as i32;
         for &instr in &tape.instructions{
             if instr != Instr::Empty{
-                instructions.push((step,instr));
+                instructions.push((step,instr.to_byte()));
             }
             step += 1;
         }
         if let Some((noop_id, noop_step)) = noop {
             if noop_id == id {
-                instructions.push((noop_step as i32, Instr::Noop));
+                instructions.push((noop_step as i32, Instr::Noop.to_byte()));
             }
         }
         let tracks = None;
@@ -432,9 +460,9 @@ pub fn write_solution(f: &mut impl Write, sol: &FullSolution) -> Result<()>{
         write_int(f, part.rot)?;
         write_int(f, part.input_output_index)?;
         write_int(f, part.instructions.len() as i32)?;
-        for (instr_pos, instr) in &part.instructions {
-            write_int(f, *instr_pos)?;
-            write_byte(f, instr.to_byte())?;
+        for &(instr_pos, byte) in &part.instructions {
+            write_int(f, instr_pos)?;
+            write_byte(f, byte)?;
         }
         if let Some(tracks) = &part.tracks {
             ensure!(part.part_type == PartType::TTrack, "Tracks on non-track piece");
@@ -465,6 +493,7 @@ pub struct FullPuzzle {
     pub output_multiplier: i32,
     //Empty, unless it's a production puzzle
     pub chambers: Chambers,
+    pub conduits: Vec<PuzzleConduit>,
 }
 fn parse_molecule(f: &mut impl Read) -> Result<AtomPattern> {
     let mut atoms = Vec::new();
@@ -512,7 +541,7 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
     }
     let output_multiplier = parse_int(f)?;
     let production = parse_byte(f)? != 0;
-    let chambers = if production {parse_chambers(f)?} else {Chambers::default()};
+    let (chambers, conduits) = if production {parse_chambers(f)?} else {Default::default()};
     let puzzle_output = FullPuzzle {
         puzzle_name,
         creator_id,
@@ -521,11 +550,12 @@ pub fn parse_puzzle(f: &mut impl Read) -> Result<FullPuzzle> {
         outputs,
         output_multiplier,
         chambers,
+        conduits,
     };
     Ok(puzzle_output)
 }
 //A production puzzle's data, in omsim's layout
-fn parse_chambers(f: &mut impl Read) -> Result<Chambers> {
+fn parse_chambers(f: &mut impl Read) -> Result<(Chambers, Vec<PuzzleConduit>)> {
     //Whether the board shrinks at the left and right, which only changes how it's drawn
     parse_byte(f)?;
     parse_byte(f)?;
@@ -537,15 +567,15 @@ fn parse_chambers(f: &mut impl Read) -> Result<Chambers> {
         let shape = ChamberShape::from_name(&name).ok_or(eyre!("Unknown chamber type {name:?}"))?;
         chambers.push((pos, shape));
     }
-    let mut conduit_starts = Vec::new();
+    let mut conduits = Vec::new();
     for _ in 0..parse_int(f)? {
         let start_a = parse_bytepos(f)?;
         let start_b = parse_bytepos(f)?;
-        //The conduit's hexes, which the solution has too
+        let mut hexes = Vec::new();
         for _ in 0..parse_int(f)? {
-            parse_bytepos(f)?;
+            hexes.push(parse_bytepos(f)?);
         }
-        conduit_starts.push((start_a, start_b));
+        conduits.push(PuzzleConduit{start_a, start_b, hexes});
     }
     //Vials (position, style and count), which are only drawn
     for _ in 0..parse_int(f)? {
@@ -553,17 +583,18 @@ fn parse_chambers(f: &mut impl Read) -> Result<Chambers> {
         parse_byte(f)?;
         parse_int(f)?;
     }
-    Ok(Chambers::new(&chambers, &conduit_starts, isolate))
+    let conduit_starts: Vec<(Pos, Pos)> = conduits.iter().map(|c| (c.start_a, c.start_b)).collect();
+    Ok((Chambers::new(&chambers, &conduit_starts, isolate), conduits))
 }
 //Far past any real solution. The tape is allocated out to its last instruction, so a corrupt index past this would
 //take gigabytes.
 const MAX_INSTRUCTION_INDEX: usize = 1 << 24;
 //`offset` is added to every instruction index; it must make them all non-negative
-fn process_instructions(input: &[(i32, Instr)], offset: i64) -> Result<Tape> {
+fn process_instructions(input: &[(i32, u8)], offset: i64) -> Result<Tape> {
     let mut first = usize::MAX; //A giant value
     let mut instructions = Vec::new();
-    for &(pos, instr) in input {
-        ensure!(instr != Instr::Empty, "Empty instruction found in file!");
+    for &(pos, byte) in input {
+        let instr = file_instruction(byte);
         let pos = usize::try_from(pos as i64 + offset)?;
         ensure!(pos <= MAX_INSTRUCTION_INDEX, "Instruction at timestep {pos} is past the limit of {MAX_INSTRUCTION_INDEX}");
         if first > pos {
@@ -589,12 +620,15 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
     let mut arms = Vec::new();
     //Like omsim, if any instruction index is negative, every tape is shifted together so the
     //earliest instruction is at 0 (only the timing between arms matters)
-    let earliest_instruction = soln.part_list.iter()
+    let earliest_instruction = soln.part_list.iter().filter(|p| matches!(p.part_type, TArm(_)))
         .flat_map(|p| p.instructions.iter().map(|&(pos, _)| pos))
         .min().unwrap_or(0);
     let instruction_offset = -(earliest_instruction.min(0) as i64);
     let bounds = -MAX_COORD..=MAX_COORD;
     for p in &soln.part_list {
+        if let TUnknown(_) = p.part_type {
+            continue;
+        }
         //Further out, positions would overflow later on. Track and conduit hexes are relative to the part.
         let mut hexes = std::iter::once(&p.pos).chain(p.tracks.iter().flatten()).chain(p.conduit.iter().flat_map(|c| &c.1));
         ensure!(hexes.all(|h| bounds.contains(&h.x) && bounds.contains(&h.y)),
@@ -608,10 +642,10 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 });
             }
             TArm(atype) => {
-                //A much longer arm would take forever to mark its area
-                ensure!(ARM_LENGTHS.contains(&p.arm_size), "Arm length {} isn't in {:?}", p.arm_size, ARM_LENGTHS);
+                //Like omsim, out-of-range lengths are clamped (rules::adjustments notes it)
+                let len = p.arm_size.clamp(*ARM_LENGTHS.start(), *ARM_LENGTHS.end());
                 let instr = process_instructions(&p.instructions, instruction_offset)?;
-                arms.push((Arm::new(p.pos, p.rot, p.arm_size, *atype, instr),p.arm_index));
+                arms.push((Arm::new(p.pos, p.rot, len, *atype, instr),p.arm_index));
             }
             TInput => {
                 let id = p.input_output_index;
@@ -631,7 +665,7 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                 let id = p.input_output_index;
                 let molecule = puzzle.outputs.get(id as usize)
                     .ok_or(eyre!("Output  ID {} not found (max {})", id, puzzle.outputs.len()))?;
-                let output_glyph = GlyphType::Output(molecule.clone(), 6 * puzzle.output_multiplier, p.input_output_index);
+                let output_glyph = GlyphType::Output(molecule.clone(), puzzle.output_multiplier.saturating_mul(6), p.input_output_index);
                 glyphs.push(Glyph {glyph_type: output_glyph, pos: p.pos, rot: p.rot });
             }
             TOutputRep => {
@@ -640,7 +674,7 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                     .ok_or(eyre!("Output(rep) ID {} not found (max {})",id,puzzle.outputs.len()))?;
                 //The monomer (including its repetition marker) is expanded into a polymer in setup_sim
                 let output_glyph =
-                    GlyphType::OutputRepeating(molecule.clone(), 6 * puzzle.output_multiplier, p.input_output_index);
+                    GlyphType::OutputRepeating(molecule.clone(), puzzle.output_multiplier.saturating_mul(6), p.input_output_index);
                 glyphs.push(Glyph {glyph_type: output_glyph, pos: p.pos, rot: p.rot });
             }
             TTrack => {
@@ -654,6 +688,7 @@ pub fn puzzle_prep(puzzle: &FullPuzzle, soln: &FullSolution) -> Result<InitialWo
                     .ok_or(eyre!("Conduit data not found on conduit glyph"))?;
                 glyphs.push(Glyph {glyph_type: GlyphType::Conduit(conduits.1, conduits.0), pos: p.pos, rot: p.rot });
             }
+            TUnknown(_) => unreachable!("skipped above"),
         }
     }
     //Only a glyph's rotation mod 6 matters, and a corrupt one would overflow the angle math
@@ -672,7 +707,7 @@ mod tests {
     fn empty_puzzle() -> FullPuzzle {
         FullPuzzle {
             puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(),
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(), conduits: vec![],
         }
     }
 
@@ -681,7 +716,8 @@ mod tests {
         use Instr::*;
         let arm = |arm_index: i32, instructions: Vec<(i32, Instr)>| Part {
             part_type: TArm(ArmType::PlainArm), pos: Pos::new(arm_index * 3, 0), arm_size: 1, rot: 0,
-            input_output_index: 0, instructions, tracks: None, arm_index, conduit: None,
+            input_output_index: 0, instructions: instructions.iter().map(|&(i, instr)| (i, instr.to_byte())).collect(),
+            tracks: None, arm_index, conduit: None,
         };
         let solution = FullSolution {
             puzzle_name: String::new(), solution_name: String::new(), stats: None,

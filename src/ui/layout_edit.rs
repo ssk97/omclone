@@ -277,7 +277,7 @@ mod tests {
         let parsed = parser::parse_solution(&mut data.as_slice()).unwrap();
         let puzzle = parser::FullPuzzle {
             puzzle_name: String::new(), creator_id: 0, allowed_bitfield: 0,
-            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(),
+            inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(), conduits: vec![],
         };
         World::setup_sim(&parser::puzzle_prep(&puzzle, &parsed).unwrap()).unwrap()
     }

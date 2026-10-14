@@ -72,6 +72,55 @@ impl Glyph {
     }
 }
 
+//Which outputs crash on a wrong product, as bits by the output's index in the puzzle
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WrongOutputChecks {
+    //A molecule of the product's shape with the wrong atoms
+    pub atoms: u64,
+    //A molecule of the product's shape with the wrong bonds
+    pub bonds: u64,
+}
+impl WrongOutputChecks {
+    //The crash for the molecule on output `index` (placed as `glyph`, with product `pattern`), if that output checks
+    //for wrong products and the molecule has the product's shape but the wrong atoms or bonds. Like omsim, it's the
+    //molecule match_output looks at, and having the shape means the product's size, every atom on one of its hexes,
+    //and none held.
+    fn check(&self, atoms: &WorldAtoms, motion: &WorldStepInfo, glyph: &Glyph, pattern: &[Atom], index: InOutId)
+        -> Option<SimError>
+    {
+        let bit = u32::try_from(index).ok().and_then(|i| 1u64.checked_shl(i))?;
+        let (check_atoms, check_bonds) = (self.atoms & bit != 0, self.bonds & bit != 0);
+        if !check_atoms && !check_bonds {
+            return None;
+        }
+        let center = pattern.iter().find(|a| a.pos == Pos::zeros()).or(pattern.first())?;
+        let molecule_key = atoms.atom_map[atoms.visible(glyph.reposition(center.pos))?].molecule;
+        let molecule = &atoms.molecules[molecule_key].atoms;
+        if molecule.len() != pattern.len() {
+            return None;
+        }
+        let (mut wrong_atoms, mut wrong_bonds) = (false, false);
+        for &key in molecule {
+            if motion.atoms.contains_key(key) {
+                return None;
+            }
+            let atom = &atoms.atom_map[key];
+            let target = pattern.iter().find(|a| glyph.reposition(a.pos) == atom.pos)?;
+            wrong_atoms |= atoms.type_of(atom) != target.pattern_type();
+            wrong_bonds |= (0..6).any(|i| atom.connections[normalize_dir(i + glyph.rot) as usize] != target.connections[i as usize]);
+        }
+        let error = if check_atoms && wrong_atoms {
+            "output didn't match"
+        } else if check_bonds && wrong_bonds {
+            "output bonds didn't match"
+        } else {
+            return None;
+        };
+        //omsim reports it at the product's first atom
+        Some(sim_error_pos(error, glyph.reposition(pattern.first()?.pos)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConduitInfo {
     pub vecids: (usize, usize),
@@ -114,11 +163,11 @@ impl World {
         });
         matches.then_some(molecule_key)
     }
-    pub(super) fn process_outputs(&mut self, motion: &mut WorldStepInfo){
+    pub(super) fn process_outputs(&mut self, motion: &mut WorldStepInfo) -> SimResult<()>{
         use GlyphType::*;
         for (id, glyph) in self.glyphs.iter_mut().enumerate() {
             let atoms = &mut self.atoms;
-            if let Output(meta_pattern, ..) = &glyph.glyph_type{
+            if let Output(meta_pattern, _, index) = &glyph.glyph_type{
                 if let Some(molecule_key) = World::match_output(atoms, motion, glyph, &meta_pattern[0]) {
                     atoms.take_molecule(molecule_key);
                     let Output(meta_pattern, output_count, _) = &mut glyph.glyph_type else {unreachable!()};
@@ -127,6 +176,9 @@ impl World {
                     }
                     let tmp = meta_pattern.remove(0);
                     meta_pattern.push(tmp);
+                } else if let Some(err) = self.wrong_output_checks.check(atoms, motion, glyph, &meta_pattern[0], *index) {
+                    self.wrong_output = Some(id);
+                    return Err(err);
                 }
                 continue;
             }
@@ -136,6 +188,24 @@ impl World {
                     polymer.update(atoms);
                     *output_count = polymer.remaining_outputs();
                 },
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    //Makes each output need `n` products to complete instead of the puzzle's count (for omsim's "product N" metrics).
+    //Call it on a world as set up, before any step.
+    pub fn set_output_target(&mut self, n: i32) {
+        let n = n.max(0);
+        for (id, glyph) in self.glyphs.iter_mut().enumerate() {
+            match &mut glyph.glyph_type {
+                GlyphType::Output(_, count, _) => *count = n,
+                GlyphType::OutputRepeating(_, count, _) => {
+                    if let Some(polymer) = self.polymers.get_mut(&id) {
+                        polymer.target = n;
+                        *count = polymer.remaining_outputs();
+                    }
+                }
                 _ => {}
             }
         }

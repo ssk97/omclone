@@ -25,6 +25,8 @@ pub struct Polymer {
     pub row_min_u: Vec<i32>,
     pub row_max_u: Vec<i32>,
     pub outputs_per_repetition: i32,
+    //The products needed to complete, normally POLYMER_REPETITIONS × outputs_per_repetition
+    pub target: i32,
     //How many monomers have been validated so far
     pub validated: i32,
     //The atoms to display (6 repetitions plus placeholders), which are also the output's area
@@ -60,7 +62,7 @@ impl Polymer {
             monomer, second_monomer: Vec::new(),
             origin, center, dir_u, dir_v, monomer_width: 0,
             min_v: 0, row_min_u: Vec::new(), row_max_u: Vec::new(),
-            outputs_per_repetition, validated: 0, display: Vec::new(),
+            outputs_per_repetition, target: POLYMER_REPETITIONS.saturating_mul(outputs_per_repetition), validated: 0, display: Vec::new(),
         };
         polymer.monomer_width = polymer.polymer_pos(marker.pos).x;
         let n = polymer.monomer.len();
@@ -203,6 +205,7 @@ impl Polymer {
         }
     }
     pub fn remaining_outputs(&self) -> i32 {
-        (POLYMER_REPETITIONS - self.validated).max(0) * self.outputs_per_repetition
+        let done = self.validated as i64 * self.outputs_per_repetition as i64;
+        (self.target as i64 - done).max(0) as i32
     }
 }

@@ -96,6 +96,32 @@ impl Chambers {
     }
 }
 
+//One of a production puzzle's conduit pairs: where its two ends start, and the hexes each end has (relative to it,
+//as in a solution file)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PuzzleConduit {
+    pub start_a: Pos,
+    pub start_b: Pos,
+    pub hexes: Vec<Pos>,
+}
+
+bitflags! {
+    //The ways omsim finds a solution breaking a production puzzle's rules
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CabinetViolations: u32 {
+        const CONDUIT_ALTERED              = 1 << 0;
+        const CONDUIT_IN_WRONG_CABINET     = 1 << 1;
+        const GLYPH_OUTSIDE_CABINET        = 1 << 2;
+        const ARM_OUTSIDE_CABINET          = 1 << 3;
+        const ARM_REACHES_ACROSS_WALL      = 1 << 4;
+        const TRACK_OUTSIDE_CABINET        = 1 << 5;
+        const INPUT_OUTPUT_OUTSIDE_CABINET = 1 << 6;
+        const ISOLATION_VIOLATED           = 1 << 7;
+        //Conduits in a puzzle that isn't a production puzzle
+        const CONDUIT_IN_FREESPACE         = 1 << 8;
+    }
+}
+
 //The production puzzle rules about where parts go
 impl World {
     //The hexes of `hexes` that aren't inside a chamber, in a production puzzle
@@ -173,6 +199,120 @@ impl World {
     //Whether any part breaks the chamber rules (the solution was made outside the game, or with overlap allowed)
     pub fn breaks_chamber_rules(&self) -> bool {
         self.all_parts().any(|part| !self.chamber_conflicts(part).is_empty() || !self.isolation_conflicts(part).is_empty())
+    }
+    //omsim's check of the production rules (decode.c's check_production_constraints), for its "cabinet violations"
+    //and "conduit violations" metrics, including where it stops early. Unlike chamber_conflicts, it also checks that
+    //conduits keep the puzzle's shape. Call it on a world as set up, before any step.
+    pub fn cabinet_violations(&self, puzzle_conduits: &[PuzzleConduit]) -> CabinetViolations {
+        use CabinetViolations as V;
+        use GlyphType::*;
+        let mut found = V::empty();
+        //Paired up as omsim pairs them: sorted by id, then by order in the file
+        let mut conduits: Vec<(ConduitId, usize)> = self.glyphs.iter().enumerate().filter_map(|(i, g)| match &g.glyph_type {
+            Conduit(_, id) => Some((*id, i)),
+            _ => None,
+        }).collect();
+        conduits.sort();
+        if !self.chambers.is_production() {
+            if !conduits.is_empty() {
+                found |= V::CONDUIT_IN_FREESPACE;
+            }
+            return found;
+        }
+        let cell = |hex: Pos| self.chambers.cell(hex);
+        let inside = |hex: Pos| matches!(cell(hex), ChamberCell::Inside(_));
+
+        if conduits.len() != 2 * puzzle_conduits.len() {
+            found |= V::CONDUIT_ALTERED;
+        } else {
+            //Whether this pair's first conduit is in the chamber the puzzle starts its second end in
+            let mut swapped = false;
+            for (i, &(id, glyph)) in conduits.iter().enumerate() {
+                //Conduit ids start at 100
+                let puzzle_conduit = usize::try_from(id as i64 - 100).ok().and_then(|index| puzzle_conduits.get(index));
+                let (Some(puzzle_conduit), Conduit(hexes, _)) = (puzzle_conduit, &self.glyphs[glyph].glyph_type) else {
+                    found |= V::CONDUIT_ALTERED;
+                    break;
+                };
+                if hexes.len() != puzzle_conduit.hexes.len() {
+                    found |= V::CONDUIT_ALTERED;
+                    break;
+                }
+                let expected = cell(if i % 2 == 0 {puzzle_conduit.start_a} else {puzzle_conduit.start_b});
+                if i % 2 == 0 {
+                    swapped = cell(self.glyphs[glyph].pos) != expected;
+                }
+                let checked = match self.conduit_pairs.get(&id) {
+                    Some(pair) if swapped => if pair.vecids.0 == glyph {pair.vecids.1} else {pair.vecids.0},
+                    _ => glyph,
+                };
+                if cell(self.glyphs[checked].pos) != expected {
+                    found |= V::CONDUIT_IN_WRONG_CABINET;
+                    break;
+                }
+                if *hexes != puzzle_conduit.hexes {
+                    found |= V::CONDUIT_ALTERED;
+                }
+            }
+        }
+
+        for (i, glyph) in self.glyphs.iter().enumerate() {
+            if matches!(glyph.glyph_type, Conduit(..) | Track(_) | Input(..) | Output(..) | OutputRepeating(..)) {
+                continue;
+            }
+            if !self.glyph_footprint(i).iter().all(|&hex| inside(hex)) {
+                found |= V::GLYPH_OUTSIDE_CABINET;
+            }
+        }
+
+        for arm in &self.arms {
+            let home = cell(arm.pos);
+            if !inside(arm.pos) {
+                found |= V::ARM_OUTSIDE_CABINET;
+                break;
+            }
+            let grabbers = (0..6).step_by(Arm::angles_between_arm(arm.arm_type) as usize)
+                .map(|r| arm.pos + rot_to_pos(arm.rot + r) * arm.len);
+            for hex in grabbers {
+                if !inside(hex) {
+                    found |= V::ARM_OUTSIDE_CABINET;
+                    break;
+                } else if cell(hex) != home {
+                    found |= V::ARM_REACHES_ACROSS_WALL;
+                    break;
+                }
+            }
+        }
+
+        let mut track = self.glyphs.iter().filter(|g| g.is_track()).flat_map(|g| g.footprint(None));
+        if !track.all(inside) {
+            found |= V::TRACK_OUTSIDE_CABINET;
+        }
+
+        let io: Vec<(usize, bool)> = self.glyphs.iter().enumerate().filter_map(|(i, g)| match g.glyph_type {
+            Input(..) => Some((i, true)),
+            Output(..) | OutputRepeating(..) => Some((i, false)),
+            _ => None,
+        }).collect();
+        for &(i, _) in &io {
+            if !self.glyph_footprint(i).iter().all(|&hex| inside(hex)) {
+                found |= V::INPUT_OUTPUT_OUTSIDE_CABINET;
+            }
+        }
+        if self.chambers.isolate {
+            //Each input or output is where its first atom is
+            let mut kinds: Vec<(ChamberCell, bool)> = Vec::new();
+            for &(i, is_input) in &io {
+                let Some(&hex) = self.glyph_footprint(i).first() else {continue};
+                let here = cell(hex);
+                if kinds.iter().any(|&(c, kind)| c == here && kind != is_input) {
+                    found |= V::ISOLATION_VIOLATED;
+                    break;
+                }
+                kinds.push((here, is_input));
+            }
+        }
+        found
     }
 }
 

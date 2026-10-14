@@ -182,6 +182,9 @@ impl World {
             conduit_pairs: Default::default(),
             polymers: Default::default(),
             input_variants: Vec::new(),
+            atom_grabs: [0; 16],
+            wrong_output_checks: Default::default(),
+            wrong_output: None,
         };
         for (id, g) in world.glyphs.iter().enumerate() {
             use GlyphType::*;
