@@ -25,11 +25,9 @@
 		<input type="file"
 			   id="puzzle-selector" name="puzzle"
 			   accept=".puzzle">
-		<span id="puzzle-loaded"></span>
 		<input type="file"
 			   id="solution-selector" name="solution"
 			   accept=".solution">
-		<span id="solution-loaded"></span>
     </div>
     <canvas id="glcanvas" tabindex='1' oncontextmenu="return false;"></canvas>
     <!-- Minified and statically hosted version of https://github.com/not-fl3/miniquad/blob/master/native/sapp-wasm/js/gl.js -->
@@ -61,18 +59,11 @@
 		  })
 		}
 		
-		//Shows what was loaded, then empties the picker (the only value it can be given), so that choosing the
-		//same file again, after it has changed, loads it again
-		function show_loaded(input, label_id, file){
-			document.getElementById(label_id).textContent = "Loaded " + file.name;
-			input.value = "";
-		}
 		async function read_puzzle(){
 			if (puz_input.files.length > 0){
 				const input_file = puz_input.files[0];
 				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_puzzle(js_object(filedata));
-				show_loaded(puz_input, 'puzzle-loaded', input_file);
 			}
 		}
 		async function read_solution(){
@@ -81,11 +72,28 @@
 				const filedata = await getAsByteArray(input_file);
 				wasm_exports.js_load_solution_name(js_object(input_file.name));
 				wasm_exports.js_load_solution(js_object(filedata));
-				show_loaded(sol_input, 'solution-loaded', input_file);
 			}
+		}
+		//Empties the picker as its dialog opens, so that choosing the same file again, after it has changed, still loads
+		//it (a script can only give a picker the value ""). Cancelling the dialog puts back the file it showed.
+		function reload_on_repick(input){
+			let chosen = null;
+			input.addEventListener('click', () => {
+				chosen = input.files[0];
+				input.value = "";
+			});
+			input.addEventListener('cancel', () => {
+				if (chosen){
+					const files = new DataTransfer();
+					files.items.add(chosen);
+					input.files = files.files;
+				}
+			});
 		}
 		puz_input.addEventListener('change', read_puzzle);
 		sol_input.addEventListener('change', read_solution);
+		reload_on_repick(puz_input);
+		reload_on_repick(sol_input);
 		
 		function on_init(){
 			if (window.opener && window.opener !== window){
