@@ -50,9 +50,9 @@ Timeline (the "World loaded" window)
 - Loop length is how long looping tapes run before they start over.
 - Collide/Area: Show and Hide check collisions and count area (Show also shades it). Off skips both, which is
   faster.
+- A crash is circled in red on the board, and the Crash window's Show button centers the view on it.
 ----
 Enable feature "color-eyre" for more detailed error reports. Load and simulation errors are shown in the app either way.
-Enable "benchmark" to get a program which will just run the default solution forever (useful for performance analysis)
 
 The ignored tests "check_all" and "check_all_rebuilt" run every solution under test/solution and
 test/om-leaderboard-master against the puzzles under test/puzzle (each searched recursively, and matched by the

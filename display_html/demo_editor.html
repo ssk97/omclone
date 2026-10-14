@@ -120,7 +120,16 @@
 				//After the download has started from it
 				setTimeout(() => window.URL.revokeObjectURL(url), 0);
 		}
-		
+
+		//With unsaved changes, the browser asks before the page is closed or reloaded (in its own words)
+		window.addEventListener('beforeunload', e => {
+			//gl.js declares wasm_exports, which stays undefined until the wasm has loaded
+			if (wasm_exports?.js_has_unsaved?.()){
+				e.preventDefault();
+				e.returnValue = '';
+			}
+		});
+
 		register_plugin = function (importObject) {
 		  // make save_file(filedata, filename) function available to call from rust
 		  importObject.env.save_file = save_file;

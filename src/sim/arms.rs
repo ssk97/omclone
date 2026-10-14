@@ -96,7 +96,8 @@ impl Arm {
 const STILL: ArmMovement = ArmMovement::Move(Movement::HeldStill);
 
 impl World {
-    //Returns the movement the arm is going to do. Returns size of the largest molecule rotated
+    //Runs the arm's instruction for this timestep. Grabs, drops and halts happen now; the arm's move, and the moves it
+    //gives the atoms it holds, are filed in `motion`.
     pub(super) fn do_instruction(&mut self, motion: &mut WorldStepInfo, arm_id: usize, timestep: u64) -> SimResult<()>{
         assert_eq!(motion.arms.len(), arm_id, "Arm motion array not same as arm ID");
         let arm = &mut self.arms[arm_id];

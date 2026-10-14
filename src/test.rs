@@ -51,9 +51,7 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         Err(e) => {println!("Failed to parse solution {:?}: {}",fpath, e); return;}
         Ok(s) => s
     };
-    let Some(puzzle) = puzzle_map.get(&sol.puzzle_name) else {
-        /*println!("Can't find puzzle {}",sol.puzzle_name);*/ return;
-    };
+    let Some(puzzle) = puzzle_map.get(&sol.puzzle_name) else {return};
     results.total += 1;
     //Same convention as omsim: unsolved solutions (no stats, or zero cost and instructions) are expected to collide
     let expect_collision = match &sol.stats {

@@ -154,7 +154,7 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             let (mut running_free, enabled) = match loaded.run_state{
                 RunState::FreeRun => (true, true),
                 RunState::Manual(_) => (false, true),
-                RunState::Crashed(_) => (false, false),
+                RunState::Crashed{..} => (false, false),
             };
             let was_freerun = running_free;
             ui.add_enabled_ui(enabled, |ui| ui.checkbox(&mut running_free, "Run"));
@@ -165,6 +165,18 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             }
         });
     });
+}
+//While the run is crashed: what happened, and a button that brings it into view (the board circles it)
+pub(super) fn crash_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+    let RunState::Crashed{step, error} = loaded.run_state else {return};
+    let mut open = loaded.crash_window_open;
+    egui::Window::new("Crash").open(&mut open).show(egui_ctx, |ui| {
+        ui.label(format!("Timestep {step}: {error}"));
+        if ui.button("Show").on_hover_text("Centers the view on it").clicked(){
+            loaded.camera.center_on(error.location);
+        }
+    });
+    loaded.crash_window_open = open;
 }
 //Opened from the Part window
 pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size: (f32, f32)){

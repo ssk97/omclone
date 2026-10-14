@@ -147,6 +147,14 @@ pub extern "C" fn js_load_solution_name(name: sapp_jsutils::JsObject){
     name.to_string(&mut sol_name);
     *JS_SOLUTION_NAME.lock().unwrap() = Some(sol_name);
 }
+//Whether the loaded solution has unsaved changes, so the page can warn before it's closed
+#[cfg(target_arch = "wasm32")]
+static UNSAVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn js_has_unsaved() -> bool{
+    UNSAVED.load(std::sync::atomic::Ordering::Relaxed)
+}
 #[cfg(target_arch = "wasm32")]
 extern "C" {
     fn save_file(filedata: sapp_jsutils::JsObject, filename: sapp_jsutils::JsObject);
@@ -177,6 +185,8 @@ impl EventHandler for MyMiniquadApp {
                 loaded.float_world.regenerate(timeline.curr(), timeline.motion(), display_portion);
             }
         }
+        #[cfg(target_arch = "wasm32")]
+        UNSAVED.store(matches!(&self.app_state, Loaded(loaded) if loaded.dirty), std::sync::atomic::Ordering::Relaxed);
     }
 
     fn draw(&mut self) {
@@ -196,15 +206,13 @@ impl EventHandler for MyMiniquadApp {
                 Loaded(loaded) => {
                     windows::timeline_window(egui_ctx, loaded);
                     windows::message_window(egui_ctx, "world_message", &mut loaded.message);
+                    windows::crash_window(egui_ctx, loaded);
                     windows::camera_window(egui_ctx, loaded, screen_size);
                     #[cfg(feature = "editor_ui")]
                     windows::file_window(egui_ctx, loaded, &mut self.unloaded_info);
                     windows::arms_window(egui_ctx, loaded, &mut self.extra_message);
                     windows::part_window(egui_ctx, loaded);
                     windows::cursor_tooltip(egui_ctx, loaded);
-                    /*egui::Window::new("debug").min_width(128.).show(egui_ctx, |ui|{
-                        ui.label(format!("curr time: {}",loaded.timeline.time() as u64));
-                    });*/
                     do_loading = windows::reload_window(egui_ctx, loaded);
                 }
                 NotLoaded => {

@@ -3,8 +3,9 @@ use super::*;
 use std::ops::Range;
 
 pub(super) enum RunState{
-    //Crashed holds the timestep it crashed in
-    Manual(usize), FreeRun, Crashed(usize)
+    Manual(usize), FreeRun,
+    //The timestep it crashed in, and why
+    Crashed{step: usize, error: SimError},
 }
 //What an undo step changed: tapes-only steps can be undone without re-simulating from the start
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -27,6 +28,8 @@ pub(super) struct Loaded{
     pub(super) max_timestep: usize,
     pub(super) camera: CameraSetup,
     pub(super) camera_window_open: bool,
+    //Opened by each crash, and closable until the next
+    pub(super) crash_window_open: bool,
     pub(super) solution: parser::FullSolution,
     pub(super) message: Option<String>,
     //The solution changed since it was loaded or saved
@@ -80,6 +83,7 @@ impl Loaded{
 
             max_timestep,camera,solution,
             camera_window_open: false,
+            crash_window_open: false,
             message: None,
             dirty: false,
             backup_stale: false,
@@ -220,7 +224,7 @@ impl Loaded{
     pub(super) fn cursor_step(&self) -> usize{
         match self.run_state{
             RunState::Manual(target) => target,
-            RunState::FreeRun | RunState::Crashed(_) => self.timeline.time().floor() as usize,
+            RunState::FreeRun | RunState::Crashed{..} => self.timeline.time().floor() as usize,
         }
     }
     //Updates the timeline after the tapes or loop length in its base changed.
@@ -253,13 +257,13 @@ impl Loaded{
     }
     //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
     pub(super) fn clear_crash(&mut self){
-        if let RunState::Crashed(step) = self.run_state{
+        if let RunState::Crashed{step, ..} = self.run_state{
             self.run_state = RunState::Manual(step);
         }
         self.message = None;
     }
     pub(super) fn try_set_target_time(&mut self, target: usize){
-        if let RunState::Crashed(step) = self.run_state{
+        if let RunState::Crashed{step, ..} = self.run_state{
             if step > target{
                 self.run_state = RunState::Manual(target);
             }
@@ -279,15 +283,15 @@ impl Loaded{
                 }
             },
             RunState::FreeRun => time+self.run_speed,
-            RunState::Crashed(_) => return,
+            RunState::Crashed{..} => return,
         };
         if target_time < time{
             self.timeline.rewind(target_time as u64);
             self.clear_crash();
         }
-        if let Err(err) = self.timeline.advance_to(target_time){
-            self.run_state = RunState::Crashed(self.timeline.curr().timestep as usize);
-            self.message = Some(err.to_string());
+        if let Err(error) = self.timeline.advance_to(target_time){
+            self.run_state = RunState::Crashed{step: self.timeline.curr().timestep as usize, error};
+            self.crash_window_open = true;
         }
     }
 }
@@ -331,6 +335,21 @@ mod tests {
         assert_eq!(loaded.timeline.base().repeat_length, 2);
         loaded.redo();
         assert_eq!(loaded.timeline.base().repeat_length, 5);
+    }
+
+    #[test]
+    fn a_crash_keeps_its_timestep_and_place() {
+        //The first arm rides the track into the second, which sits at its end
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track((0..3).map(|x| Pos::new(x, 0)).collect())};
+        let rider = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Forward; 2]));
+        let sitter = Arm::new(Pos::new(2, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = Loaded::for_test(vec![track], vec![rider, sitter]);
+        loaded.run_state = RunState::Manual(5);
+        loaded.update();
+        let RunState::Crashed{step, error} = loaded.run_state else {panic!("expected a crash")};
+        assert_eq!((step, error.error_str, xy_to_pos(error.location)), (1, "Arm-Arm collision!", Pos::new(2, 0)));
+        assert!(loaded.crash_window_open);
+        assert_eq!(loaded.message, None, "the crash has its own window");
     }
 
     #[test]

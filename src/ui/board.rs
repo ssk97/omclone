@@ -684,6 +684,14 @@ impl Loaded{
         self.preview = Some(self.build_preview(edit));
     }
     pub(super) fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
+        const CRASH_COLOR: Color = [1., 0.1, 0.1, 1.];
+        self.draw_board(render, ctx);
+        //Last, so nothing covers it. The board shows the moment of the crash, so it circles the parts that collided.
+        if let RunState::Crashed{error, ..} = self.run_state{
+            render.draw_ring(ctx, &self.camera, error.location, CRASH_COLOR);
+        }
+    }
+    fn draw_board(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const SELECT_COLOR: Color = [0., 0.8, 1., 1.];
         const OVERLAP_COLOR: Color = [1., 0.1, 0.1, 1.];
         const TRACK_TOOL_COLOR: Color = [1., 0.75, 0., 1.];

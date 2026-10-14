@@ -1,4 +1,4 @@
-//The simulation and the file formats, without any UI. The app, the benchmark and the tests share them.
+//The simulation and the file formats, without any UI. The app and the tests share them.
 pub mod parser;
 pub mod sim;
 pub mod timeline;

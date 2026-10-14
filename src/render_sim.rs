@@ -149,14 +149,20 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     }).collect()
 }
 const CIRCLE_VERT_COUNT:usize = 20;
+//Points around a circle of this radius
+fn circle_corners(radius: f32) -> [Vert; CIRCLE_VERT_COUNT]{
+    std::array::from_fn(|i| {
+        let angle = (i as f32)*PI*2./(CIRCLE_VERT_COUNT as f32);
+        [angle.cos()*radius, angle.sin()*radius]
+    })
+}
+//An atom's circle (triangles from its center)
 fn setup_circle(ctx: &mut dyn RenderingBackend) -> Bindings{
+    //The last vertex, the center, stays at (0,0)
     let mut verts = [[0.;2];CIRCLE_VERT_COUNT+1];
-    let angle_per = PI*2./(CIRCLE_VERT_COUNT as f32);
-    //verts[CIRCLE_VERT_COUNT] = [0.,0.];
+    verts[..CIRCLE_VERT_COUNT].copy_from_slice(&circle_corners(0.8));
     let mut indices: [u16; CIRCLE_VERT_COUNT*3] = [CIRCLE_VERT_COUNT as u16;CIRCLE_VERT_COUNT*3];
     for i in 0..CIRCLE_VERT_COUNT{
-        let angle = (i as f32)*angle_per;
-        verts[i] = [angle.cos()*0.8,angle.sin()*0.8];
         indices[i*3+1] = (i) as u16;
         indices[i*3+2] = ((i+1)%CIRCLE_VERT_COUNT) as u16;
     }
@@ -193,17 +199,15 @@ fn setup_hex_fill(ctx: &mut dyn RenderingBackend) -> Bindings{
         images: vec![],
     }
 }
-//An outline just inside a hex's edges (12 triangles)
-fn setup_hex_ring(ctx: &mut dyn RenderingBackend) -> Bindings{
-    let mut verts = [[0.;2];12];
-    verts[..6].copy_from_slice(&hex_corners(0.95));
-    verts[6..].copy_from_slice(&hex_corners(0.78));
-    let mut indices = [0u16;36];
-    for i in 0..6{
-        let next = (i+1)%6;
-        let (outer, outer_next, inner, inner_next) = (i as u16, next as u16, (i+6) as u16, (next+6) as u16);
-        indices[i*6..i*6+6].copy_from_slice(&[outer, outer_next, inner, inner, outer_next, inner_next]);
-    }
+//The band between two polygons whose corners are at the same angles (two triangles a side, so 6 indices a corner)
+fn setup_ring(ctx: &mut dyn RenderingBackend, outer: &[Vert], inner: &[Vert]) -> Bindings{
+    let n = outer.len();
+    let verts: Vec<Vert> = outer.iter().chain(inner).copied().collect();
+    let indices: Vec<u16> = (0..n).flat_map(|i| {
+        let next = (i+1)%n;
+        let (outer, outer_next, inner, inner_next) = (i as u16, next as u16, (i+n) as u16, (next+n) as u16);
+        [outer, outer_next, inner, inner, outer_next, inner_next]
+    }).collect();
     let vertex_buffer = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&verts));
     let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&indices));
     Bindings {
@@ -216,6 +220,8 @@ struct ShapeStore{
     hex_ring_bindings: Bindings,
     hex_fill_bindings: Bindings,
     circle_bindings: Bindings,
+    //Just around an atom
+    circle_ring_bindings: Bindings,
     texture_bindings: Vec<Bindings>,
     glyph_images: GlyphImages,
 }
@@ -252,6 +258,10 @@ impl CameraSetup{
         let ndc_x = px.0/screen_size.0*2. - 1.;
         let ndc_y = 1. - px.1/screen_size.1*2.;
         XYPos::new(ndc_x/scale.0, ndc_y/scale.1) - self.offset
+    }
+    //Puts a world position in the middle of the screen, without zooming
+    pub fn center_on(&mut self, at: XYPos) {
+        self.offset = -at.coords;
     }
     //Zooms in by `notches` of the mouse wheel (out if negative), keeping the world position under the pixel `px`
     //where it is. A view already outside ZOOM_RANGE can still move back into it.
@@ -360,9 +370,11 @@ impl RenderDataBase {
             }
         );
         let shapes = ShapeStore{
-            hex_ring_bindings: setup_hex_ring(ctx),
+            //Just inside a hex's edges
+            hex_ring_bindings: setup_ring(ctx, &hex_corners(0.95), &hex_corners(0.78)),
             hex_fill_bindings: setup_hex_fill(ctx),
             circle_bindings: setup_circle(ctx),
+            circle_ring_bindings: setup_ring(ctx, &circle_corners(1.15), &circle_corners(0.9)),
             texture_bindings: setup_textures(ctx),
             glyph_images: GlyphImages::new(ctx),
         };
@@ -415,50 +427,50 @@ fn symbol_color(fill: Color) -> Color{
 }
 
 impl RenderDataBase {
-	fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], world_offset: GFXPos, scale: (f32, f32)){
+    fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], world_offset: GFXPos, scale: (f32, f32)){
         ctx.apply_pipeline(&self.pipeline_textured);
 
         //Draw atom bonds
-		for atom in atoms {
-			let offset = atom.pos.into();
-			for r in 0..3 { //4-6 are done by the other atom
-				let matches = [
-					(Bonds::NORMAL, &self.shapes.texture_bindings[BOND_NORMAL_ID]),
-					(Bonds::TRIPLEX_R, &self.shapes.texture_bindings[BOND_RED_ID]),
-					(Bonds::TRIPLEX_K, &self.shapes.texture_bindings[BOND_WHITE_ID]),
-					(Bonds::TRIPLEX_Y, &self.shapes.texture_bindings[BOND_YELLOW_ID])];
-				let bond = atom.connections[r];
-				for (bondtype, bindtype) in matches{
-					if bond.intersects(bondtype){
-						let angle = rot_to_angle(r as Rot)+atom.rot;
-						ctx.apply_bindings(bindtype);
-						ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-							offset, world_offset, angle, scale
-						}));
-						ctx.draw(0, 6, 1);
-					}
-				}
-			}
-		}
-		//Draw atom circles
-		ctx.apply_pipeline(&self.pipeline);
-		ctx.apply_bindings(&self.shapes.circle_bindings);
-		for atom in atoms {
-			let color = atom_color(atom.atom_type);
-			let offset = atom.pos.into();
-			let angle = 0.;
-			ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-				color, offset, world_offset, angle, scale
-			}));
-			ctx.draw(0, (CIRCLE_VERT_COUNT*3) as i32, 1);
-		}
-		//Draw atom symbols
-		self.font.set_pipeline(ctx);
-		for atom in atoms {
-			let color = symbol_color(atom_color(atom.atom_type));
-			self.font.render_atom_symbol(ctx, atom.atom_type, color, atom.pos, world_offset, scale);
-		}
-	}
+        for atom in atoms {
+            let offset = atom.pos.into();
+            for r in 0..3 { //4-6 are done by the other atom
+                let matches = [
+                    (Bonds::NORMAL, &self.shapes.texture_bindings[BOND_NORMAL_ID]),
+                    (Bonds::TRIPLEX_R, &self.shapes.texture_bindings[BOND_RED_ID]),
+                    (Bonds::TRIPLEX_K, &self.shapes.texture_bindings[BOND_WHITE_ID]),
+                    (Bonds::TRIPLEX_Y, &self.shapes.texture_bindings[BOND_YELLOW_ID])];
+                let bond = atom.connections[r];
+                for (bondtype, bindtype) in matches{
+                    if bond.intersects(bondtype){
+                        let angle = rot_to_angle(r as Rot)+atom.rot;
+                        ctx.apply_bindings(bindtype);
+                        ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
+                            offset, world_offset, angle, scale
+                        }));
+                        ctx.draw(0, 6, 1);
+                    }
+                }
+            }
+        }
+        //Draw atom circles
+        ctx.apply_pipeline(&self.pipeline);
+        ctx.apply_bindings(&self.shapes.circle_bindings);
+        for atom in atoms {
+            let color = atom_color(atom.atom_type);
+            let offset = atom.pos.into();
+            let angle = 0.;
+            ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
+                color, offset, world_offset, angle, scale
+            }));
+            ctx.draw(0, (CIRCLE_VERT_COUNT*3) as i32, 1);
+        }
+        //Draw atom symbols
+        self.font.set_pipeline(ctx);
+        for atom in atoms {
+            let color = symbol_color(atom_color(atom.atom_type));
+            self.font.render_atom_symbol(ctx, atom.atom_type, color, atom.pos, world_offset, scale);
+        }
+    }
     //The atoms shown on an input or output
     fn glyph_atoms(glyph: &Glyph, polymer: Option<&Polymer>) -> Vec<FloatAtom> {
         use GlyphType::*;
@@ -578,8 +590,8 @@ impl RenderDataBase {
         self.scene_tracks.set(ctx, &track_lines(scene.tracks));
         self.draw_stream(ctx, &self.pipeline_tracks, &self.scene_tracks, WHITE, world_offset, scale);
 
-		//Draw atoms
-		self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
+        //Draw atoms
+        self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
 
         //Draw arms
         let shown_arms = || scene.float_world.arms_xy.iter().enumerate()
@@ -647,13 +659,22 @@ impl RenderDataBase {
     fn draw_hexes(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color, shape: &Bindings,
         index_count: i32)
     {
+        self.draw_shapes(ctx, camera, hexes.iter().map(|&p| pos_to_xy(p)), color, shape, index_count);
+    }
+    //Circles a point, a little wider than an atom
+    pub fn draw_ring(&self, ctx: &mut Context, camera: &CameraSetup, at: XYPos, color: Color){
+        self.draw_shapes(ctx, camera, [at], color, &self.shapes.circle_ring_bindings, (CIRCLE_VERT_COUNT*6) as i32);
+    }
+    fn draw_shapes(&self, ctx: &mut Context, camera: &CameraSetup, at: impl IntoIterator<Item = XYPos>, color: Color,
+        shape: &Bindings, index_count: i32)
+    {
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(shape);
-        for &p in hexes{
+        for xy in at{
             ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
-                color, offset: pos_to_xy(p).into(), world_offset, angle: 0., scale
+                color, offset: xy.into(), world_offset, angle: 0., scale
             }));
             ctx.draw(0, index_count, 1);
         }
@@ -730,6 +751,16 @@ mod tests {
         camera.scale_base = 1.;
         camera.zoom_at(px, screen_size, 1.);
         assert_eq!(camera.scale_base, 1., "zooming in further from outside the range does nothing");
+    }
+    #[test]
+    fn center_on_puts_the_point_in_the_middle() {
+        let mut camera = CameraSetup { scale_base: 0.03, offset: XYVec::new(1.5, -2.) };
+        let screen_size = (1280., 720.);
+        let point = XYPos::new(-7.25, 3.5);
+        camera.center_on(point);
+        let middle = camera.screen_to_world((640., 360.), screen_size);
+        assert!((middle - point).norm() < 1e-3, "{middle:?} != {point:?}");
+        assert_eq!(camera.scale_base, 0.03, "the zoom stays");
     }
     #[test]
     fn pan_follows_cursor() {

@@ -10,14 +10,14 @@ pub struct FloatAtom{
 }
 //For pattern atoms (inputs, outputs and polymers)
 impl From<&Atom> for FloatAtom{
-	fn from(a: &Atom) -> FloatAtom {
-		return FloatAtom{
-			pos: pos_to_xy(a.pos),
-			rot: 0.,
-			atom_type: a.pattern_type(),
-			connections: a.connections,
-		}
-	}
+    fn from(a: &Atom) -> FloatAtom {
+        return FloatAtom{
+            pos: pos_to_xy(a.pos),
+            rot: 0.,
+            atom_type: a.pattern_type(),
+            connections: a.connections,
+        }
+    }
 }
 pub struct FloatArm{
     pub pos: XYPos,

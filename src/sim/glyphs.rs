@@ -148,7 +148,7 @@ impl World {
             if let (Some(key1), Some(key2)) = (atoms.visible(*loc1), atoms.visible(*loc2)) {
                 if need_fire && [key1, key2].iter().any(|&key| atoms.type_of(&atoms.atom_map[key]) != AtomType::Fire) {return;}
                 let [atom1,atom2] = atoms.atom_map.get_disjoint_mut([key1,key2]).expect("Inconsistent atoms!");
-                if (atom1.immutable_wheel || atom2.immutable_wheel) {return;}
+                if atom1.immutable_wheel || atom2.immutable_wheel {return;}
                 if atom1.connections[rot].intersects(unless) || atom2.connections[(rot + 3) % 6].intersects(unless) {return;}
                 atom1.connections[rot] |= bond_type;
                 atom2.connections[(rot + 3) % 6] |= bond_type;
@@ -198,9 +198,9 @@ impl World {
 
             let pos_div = glyph.reposition(Pos::new(-1, 0));
 
-            let pos_proQS = glyph.reposition(Pos::new(1, 1));
-            let pos_proM = glyph.reposition(Pos::new(-1, 1));
-            let pos_proO = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
+            let pos_pro_qs = glyph.reposition(Pos::new(1, 1));
+            let pos_pro_m = glyph.reposition(Pos::new(-1, 1));
+            let pos_pro_o = glyph.reposition(Pos::new(1, -1)); //The three blank spaces are pos/bi/tri
             match &mut glyph.glyph_type{
                 Calcification => {
                     if let Some(element) = atoms.get_nonwheel_type(pos) {
@@ -324,12 +324,12 @@ impl World {
                 Proliferation => {
                     if first_half{
                         //Only metals are copied (wheel atoms included)
-                        let m = atoms.get_type(pos_proM).filter(|m| m.metal_id().is_some());
-                        let qs = atoms.get_consumable_type(motion, pos_proQS);
-                        let o = atoms.can_produce_at(pos_proO);
+                        let m = atoms.get_type(pos_pro_m).filter(|m| m.metal_id().is_some());
+                        let qs = atoms.get_consumable_type(motion, pos_pro_qs);
+                        let o = atoms.can_produce_at(pos_pro_o);
                         if let (Some(m),Some(Quicksilver),true) = (m,qs,o) {
-                            atoms.destroy_atom_at(pos_proQS);
-                            produce(motion, id, Atom::new(pos_proO, m));
+                            atoms.destroy_atom_at(pos_pro_qs);
+                            produce(motion, id, Atom::new(pos_pro_o, m));
                         }
                     }
                 }

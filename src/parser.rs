@@ -293,7 +293,7 @@ pub fn parse_solution(f: &mut impl Read) -> Result<FullSolution> {
         let instruction_count = parse_int(f)?;
         let mut instructions = Vec::new();
         for _ in 0..instruction_count {
-            let instr_pos = parse_int(f)? as i32;
+            let instr_pos = parse_int(f)?;
             let action = parse_byte(f)?;
             instructions.push((instr_pos, Instr::from_byte(action).ok_or(eyre!("invalid instruction"))?));
         }

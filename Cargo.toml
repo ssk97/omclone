@@ -8,7 +8,6 @@ default-run = "omclone"
 [features]
 default = ["editor_ui"]
 #choose one of the following
-benchmark = []
 editor_ui = ["display_ui"]
 display_ui = ["egui", "miniquad", "egui-miniquad", "image", "fontdue"]
 
@@ -16,11 +15,6 @@ display_ui = ["egui", "miniquad", "egui-miniquad", "image", "fontdue"]
 name="omclone"
 required-features = ["display_ui"]
 path = "src/main.rs"
-
-[[bin]]
-name="omclone_benchmark"
-required-features = ["benchmark"]
-path = "src/benchmark.rs"
 
 [profile.dev]
 opt-level = 3

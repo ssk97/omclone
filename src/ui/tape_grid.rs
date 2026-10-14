@@ -393,7 +393,7 @@ pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
     //Something else, like the timeline slider or running, can move the caret. A crash only stops the timeline
     //short of the caret, which stays where it is, so typing past the crash carries on in order.
     let time = loaded.cursor_step();
-    let crashed = matches!(loaded.run_state, RunState::Crashed(_));
+    let crashed = matches!(loaded.run_state, RunState::Crashed{..});
     let sel = &mut loaded.tape_sel;
     if time != sel.caret && !(crashed && sel.caret > time){
         sel.caret = time;
@@ -529,7 +529,7 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
         painter.rect_filled(row, 0., drop_fill);
     }
     painter.rect_filled(column(sel.caret, view.min.y), 0., visuals.selection.bg_fill.gamma_multiply(0.35));
-    if let RunState::Crashed(step) = loaded.run_state{
+    if let RunState::Crashed{step, ..} = loaded.run_state{
         painter.rect_filled(column(step, layout.y(0)), 0., Color32::from_rgba_unmultiplied(220, 50, 50, 70));
     }
     let selected = sel.steps();

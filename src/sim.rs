@@ -1,4 +1,3 @@
-#![allow(unused_parens)]
 use bitflags::bitflags;
 #[cfg(feature = "color-eyre")]
 use color_eyre::{
@@ -39,20 +38,18 @@ pub use chambers::*;
 mod float_world;
 pub use float_world::*;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct SimError{
     pub error_str: &'static str,
     pub location: XYPos,
 }
+//Names the hex as the editor does elsewhere: "at" its center, or "near" it for a point in between
 impl fmt::Display for SimError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let hex = xy_to_pos(self.location);
         let hex_pos = pos_to_xy(hex);
-        if nalgebra::distance_squared(&hex_pos,&self.location) < 0.1{
-            write!(f, "{} at {:?}", self.error_str,hex)
-        } else {
-            write!(f, "{} near {:?} (at {:?})", self.error_str,hex,self.location)
-        }
+        let relation = if nalgebra::distance_squared(&hex_pos,&self.location) < 0.1 {"at"} else {"near"};
+        write!(f, "{} {relation} ({}, {})", self.error_str, hex.x, hex.y)
     }
 }
 impl error::Error for SimError{}
@@ -394,11 +391,24 @@ impl World {
         let mut all_outputs_full = true;
         for g in &self.glyphs {
             if let GlyphType::Output(_, i,_) = g.glyph_type {
-                all_outputs_full &= (i == 0);
+                all_outputs_full &= i == 0;
             } else if let GlyphType::OutputRepeating(_, i,_) = g.glyph_type {
-                all_outputs_full &= (i == 0);
+                all_outputs_full &= i == 0;
             }
         }
         all_outputs_full
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errors_name_their_hex_without_world_coordinates() {
+        let error = |location| SimError{error_str: "atom/atom collision!", location}.to_string();
+        let center = pos_to_xy(Pos::new(3, 2));
+        assert_eq!(error(center), "atom/atom collision! at (3, 2)");
+        assert_eq!(error(center + XYVec::new(0.6, -0.3)), "atom/atom collision! near (3, 2)");
     }
 }

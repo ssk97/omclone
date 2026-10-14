@@ -146,8 +146,8 @@ let stats = world.get_stats();
    comment how variant ids map to atoms; CX went by ring position (`rot_to_pos(idx)`), Habitability by
    atoms sorted by x.
 2. **Choose a front end.**
-   - **Native command line (simplest).** Add a `[[bin]]` with a feature in `required-features`, like
-     `omclone_benchmark`. Unlike `[lib]`, `required-features` works for binaries. Read the puzzle and
+   - **Native command line (simplest).** Add a `[[bin]]` with a feature in `required-features`, as the
+     `omclone` binary does with `display_ui`. Unlike `[lib]`, `required-features` works for binaries. Read the puzzle and
      solution paths from the arguments, or use `omclone::default_paths()`. No JS toolchain is needed.
    - **Inside the app.** Add a window to the existing UI. It works natively and in the existing web build
      with no new tooling, but a long sweep has to be split across frames (a few variants per `update()`)
