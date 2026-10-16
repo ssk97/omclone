@@ -54,6 +54,8 @@ pub(super) struct Loaded{
     //it comes straight back here (or to the target, if that's earlier) instead of replaying the steps on the way.
     shown_time: f64,
     pub(super) area_mode: AreaMode,
+    //1 is held, so the board's atoms are drawn faintly
+    pub(super) atoms_faded: bool,
     pub(super) run_speed: f64,
     pub(super) popup_reload: bool,
 
@@ -110,6 +112,7 @@ impl Loaded{
             run_state: RunState::Manual(0),
             shown_time: 0.,
             area_mode: AreaMode::Hidden,
+            atoms_faded: false,
             run_speed: 0.05,
             popup_reload: false,
 

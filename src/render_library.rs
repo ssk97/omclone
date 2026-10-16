@@ -38,6 +38,8 @@ pub struct UvUniforms{
     pub world_offset: GFXPos,
     pub angle: f32,
     pub scale: (f32,f32),
+    //Scales the texture's alpha
+    pub opacity: f32,
 }
 #[repr(C)]
 pub struct TextUniforms{

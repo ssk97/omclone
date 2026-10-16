@@ -468,11 +468,11 @@ impl Loaded{
         }
         true
     }
-    //Returns true if the key was used for editing parts
+    //Returns true if the board used the key
     pub(super) fn handle_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
         let command = keymods.ctrl || keymods.logo;
-        //Only picking from the stack works without the editor
-        if !EDITOR_ENABLED && !matches!(keycode, KeyCode::Tab | KeyCode::Escape){
+        //Only picking from the stack and fading the atoms work without the editor
+        if !EDITOR_ENABLED && !matches!(keycode, KeyCode::Tab | KeyCode::Escape | KeyCode::Key1){
             return false;
         }
         match keycode{
@@ -495,6 +495,8 @@ impl Loaded{
             }
             KeyCode::Tab if self.tool.press().is_some() => self.cycle(if keymods.shift {-1} else {1}),
             KeyCode::A | KeyCode::D | KeyCode::W | KeyCode::S => return self.turn_or_resize(keycode),
+            //Until 1 is released (see ui.rs)
+            KeyCode::Key1 => self.atoms_faded = true,
             _ => return false,
         }
         true
@@ -709,7 +711,8 @@ impl Loaded{
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
             let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
-                walls: &world.chambers.walls, area: &world.area_touched, float_world: &self.float_world, hidden: None};
+                walls: &world.chambers.walls, area: &world.area_touched, float_world: &self.float_world, hidden: None,
+                faded_atoms: self.atoms_faded};
             render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
             render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
             if let Some(part) = self.highlighted_part(){
@@ -733,7 +736,7 @@ impl Loaded{
         //Tracks are drawn as they are now, except a track being changed, which is drawn with the preview
         let tracks = self.scene_tracks.as_ref().map_or(&self.timeline.base().track_maps, |(_, t)| t);
         let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, walls: &world.chambers.walls,
-            area: &world.area_touched, float_world, hidden: Some(part)};
+            area: &world.area_touched, float_world, hidden: Some(part), faded_atoms: self.atoms_faded};
         render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
         match part{
             PartId::Glyph(i) => render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[i],

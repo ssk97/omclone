@@ -107,6 +107,8 @@ const ARM_COLOR: Color = [0., 0., 0., 1.];
 const WALL_COLOR: Color = [0.42, 0.38, 0.33, 1.];
 //How opaque the copy of a dragged arm in its starting pose is
 const ARM_START_OPACITY: f32 = 0.35;
+//How opaque the board's atoms are while faded, so what's under them shows
+const FADED_ATOM_OPACITY: f32 = 0.2;
 fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     const HL:f32 = SQRT3*5./3.;//top edge of the 6x6 quad, so the image's hex lands on (0,0)
     const TEXTURE_VERT_BUF: [UvVert;4] = [
@@ -344,6 +346,7 @@ impl RenderDataBase {
                     UniformDesc::new("world_offset", UniformType::Float2),
                     UniformDesc::new("angle", UniformType::Float1),
                     UniformDesc::new("scale", UniformType::Float2),
+                    UniformDesc::new("opacity", UniformType::Float1),
                     ],
             },
         };
@@ -427,7 +430,8 @@ fn symbol_color(fill: Color) -> Color{
 }
 
 impl RenderDataBase {
-    fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], world_offset: GFXPos, scale: (f32, f32)){
+    fn draw_atoms(&self, ctx: &mut Context, atoms:&[FloatAtom], world_offset: GFXPos, scale: (f32, f32), opacity: f32){
+        let fade = |[r, g, b, a]: Color| [r, g, b, a*opacity];
         ctx.apply_pipeline(&self.pipeline_textured);
 
         //Draw atom bonds
@@ -445,7 +449,7 @@ impl RenderDataBase {
                         let angle = rot_to_angle(r as Rot)+atom.rot;
                         ctx.apply_bindings(bindtype);
                         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                            offset, world_offset, angle, scale
+                            offset, world_offset, angle, scale, opacity
                         }));
                         ctx.draw(0, 6, 1);
                     }
@@ -456,7 +460,7 @@ impl RenderDataBase {
         ctx.apply_pipeline(&self.pipeline);
         ctx.apply_bindings(&self.shapes.circle_bindings);
         for atom in atoms {
-            let color = atom_color(atom.atom_type);
+            let color = fade(atom_color(atom.atom_type));
             let offset = atom.pos.into();
             let angle = 0.;
             ctx.apply_uniforms(UniformsSource::table(&BasicUniforms {
@@ -467,7 +471,7 @@ impl RenderDataBase {
         //Draw atom symbols
         self.font.set_pipeline(ctx);
         for atom in atoms {
-            let color = symbol_color(atom_color(atom.atom_type));
+            let color = fade(symbol_color(atom_color(atom.atom_type)));
             self.font.render_atom_symbol(ctx, atom.atom_type, color, atom.pos, world_offset, scale);
         }
     }
@@ -492,7 +496,7 @@ impl RenderDataBase {
                 for p in glyph.footprint(polymer){
                     let offset = pos_to_xy(p).into();
                     ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                        offset, world_offset, angle, scale
+                        offset, world_offset, angle, scale, opacity: 1.
                     }));
                     ctx.draw(0, 6, 1);
                 }
@@ -535,7 +539,7 @@ impl RenderDataBase {
         for (id, glyph) in shown_glyphs(){
             let atoms = Self::glyph_atoms(glyph, scene.polymers.get(&id));
             if !atoms.is_empty(){
-                self.draw_atoms(ctx, &atoms, world_offset, scale);
+                self.draw_atoms(ctx, &atoms, world_offset, scale, 1.);
             }
         }
         //Draw the Hex grid
@@ -555,7 +559,7 @@ impl RenderDataBase {
             ctx.apply_pipeline(&self.pipeline_textured);
             ctx.apply_bindings(&self.shapes.texture_bindings[HEX_GRID_ID]);
             ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                offset:[0.,0.], world_offset:[0.,0.], angle:0., scale:(1.,1.)
+                offset:[0.,0.], world_offset:[0.,0.], angle:0., scale:(1.,1.), opacity: 1.
             }));
             ctx.draw(0, 6, 1);
         }
@@ -581,7 +585,7 @@ impl RenderDataBase {
             for p in scene.area{
                 let offset = pos_to_xy(*p).into();
                 ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                    offset, world_offset, angle:0., scale
+                    offset, world_offset, angle:0., scale, opacity: 1.
                 }));
                 ctx.draw(0, 6, 1);
             }
@@ -591,7 +595,8 @@ impl RenderDataBase {
         self.draw_stream(ctx, &self.pipeline_tracks, &self.scene_tracks, WHITE, world_offset, scale);
 
         //Draw atoms
-        self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale);
+        let atom_opacity = if scene.faded_atoms {FADED_ATOM_OPACITY} else {1.};
+        self.draw_atoms(ctx, &scene.float_world.atoms_xy, world_offset, scale, atom_opacity);
 
         //Draw arms
         let shown_arms = || scene.float_world.arms_xy.iter().enumerate()
@@ -616,7 +621,7 @@ impl RenderDataBase {
         let world_offset: GFXPos = (camera.offset + extra).into();
         let atoms = Self::glyph_atoms(glyph, polymer);
         if !atoms.is_empty(){
-            self.draw_atoms(ctx, &atoms, world_offset, scale);
+            self.draw_atoms(ctx, &atoms, world_offset, scale, 1.);
         }
         ctx.apply_pipeline(&self.pipeline_textured);
         self.draw_glyph_cover(ctx, glyph, polymer, world_offset, scale);
@@ -700,6 +705,8 @@ pub struct Scene<'a>{
     pub area: &'a FxHashSet<Pos>,
     pub float_world: &'a FloatWorld,
     pub hidden: Option<PartId>,
+    //Draws the moving atoms faintly (not the ones shown on inputs and outputs)
+    pub faded_atoms: bool,
 }
 #[cfg(test)]
 mod tests {

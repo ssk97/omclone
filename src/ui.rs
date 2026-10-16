@@ -398,9 +398,10 @@ impl EventHandler for MyMiniquadApp {
         self.keymods = keymods;
         if let Loaded(loaded) = &mut self.app_state{
             //Typing in a text box or the tapes takes priority over the part hotkeys. The tapes handle undo
-            //themselves, so it happens in order with the keys typed before it.
+            //themselves, so it happens in order with the keys typed before it. 1 isn't an instruction, so it still
+            //fades the atoms from the tapes.
             let ctx = self.egui_mq.egui_ctx();
-            let typing = ctx.text_edit_focused() || tape_grid::has_focus(ctx);
+            let typing = ctx.text_edit_focused() || (tape_grid::has_focus(ctx) && keycode != KeyCode::Key1);
             if !typing && loaded.handle_key(keycode, keymods){
                 return;
             }
@@ -417,6 +418,17 @@ impl EventHandler for MyMiniquadApp {
             KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
             _ => {}
         }
+        //Even while typing, which may have started after 1 was pressed
+        if let (KeyCode::Key1, Loaded(loaded)) = (keycode, &mut self.app_state){
+            loaded.atoms_faded = false;
+        }
         self.egui_mq.key_up_event(keycode, keymods);
+    }
+
+    //Called when the window loses focus, after which 1's release may go elsewhere
+    fn window_minimized_event(&mut self) {
+        if let Loaded(loaded) = &mut self.app_state{
+            loaded.atoms_faded = false;
+        }
     }
 }

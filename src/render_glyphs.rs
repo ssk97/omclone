@@ -59,7 +59,7 @@ impl GlyphImageData {
         let angle = rot_to_angle(glyph.rot+self.rot_offset);
         ctx.apply_bindings(&self.tex);
         ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-            offset, world_offset, angle, scale
+            offset, world_offset, angle, scale, opacity: 1.
         }));
         ctx.draw(0, 6, 1);
         //Dot positions rotate with the glyph, but the dots themselves stay upright
@@ -67,7 +67,7 @@ impl GlyphImageData {
             let offset = pos_to_xy(glyph.reposition(*pos)).into();
             ctx.apply_bindings(binding);
             ctx.apply_uniforms(UniformsSource::table(&UvUniforms {
-                offset, world_offset, angle: 0., scale
+                offset, world_offset, angle: 0., scale, opacity: 1.
             }));
             ctx.draw(0, 6, 1);
         }

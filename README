@@ -25,6 +25,7 @@ Board
 - Delete or Backspace deletes the selected part. Ctrl+Z undoes, and Ctrl+Y or Ctrl+Shift+Z redoes.
 - Esc lets go of one thing at a time. Right-click stops placing parts or drawing track.
 - Drag with the right or middle button to pan, and use the wheel to zoom.
+- Hold 1 to make molecules transparent and see the glyphs under them
 
 Part window
 - "Add part" picks a part to place: click the board to put it down, or Shift+click to keep placing more.
