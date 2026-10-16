@@ -55,9 +55,9 @@ pub(super) enum TapeOp{
     //Deletes the selected timesteps, or else the one before or at the caret
     EraseBack, EraseForward,
 }
-//Where the longest of these arms' tapes ends
+//Where the longest of these arms' tapes ends, including what their Repeats and Resets run
 pub(super) fn longest_tape(arms: &[Arm]) -> usize{
-    arms.iter().map(|a| a.instruction_tape.end()).max().unwrap_or(0)
+    arms.iter().map(|a| a.decoded.tape.end()).max().unwrap_or(0)
 }
 //Applies `op` to `tapes` (the arms it changes, in order) at the selected timesteps `steps`, writing over or
 //blanking instructions instead of shifting them if `overwrite`. Returns where the caret goes, or None if there's
@@ -108,6 +108,21 @@ fn text_lines(text: &str, pasted: bool) -> Vec<Vec<Instr>>{
         .collect()
 }
 
+//Where the caret goes after a Repeat or Reset was typed at `step` into `tapes` (those of `arms`): past the longest of
+//what it runs in them. In insert mode, blanks go in after it, so that the instructions after it move past what it
+//runs, by the same amount in every arm.
+fn skip_what_it_runs(base: &World, arms: Range<usize>, tapes: &mut [Tape], step: usize, insert: bool) -> usize{
+    let len = arms.zip(tapes.iter())
+        .filter_map(|(i, tape)| base.arms[i].decode(tape, &base.track_maps).span_at(step)
+            .filter(|span| span.start == step).map(|span| span.len()))
+        .max().unwrap_or(1);
+    if insert{
+        for tape in tapes.iter_mut(){
+            tape.insert(step + 1, &vec![Instr::Empty; len - 1], false);
+        }
+    }
+    step + len
+}
 //Moves the caret, which moves the timeline there (unless it crashed before there)
 fn move_caret(loaded: &mut Loaded, step: usize){
     loaded.tape_sel.caret = step;
@@ -140,16 +155,22 @@ fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
         _ => selected.clone(),
     };
     let base = loaded.timeline.base();
-    let mut tapes: Vec<Tape> = base.arms[arms.clone()].iter().map(|a| a.instruction_tape.clone()).collect();
-    let Some(caret) = apply_op(&mut tapes, steps, &op, loaded.tape_mode) else {return};
+    let mut tapes: Vec<Tape> = base.arms[arms.clone()].iter().map(|a| a.tape.clone()).collect();
+    let Some(mut caret) = apply_op(&mut tapes, steps.clone(), &op, loaded.tape_mode) else {return};
+    let typed_repeat_or_reset = typing && matches!(&op, TapeOp::Write(lines)
+        if lines.len() == 1 && matches!(lines[0][..], [Instr::Repeat | Instr::Reset]));
+    if typed_repeat_or_reset{
+        caret = skip_what_it_runs(base, arms.clone(), &mut tapes, steps.start, !loaded.tape_mode);
+    }
+    //What runs can't differ before the first changed cell (see World::set_tape)
     let earliest = arms.clone().zip(&tapes)
-        .filter_map(|(i, tape)| base.arms[i].instruction_tape.first_difference(tape, base.repeat_length))
+        .filter_map(|(i, tape)| base.arms[i].tape.first_difference(tape, base.repeat_length))
         .min();
     match earliest{
         Some(earliest) => {
             loaded.record_tape_edit(arms.clone(), from, caret, joins, typing);
             for (i, tape) in arms.clone().zip(tapes){
-                loaded.timeline.base_mut().arms[i].instruction_tape = tape;
+                loaded.timeline.base_mut().set_tape(i, tape);
             }
             loaded.finish_tape_edit(earliest);
         }
@@ -185,7 +206,7 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
             if sel.steps().is_empty(){
                 return;
             }
-            let tapes = loaded.timeline.base().arms[sel.arms()].iter().map(|a| &a.instruction_tape);
+            let tapes = loaded.timeline.base().arms[sel.arms()].iter().map(|a| &a.tape);
             ui.ctx().copy_text(block_text(tapes, sel.steps()));
             if matches!(event, Event::Cut){
                 edit(loaded, TapeOp::EraseForward, false);
@@ -379,6 +400,7 @@ fn tint(instr: Instr) -> Color32{
         Extend | Retract => (60, 170, 90),
         Grab | Drop => (230, 140, 40),
         Forward | Back => (40, 170, 180),
+        Repeat | Reset => (220, 90, 160),
         _ => (128, 128, 128),
     };
     Color32::from_rgba_unmultiplied(r, g, b, 90)
@@ -388,6 +410,26 @@ fn paint_instr(painter: &egui::Painter, rect: Rect, instr: Instr, font: &egui::F
     //A gap on the right keeps neighboring instructions apart
     painter.rect_filled(Rect::from_min_max(rect.min + vec2(0., 1.), rect.max - vec2(1., 1.)), 1., tint(instr));
     painter.text(rect.center(), Align2::CENTER_CENTER, instr.to_char(), font.clone(), text_color);
+}
+//A cell that a Repeat or Reset covers: what's written there (if anything) in the top half, and what runs there in a
+//box in the bottom half, empty if nothing does. An instruction written where a Repeat or Reset runs (other than in
+//its own cell) is outlined, since the run crashes there.
+fn paint_covered(painter: &egui::Painter, rect: Rect, written: Instr, runs: Instr, overlap: bool,
+    fonts: (&egui::FontId, &egui::FontId), colors: (Color32, Color32))
+{
+    let split = rect.min.y + (rect.height() / 2.).round();
+    if written != Instr::Empty{
+        paint_instr(painter, Rect::from_x_y_ranges(rect.x_range(), rect.min.y..=split), written, fonts.0, colors.0);
+    }
+    let fill = if runs == Instr::Empty {Color32::from_rgba_unmultiplied(128, 128, 128, 40)} else {tint(runs).gamma_multiply(0.6)};
+    let run_box = Rect::from_min_max(pos2(rect.min.x, split), rect.max - vec2(1., 1.));
+    painter.rect_filled(run_box, 1., fill);
+    if runs != Instr::Empty{
+        painter.text(run_box.center(), Align2::CENTER_CENTER, runs.to_char(), fonts.1.clone(), colors.1);
+    }
+    if overlap{
+        painter.rect_stroke(rect, 1., Stroke::new(1.5, Color32::from_rgb(220, 50, 50)), StrokeKind::Inside);
+    }
 }
 //The instructions' letters, drawn as on the grid, and what they mean
 pub(super) fn tape_letters(ui: &mut egui::Ui){
@@ -404,6 +446,7 @@ pub(super) fn tape_letters(ui: &mut egui::Ui){
             (&[PivotCounterClockwise, PivotClockwise], "pivot counterclockwise / clockwise"),
             (&[Grab, Drop], "grab / drop"),
             (&[Forward, Back], "forward / back along a track"),
+            (&[Repeat, Reset], "repeat / reset (boxed letters show what they run)"),
             (&[Noop], "noop"),
             (&[Halt], "halt"),
         ]{
@@ -554,7 +597,7 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
             painter.rect_filled(row(0, step_count), 0., visuals.faint_bg_color);
         }
         //What a looping tape repeats: from its first instruction to where it starts over
-        let tape = &base.arms[arm].instruction_tape;
+        let tape = &base.arms[arm].decoded.tape;
         if !tape.halts() && !tape.instructions.is_empty(){
             painter.rect_filled(row(tape.first, tape.first + base.repeat_length), 0., Color32::from_rgba_unmultiplied(128, 128, 128, 45));
         }
@@ -577,11 +620,17 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
     }
     let text_color = visuals.strong_text_color();
     for arm in arms.clone(){
-        let tape = &base.arms[arm].instruction_tape;
-        for step in steps.start.max(tape.first)..steps.end.min(tape.end()){
-            let instr = tape.instructions[step - tape.first];
-            if instr != Instr::Empty{
-                paint_instr(painter, layout.cell_rect(arm, step), instr, font, text_color);
+        let Arm{tape, decoded, ..} = &base.arms[arm];
+        //The decoded tape starts with the written one, and runs on past it when a Repeat or Reset does
+        for step in steps.start.max(tape.first)..steps.end.min(decoded.tape.end()){
+            let rect = layout.cell_rect(arm, step);
+            let written = tape.cell(step);
+            match decoded.span_at(step){
+                Some(span) => paint_covered(painter, rect, written, decoded.tape.cell(step), written != Instr::Empty && step != span.start,
+                    (font, small), (text_color, visuals.text_color())),
+                None => if written != Instr::Empty{
+                    paint_instr(painter, rect, written, font, text_color);
+                }
             }
         }
     }
@@ -724,7 +773,7 @@ mod tests {
     #[test]
     fn pasted_unknown_characters_are_blanks() {
         //So the lines after them stay lined up
-        assert_eq!(text_lines("d.f\nBx", true), vec![vec![RotateClockwise, Empty, Grab], vec![Halt, Empty]]);
+        assert_eq!(text_lines("d.f\nBz", true), vec![vec![RotateClockwise, Empty, Grab], vec![Halt, Empty]]);
         //Typing one isn't a blank
         assert_eq!(text_lines("z", false), vec![Vec::<Instr>::new()]);
         assert_eq!(text_lines("D", false), vec![vec![RotateClockwise]]);
@@ -778,7 +827,7 @@ mod editing_tests {
         handle_frame(&mut loaded, &[key(Key::Z, Modifiers::COMMAND), Event::Text("f".into())]);
         let arms = &loaded.timeline.base().arms;
         assert_eq!(arms.len(), 1);
-        assert_eq!(arms[0].instruction_tape.instructions, vec![Instr::Grab]);
+        assert_eq!(arms[0].tape.instructions, vec![Instr::Grab]);
     }
 
     fn empty_arm(x: i32) -> Arm {
@@ -817,7 +866,7 @@ mod editing_tests {
         assert_eq!((loaded.tape_sel.arm, loaded.cursor_step()), (1, 5));
         assert!(has_focus(&ctx), "clicking the grid again keeps its focus");
         grid_frame(&ctx, &mut loaded, vec![Event::Text("f".into())]);
-        assert_eq!(loaded.timeline.base().arms[1].instruction_tape.cell(5), Instr::Grab);
+        assert_eq!(loaded.timeline.base().arms[1].tape.cell(5), Instr::Grab);
     }
 
     //When a frame took long enough for the pointer to move on after the press, the press landed where the pointer
@@ -854,7 +903,7 @@ mod editing_tests {
         (0..count).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm, Tape::new(i as usize, vec![Instr::Grab]))).collect()
     }
     fn arm_order(loaded: &Loaded) -> Vec<usize> {
-        loaded.timeline.base().arms.iter().map(|a| a.instruction_tape.first).collect()
+        loaded.timeline.base().arms.iter().map(|a| a.tape.first).collect()
     }
     //An arm's number, in the gutter
     fn number(layout: &Layout, arm: usize) -> Pos2 {
@@ -942,6 +991,56 @@ mod editing_tests {
         handle_frame(&mut loaded, &[Event::Text("a".into())]);
         loaded.update();
         assert_eq!(loaded.timeline.time(), 2. + loaded.run_speed);
+    }
+
+    fn typed(text: &str) -> Vec<Event> {
+        text.chars().map(|c| Event::Text(c.to_string())).collect()
+    }
+    fn arm_with(x: i32, instructions: Vec<Instr>) -> Arm {
+        Arm::new(Pos::new(x, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions))
+    }
+
+    #[test]
+    fn typing_a_reset_moves_on_past_what_it_runs() {
+        use Instr::*;
+        //Typed before the Drop, the Reset runs two turns back, so the Drop moves past both
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![Drop])]);
+        handle_frame(&mut loaded, &typed("ddxf"));
+        let arm = &loaded.timeline.base().arms[0];
+        assert_eq!(arm.tape.instructions, [RotateClockwise, RotateClockwise, Reset, Empty, Grab, Drop]);
+        assert_eq!(arm.decoded.overlap, None);
+        //The typing is one undo step, which puts back what runs too
+        handle_frame(&mut loaded, &[key(Key::Z, Modifiers::COMMAND)]);
+        let arm = &loaded.timeline.base().arms[0];
+        assert_eq!((&arm.tape.instructions[..], &arm.decoded.tape.instructions[..]), (&[Drop][..], &[Drop][..]));
+    }
+
+    #[test]
+    fn a_reset_typed_in_overwrite_mode_runs_over_what_follows() {
+        use Instr::*;
+        //Nothing moves, so the Drop is left where the Reset runs, but the caret still goes past it
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![Empty, Empty, Empty, Drop])]);
+        loaded.tape_mode = true;
+        handle_frame(&mut loaded, &typed("ddx"));
+        let arm = &loaded.timeline.base().arms[0];
+        assert_eq!(arm.tape.instructions, [RotateClockwise, RotateClockwise, Reset, Drop]);
+        assert_eq!(arm.decoded.overlap, Some((3, Reset)));
+        assert_eq!(loaded.tape_sel.caret, 4);
+    }
+
+    #[test]
+    fn a_reset_typed_into_several_arms_keeps_them_lined_up() {
+        use Instr::*;
+        //The first arm's Reset runs two turns and the second's one, so both make room for two
+        let arms = vec![arm_with(0, vec![RotateClockwise, RotateClockwise, Drop]), arm_with(3, vec![RotateClockwise, Empty, Drop])];
+        let mut loaded = Loaded::for_test(vec![], arms);
+        let right = key(Key::ArrowRight, Modifiers::NONE);
+        handle_frame(&mut loaded, &[right.clone(), right]);
+        loaded.tape_sel.anchor_arm = 1;
+        handle_frame(&mut loaded, &typed("x"));
+        let tapes: Vec<Vec<Instr>> = loaded.timeline.base().arms.iter().map(|a| a.tape.instructions.clone()).collect();
+        assert_eq!(tapes, [vec![RotateClockwise, RotateClockwise, Reset, Empty, Drop], vec![RotateClockwise, Empty, Reset, Empty, Drop]]);
+        assert_eq!(loaded.tape_sel.caret, 4);
     }
 
     #[test]

@@ -631,7 +631,8 @@ impl Loaded{
                 let landing = glyph.footprint(polymer.as_ref());
                 (polymer, track, None, landing)
             }
-            //Edits to arms leave the tracks and the loop length as they are
+            //Edits to arms leave the tracks as they are, and the loop length unless the arm's tape outgrows it (which
+            //run_moves allows for)
             PartId::Arm(i) => {
                 let mut arm = layout.arms[i].clone();
                 arm.run_moves(timestep, base.repeat_length, &base.track_maps);
@@ -1017,7 +1018,7 @@ mod tests {
         let mut loaded = Loaded::for_test(vec![], arms);
         (loaded.tape_sel.arm, loaded.tape_sel.anchor_arm) = (2, 2);
         //Each arm's tape starts at its original number
-        let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].instruction_tape.first;
+        let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].tape.first;
         assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderArm{from: 0, to: 3}), Ok(()));
         assert_eq!(caret_arm(&loaded), 2);
         assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(PartId::Arm(0))), Ok(()));

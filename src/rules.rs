@@ -326,6 +326,6 @@ mod tests {
         assert_eq!(rejections(&puzzle(ALL, 1), &solution), [Rejection::SameIndex{arm: 1}]);
         let init = puzzle_prep(&puzzle(ALL, 1), &solution).unwrap();
         assert_eq!((init.glyphs.len(), init.arms[0].len), (1, 3));
-        assert_eq!(init.arms[0].instruction_tape.instructions, [Instr::Grab, Instr::Drop], "the later instruction is kept");
+        assert_eq!(init.arms[0].tape.instructions, [Instr::Grab, Instr::Drop], "the later instruction is kept");
     }
 }

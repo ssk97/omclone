@@ -425,7 +425,7 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                     //Changed on a copy, so a failed setup leaves the solution as it was
                     let mut layout = loaded.timeline.base().layout();
                     for a in &mut layout.arms{
-                        if a.instruction_tape.instructions.contains(&Instr::Extend) || a.instruction_tape.instructions.contains(&Instr::Retract) {
+                        if a.tape.instructions.contains(&Instr::Extend) || a.tape.instructions.contains(&Instr::Retract) {
                             if a.arm_type == ArmType::PlainArm {
                                 a.arm_type = ArmType::Piston;
                                 pistons_added += 1;

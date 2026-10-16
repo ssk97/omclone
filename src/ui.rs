@@ -92,7 +92,7 @@ impl MyMiniquadApp {
         let puzzle = parser::parse_puzzle(&mut BufReader::new(f_puzzle))?;
         let solution = parser::parse_solution(&mut BufReader::new(f_sol))?;
         let init = parser::puzzle_prep(&puzzle, &solution)?;
-        let last_start = init.arms.iter().map(|a| a.instruction_tape.first).max().unwrap_or(0);
+        let last_start = init.arms.iter().map(|a| a.tape.first).max().unwrap_or(0);
         let world = World::setup_sim(&init)?;
         let max_timestep = last_start + world.repeat_length*2+100;
 

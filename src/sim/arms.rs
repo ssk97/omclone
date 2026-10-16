@@ -26,16 +26,19 @@ pub struct Arm {
     pub rot: Rot,
     pub len: i32,
     pub arm_type: ArmType,
-    pub instruction_tape: Tape,
+    //The tape as written, with its Repeats and Resets: what's edited and saved
+    pub tape: Tape,
+    //What it runs, decoded from `tape` by setup (World::set_tape keeps it up to date)
+    pub decoded: DecodedTape,
     pub grabbing: bool,
     pub halted: bool,
     pub atoms_grabbed: [AtomKey; 6],
 }
 
 impl Arm {
-    pub fn new(pos: Pos, rot: Rot, len: i32, arm_type: ArmType, instruction_tape: Tape) -> Self {
+    pub fn new(pos: Pos, rot: Rot, len: i32, arm_type: ArmType, tape: Tape) -> Self {
         //omsim reduces the solution file's rotation with a truncating % 6 when loading
-        Arm { pos, rot: rot % 6, len, arm_type, instruction_tape,
+        Arm { pos, rot: rot % 6, len, arm_type, tape, decoded: DecodedTape::default(),
             grabbing: false, halted: false,
             atoms_grabbed: [AtomKey::null(); 6],
         }
@@ -79,14 +82,18 @@ impl Arm {
             Extend | Retract | Grab | Drop | Halt | Noop | Empty => STILL,
         }
     }
-    //Runs only the arm's own moves for the timesteps before `until`. Atoms and other arms never change how an arm
-    //moves, so this puts it where a sim of those timesteps would (unless the sim crashes first).
+    //Runs only the arm's own moves for the timesteps before `until`, from where it starts. Atoms and other arms never
+    //change how an arm moves, so this puts it where a sim of those timesteps would (unless the sim crashes first).
     pub fn run_moves(&mut self, until: u64, repeat_length: usize, track_maps: &TrackMaps) {
+        //Decoded here, since an arm from a layout isn't yet. A looping tape longer than the loop (as a Reset can
+        //become when its arm is moved onto track) lengthens the loop once it's set up.
+        let tape = self.decode(&self.tape, track_maps).tape;
+        let repeat_length = if tape.halts() {repeat_length} else {repeat_length.max(tape.instructions.len())};
         for step in 0..until {
             if self.halted {
                 return;
             }
-            match self.instruction_tape.get(step as usize, repeat_length) {
+            match tape.get(step as usize, repeat_length) {
                 Instr::Halt => self.halted = true,
                 instruction => self.do_motion(self.movement(instruction, track_maps)),
             }
@@ -104,8 +111,13 @@ impl World {
         use Instr::*;
         use Movement::*;
         let arm_type = arm.arm_type;
-        let tape = &arm.instruction_tape;
+        let tape = &arm.decoded.tape;
         let timestep = timestep as usize;
+        //Even once halted: the tape itself is invalid
+        if let Some((_, kind)) = arm.decoded.overlap.filter(|&(step, _)| step == timestep) {
+            let error_str = if kind == Repeat {"Instruction inside a Repeat's expansion!"} else {"Instruction inside a Reset's expansion!"};
+            return Err(sim_error_pos(error_str, arm.pos));
+        }
         let instruction = tape.get(timestep, self.repeat_length);
         let was_grabbing = arm.grabbing;
         let action = if arm.halted {STILL} else {match instruction {

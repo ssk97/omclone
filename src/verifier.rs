@@ -197,7 +197,7 @@ impl Run {
         let mut executed: i64 = 0;
         let mut executions = [0i64; 10];
         for arm in &self.world.arms {
-            let tape = &arm.instruction_tape;
+            let tape = &arm.decoded.tape;
             let start = tape.first as i64 - self.start as i64;
             if cycle < start || tape.instructions.is_empty() {
                 continue;
@@ -595,7 +595,7 @@ fn decoded_metric(world: &World, puzzle: &FullPuzzle, metric: &str) -> Option<Re
                 if !b"adefgqrstwb".contains(&c) {
                     return Some(Err(VerifierError::metric("invalid instruction hotkey in 'instructions with hotkey' metric")));
                 }
-                count += world.arms.iter().flat_map(|a| &a.instruction_tape.instructions)
+                count += world.arms.iter().flat_map(|a| &a.decoded.tape.instructions)
                     .filter(|&&instr| tape_char(instr) == Some(c)).count() as i32;
             }
             count

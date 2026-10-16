@@ -86,8 +86,8 @@ impl Instr {
              'q' =>  Some(PivotCounterClockwise ),
              'g' =>  Some(Forward               ),
              't' =>  Some(Back                  ),
-             //'C' =>  Some(Repeat                ),
-             //'X' =>  Some(Reset                 ),
+             'c' =>  Some(Repeat                ),
+             'x' =>  Some(Reset                 ),
              'o' =>  Some(Noop                  ),
              'b' =>  Some(Halt                  ),
              ' ' =>  Some(Empty                 ),
@@ -96,7 +96,7 @@ impl Instr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Tape {
     pub first: usize,
     pub instructions: Vec<Instr>,
@@ -226,5 +226,23 @@ impl Tape {
         self.trim_end();
         self.trim_start();
         self.update_halts();
+    }
+}
+
+//A tape as it runs, with each Repeat and Reset replaced by what it stands for (see Arm::decode)
+#[derive(Debug, Clone, Default)]
+pub struct DecodedTape {
+    pub tape: Tape,
+    //Each Repeat's and Reset's timesteps, in order: from its own cell to the end of what it runs
+    pub spans: Vec<std::ops::Range<usize>>,
+    //The timestep of the first written instruction in a span past its own cell, and whether that span is a Repeat's
+    //or a Reset's. The run crashes there.
+    pub overlap: Option<(usize, Instr)>,
+}
+impl DecodedTape {
+    //The span covering a timestep, if any
+    pub fn span_at(&self, step: usize) -> Option<&std::ops::Range<usize>> {
+        let i = self.spans.partition_point(|s| s.end <= step);
+        self.spans.get(i).filter(|s| s.start <= step)
     }
 }

@@ -75,24 +75,25 @@ impl ResetState {
     }
 }
 
-//Setup stuff
-impl World {
-    //modifies the original arm to have the new instructions
-    fn normalize_instructions(
-        original: &mut Arm,
-        track_maps: &TrackMaps,
-    ) -> Result<()> {
+impl Arm {
+    //What `tape` runs on this arm, given where it starts: each Repeat or Reset becomes the instructions it stands
+    //for, starting in its own cell and running over the cells after it. A written instruction in those cells is an
+    //overlap, which the run crashes at; past it, decoding carries on as if the cell were blank.
+    pub fn decode(&self, tape: &Tape, track_maps: &TrackMaps) -> DecodedTape {
         use Instr::*;
-        let old_instructions = &original.instruction_tape.instructions;
-        let mut instructions = Vec::with_capacity(old_instructions.len() + 8);
+        let written = &tape.instructions;
+        //Indexes match `written`'s: each cell decodes to one instruction
+        let mut instructions = Vec::with_capacity(written.len() + 8);
+        let mut spans = Vec::new();
+        let mut overlap = None;
         let mut repeat_source = 0;
         let mut repeat_ending = 0;
         let mut any_nonrepeat = false;
         let mut curr = 0;
-        let fresh = ResetState::new(original, track_maps);
+        let fresh = ResetState::new(self, track_maps);
         let mut to_undo = fresh.clone();
-        while curr < old_instructions.len() {
-            let instr = old_instructions[curr];
+        while curr < written.len() {
+            let instr = written[curr];
             if !any_nonrepeat && !matches!(instr, Repeat | Empty ){
                 any_nonrepeat = true;
                 repeat_source = curr;
@@ -112,50 +113,39 @@ impl World {
                     instructions.push(instr);
                     curr += 1;
                 }
-
-                Repeat => {
-                    let rep_len = repeat_ending - repeat_source;
-                    if rep_len == 0 {
-                        instructions.push(Empty);
-                        curr += 1;
-                    } else {
-                        for i in 0..rep_len {
-                            let copied_instr = instructions[repeat_source + i];
-                            ensure!( i == 0|| old_instructions.get(curr + i).unwrap_or(&Empty) == &Empty,
-                                "Repeat instruction {:?} overlaps with {:?} on {}/{}. Repeat {}-{}",
-                                copied_instr,old_instructions.get(curr + i),
-                                curr,i,repeat_source,repeat_ending
-                            );
-                            instructions.push(copied_instr);
+                Repeat | Reset => {
+                    let runs = if instr == Repeat {
+                        //A halt starts a block without extending it, so a block of only halts repeats nothing
+                        let block = instructions[repeat_source..repeat_ending.max(repeat_source)].to_vec();
+                        if !block.is_empty() {
+                            any_nonrepeat = false;
+                            //A repeated block starts afresh, so a later reset only undoes what follows it
+                            to_undo = fresh.clone();
                         }
-                        curr += rep_len;
-                        any_nonrepeat = false;
-                        //A repeated block starts afresh, so a later reset only undoes what follows it
+                        block
+                    } else {
+                        let undo = to_undo.undo(track_maps);
                         to_undo = fresh.clone();
-                    }
-                }
-                Reset => {
-                    let mut reset_vec = to_undo.undo(track_maps);
-                    to_undo = fresh.clone();
-                    if reset_vec.len() == 0 {
-                        reset_vec.push(Empty)
+                        undo
                     };
-                    for i in 0..reset_vec.len() {
-                        ensure!(
-                            i == 0 || old_instructions.get(curr + i).unwrap_or(&Empty) == &Empty,
-                            "Reset instruction {:?} overlaps with {:?} on {}/{} (curr {})",
-                            reset_vec[i],
-                            old_instructions.get(curr + i),
-                            i, reset_vec.len(),
-                            curr,
-                        );
-                        instructions.push(reset_vec[i]);
+                    //One with nothing to run still takes its own cell
+                    let len = runs.len().max(1);
+                    if overlap.is_none() {
+                        let covered = (curr + 1..curr + len).find(|&i| written.get(i).is_some_and(|&w| w != Empty));
+                        overlap = covered.map(|i| (tape.first + i, instr));
                     }
-                    curr += reset_vec.len();
-                    repeat_ending = curr;
+                    if runs.is_empty() {
+                        instructions.push(Empty);
+                    } else {
+                        instructions.extend(runs);
+                    }
+                    spans.push(tape.first + curr..tape.first + curr + len);
+                    curr += len;
+                    if instr == Reset {
+                        repeat_ending = curr;
+                    }
                 }
                 Noop => {
-                    //Kept (rather than becoming Empty) so saving writes it back, preserving the loop length
                     instructions.push(Noop);
                     curr += 1;
                     //A noop takes a cycle, so like omsim it extends the repeated block (and the loop)
@@ -163,11 +153,12 @@ impl World {
                 }
             };
         }
-        instructions.shrink_to_fit();
-        original.instruction_tape = Tape::new(original.instruction_tape.first, instructions);
-        Ok(())
+        DecodedTape{tape: Tape::new(tape.first, instructions), spans, overlap}
     }
+}
 
+//Setup stuff
+impl World {
     pub fn setup_sim(init: &InitialWorld) -> Result<Self> {
         let mut world = World {
             timestep: 0,
@@ -209,7 +200,7 @@ impl World {
                 DoubleArm | TripleArm | HexArm | VanBerlo | Ravari => 30,
                 Piston => 40,
             };
-            World::normalize_instructions(a, &world.track_maps)?;
+            a.decoded = a.decode(&a.tape, &world.track_maps);
             if a.arm_type == VanBerlo || a.arm_type == Ravari {
                 use AtomType::*;
                 a.grabbing = true;
@@ -256,7 +247,7 @@ impl World {
         world.timestep = world.get_first_timestep();
         Ok(world)
     }
-    //The parts, ready to be set up again (the tapes are already normalized, which setup leaves as they are)
+    //The parts, ready to be set up again (which decodes the tapes again, for wherever the parts are then)
     pub fn layout(&self) -> InitialWorld {
         let mut glyphs = self.glyphs.clone();
         for (id, variants) in &self.input_variants {
@@ -266,18 +257,25 @@ impl World {
         }
         InitialWorld {
             glyphs,
-            arms: self.arms.iter().map(|a| Arm::new(a.pos, a.rot, a.len, a.arm_type, a.instruction_tape.clone())).collect(),
+            arms: self.arms.iter().map(|a| Arm::new(a.pos, a.rot, a.len, a.arm_type, a.tape.clone())).collect(),
             chambers: self.chambers.clone(),
         }
     }
     pub fn get_first_timestep(&self) -> u64{
         if self.arms.len() == 0 { return 0 }
-        self.arms.iter().map(|a|a.instruction_tape.first as u64).fold(u64::MAX, std::cmp::min)
+        self.arms.iter().map(|a|a.decoded.tape.first as u64).fold(u64::MAX, std::cmp::min)
     }
     //The shortest loop that fits every looping tape (halting tapes run once, so they don't count)
     pub fn min_repeat_length(&self) -> usize{
-        self.arms.iter().filter(|a| !a.instruction_tape.halts())
-            .map(|a| a.instruction_tape.instructions.len()).max().unwrap_or(0)
+        self.arms.iter().filter(|a| !a.decoded.tape.halts())
+            .map(|a| a.decoded.tape.instructions.len()).max().unwrap_or(0)
+    }
+    //Gives an arm a new tape as written, and decodes it. Nothing before the first changed cell runs differently,
+    //since a Repeat or Reset only runs over the cells after it.
+    pub fn set_tape(&mut self, arm: usize, tape: Tape){
+        let arm = &mut self.arms[arm];
+        arm.decoded = arm.decode(&tape, &self.track_maps);
+        arm.tape = tape;
     }
     //Sets the loop length, returning the first timestep it can affect
     pub fn set_repeat_length(&mut self, length: usize) -> usize{
@@ -286,17 +284,19 @@ impl World {
         //Arms start looping at their first instruction plus the loop length
         self.get_first_timestep() as usize + old.min(length)
     }
-    //Puts back the tapes and loop length from `saved`, a version of this world with the same parts.
-    //Returns the first timestep that can act differently, if anything changed.
+    //Puts back the tapes and loop length from `saved`, a version of this world with the same parts (so its decoded
+    //tapes still fit). Returns the first timestep that can act differently, if anything changed.
     pub fn restore_program(&mut self, saved: World) -> Option<usize>{
         let loop_len = self.repeat_length;
         debug_assert_eq!(self.arms.len(), saved.arms.len());
         let mut earliest = None;
         for (arm, saved) in self.arms.iter_mut().zip(saved.arms){
-            if let Some(step) = arm.instruction_tape.first_difference(&saved.instruction_tape, loop_len){
+            //As in set_tape, the written tapes' first difference is where what runs can first differ
+            if let Some(step) = arm.tape.first_difference(&saved.tape, loop_len){
                 earliest = Some(earliest.map_or(step, |e: usize| e.min(step)));
             }
-            arm.instruction_tape = saved.instruction_tape;
+            arm.tape = saved.tape;
+            arm.decoded = saved.decoded;
         }
         if saved.repeat_length != loop_len{
             let step = self.set_repeat_length(saved.repeat_length);
@@ -304,9 +304,9 @@ impl World {
         }
         earliest
     }
-    //The instructions in the tapes as they are now (with Repeat and Reset already expanded, which the game counts too)
+    //The instructions the tapes run, counting each Repeat and Reset as what it runs (as the game does)
     pub fn instruction_count(&self) -> i32 {
-        self.arms.iter().flat_map(|a| &a.instruction_tape.instructions)
+        self.arms.iter().flat_map(|a| &a.decoded.tape.instructions)
             .filter(|i| !matches!(i, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32
     }
     pub fn get_stats(&self) -> SolutionStats {

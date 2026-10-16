@@ -38,7 +38,8 @@ pub struct Completion {
 fn sync_program(world: &mut World, base: &World){
     world.repeat_length = base.repeat_length;
     for (arm, base_arm) in world.arms.iter_mut().zip(&base.arms){
-        arm.instruction_tape = base_arm.instruction_tape.clone();
+        arm.tape = base_arm.tape.clone();
+        arm.decoded = base_arm.decoded.clone();
     }
 }
 impl Timeline{
