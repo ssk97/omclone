@@ -28,6 +28,8 @@ pub(super) struct Loaded{
     pub(super) max_timestep: usize,
     pub(super) camera: CameraSetup,
     pub(super) camera_window_open: bool,
+    pub(super) help_window_open: bool,
+    pub(super) tape_help_window_open: bool,
     //Opened by each crash, and closable until the next
     pub(super) crash_window_open: bool,
     pub(super) solution: parser::FullSolution,
@@ -99,6 +101,8 @@ impl Loaded{
 
             max_timestep,camera,solution,puzzle,
             camera_window_open: false,
+            help_window_open: false,
+            tape_help_window_open: false,
             crash_window_open: false,
             message: None,
             load_notes,

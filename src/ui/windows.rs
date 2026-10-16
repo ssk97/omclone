@@ -202,6 +202,105 @@ pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, scree
     });
     loaded.camera_window_open = open;
 }
+//A row of a help window: keys or mouse actions, and what they do
+struct HelpEntry{
+    keys: &'static str,
+    does: &'static str,
+    //It does nothing without the editor, so the display build leaves it out
+    editor_only: bool,
+}
+const fn both(keys: &'static str, does: &'static str) -> HelpEntry{
+    HelpEntry{keys, does, editor_only: false}
+}
+const fn editor(keys: &'static str, does: &'static str) -> HelpEntry{
+    HelpEntry{keys, does, editor_only: true}
+}
+//These are the only list of the keys: the README points here
+const BOARD_HELP: &[HelpEntry] = &[
+    both("Click", "Select a part: the topmost on the hex, or the selected one if it's there"),
+    both("Tab / Shift+Tab, or wheel", "While the button is held: pick another part on that hex"),
+    editor("Drag", "Move a part"),
+    editor("Ctrl+drag", "Copy a part"),
+    editor("A / D", "While dragging or placing: turn counterclockwise / clockwise"),
+    editor("W / S", "While dragging or placing an arm: lengthen / shorten it"),
+    editor("Delete or Backspace", "Delete the selected part"),
+    editor("Esc", "Let go of the held part, then stop placing parts or drawing track"),
+    editor("Right-click", "Stop placing parts or drawing track"),
+    both("Right or middle drag", "Pan"),
+    both("Wheel", "Zoom"),
+    both("Hold 1", "Fade the molecules to see the glyphs under them"),
+    editor("Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z", "Undo; redo"),
+];
+const PART_WINDOW_HELP: &[HelpEntry] = &[
+    both("Click a part in the list", "Select it"),
+    editor("Drag a glyph in the list", "Reorder it"),
+    editor("Shift+click", "Place a part from Add part, and keep placing more"),
+    editor("Enter, or a click elsewhere", "Apply a typed value"),
+    editor("w e a d z x", "In Path: steps to neighboring hexes, or (dx,dy) to jump. Esc drops what was typed."),
+];
+const TAPE_HELP: &[HelpEntry] = &[
+    both("Click a cell", "Move the caret, and the timeline, there"),
+    both("Click the ruler", "Go to that timestep"),
+    both("Click an arm number", "Select its row"),
+    editor("Drag an arm number", "Reorder the arms"),
+    both("Drag; Shift+click; Shift+arrows", "Select"),
+    both("Arrows", "Move the caret"),
+    both("Home / End", "Go to step 0 / the end of the selected tapes. With Shift, select to there."),
+    both("Ctrl+A", "Select every tape"),
+    both("Ctrl+C", "Copy the selection, a line per arm"),
+    editor("Backspace / Delete", "Erase"),
+    editor("Insert", "Toggle overwrite mode"),
+    editor("Ctrl+X / Ctrl+V", "Cut / paste"),
+    editor("Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z", "Undo; redo"),
+    both("Esc", "Clear the selection, then leave the tapes"),
+];
+const CMD_NOTE: &str = "Ctrl means Cmd on a Mac";
+//The entries that do something in this build
+fn help_grid(ui: &mut egui::Ui, id: &str, entries: &[HelpEntry]){
+    egui::Grid::new(id).striped(true).show(ui, |ui| {
+        for entry in entries.iter().filter(|e| EDITOR_ENABLED || !e.editor_only){
+            ui.strong(entry.keys);
+            ui.label(entry.does);
+            ui.end_row();
+        }
+    });
+}
+//Sized to fit, scrolling only when the screen is too short. A resizable window would start out shorter than its
+//scroll area's contents, and stay that way. Nothing in it can fill the width (like a separator), which would make it
+//as wide as the screen.
+fn help_window_frame<'a>(title: &str, open: &'a mut bool) -> egui::Window<'a>{
+    egui::Window::new(title).open(open).auto_sized()
+}
+//Opened from the Part window
+pub(super) fn help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+    help_window_frame("Help", &mut loaded.help_window_open).show(egui_ctx, |ui| {
+        ui.weak(CMD_NOTE);
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Board");
+            help_grid(ui, "board_help", BOARD_HELP);
+            ui.heading("Part window");
+            help_grid(ui, "part_window_help", PART_WINDOW_HELP);
+            ui.add_space(ui.spacing().item_spacing.y);
+            ui.weak("Tape keys: the ? above the tapes, in the Arms window");
+        });
+    });
+}
+//Opened by the ? in the Arms window. It first opens beside that window, so it doesn't cover the tapes.
+pub(super) fn tape_help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+    let mut window = help_window_frame("Tape help", &mut loaded.tape_help_window_open);
+    if let Some(arms) = egui_ctx.memory(|m| m.area_rect(arms_window_id())){
+        window = window.default_pos(arms.right_top() + egui::vec2(8., 0.));
+    }
+    window.show(egui_ctx, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Instructions");
+            tape_grid::tape_letters(ui);
+            ui.heading("Keys");
+            ui.weak(CMD_NOTE);
+            help_grid(ui, "tape_help", TAPE_HELP);
+        });
+    });
+}
 #[cfg(feature = "editor_ui")]
 pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloaded_info: &mut PathInfo){
     egui::Window::new("File info").show(egui_ctx, |ui| {
@@ -293,10 +392,13 @@ fn solution_stats(ui: &mut egui::Ui, loaded: &Loaded){
         ui.end_row();
     });
 }
+fn arms_window_id() -> egui::Id{
+    egui::Id::new("arms_window")
+}
 //`extra_message` reports what "Optimize Pistons" changed
 #[cfg_attr(not(feature = "editor_ui"), allow(unused_variables))]
 pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_message: &mut Option<String>){
-    let mut arm_window = egui::Window::new("Arms");
+    let mut arm_window = egui::Window::new("Arms").id(arms_window_id());
     #[cfg(not(feature = "editor_ui"))]{
         arm_window = arm_window.default_open(false);
     }
@@ -345,6 +447,11 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                 }
                 ui.separator();
             }
+            //Hovering it doesn't take the tapes' focus, so the letters can be looked up while typing
+            ui.toggle_value(&mut loaded.tape_help_window_open, "?").on_hover_ui(|ui| {
+                tape_grid::tape_letters(ui);
+                ui.weak("Click for all the tape keys");
+            });
         });
         let grid_top = ui.cursor().top();
         let grid_height = tape_grid::tape_grid(ui, loaded);
@@ -389,6 +496,7 @@ pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             //First, so the readout changing length doesn't move it
             ui.toggle_value(&mut loaded.camera_window_open, "Camera")
                 .on_hover_text("Camera controls, for moving and zooming without a mouse wheel or right button");
+            ui.toggle_value(&mut loaded.help_window_open, "Help").on_hover_text("Keys and mouse controls");
             readout_label(ui, loaded, mouse_readout(loaded));
         });
         //Kept, blank, while nothing is selected, so selecting a part doesn't move what's below

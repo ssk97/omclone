@@ -383,6 +383,43 @@ fn tint(instr: Instr) -> Color32{
     };
     Color32::from_rgba_unmultiplied(r, g, b, 90)
 }
+//An instruction's cell, drawn over the grid's background
+fn paint_instr(painter: &egui::Painter, rect: Rect, instr: Instr, font: &egui::FontId, text_color: Color32){
+    //A gap on the right keeps neighboring instructions apart
+    painter.rect_filled(Rect::from_min_max(rect.min + vec2(0., 1.), rect.max - vec2(1., 1.)), 1., tint(instr));
+    painter.text(rect.center(), Align2::CENTER_CENTER, instr.to_char(), font.clone(), text_color);
+}
+//The instructions' letters, drawn as on the grid, and what they mean
+pub(super) fn tape_letters(ui: &mut egui::Ui){
+    use Instr::*;
+    if EDITOR_ENABLED{
+        ui.label("Type these at the caret. Space leaves a blank.");
+    }
+    let cell = Layout::new(ui, 1).cell;
+    let font = egui::TextStyle::Monospace.resolve(ui.style());
+    egui::Grid::new("tape_letters").show(ui, |ui| {
+        for (instrs, meaning) in [
+            (&[Extend, Retract][..], "extend / retract"),
+            (&[RotateCounterClockwise, RotateClockwise], "rotate counterclockwise / clockwise"),
+            (&[PivotCounterClockwise, PivotClockwise], "pivot counterclockwise / clockwise"),
+            (&[Grab, Drop], "grab / drop"),
+            (&[Forward, Back], "forward / back along a track"),
+            (&[Noop], "noop"),
+            (&[Halt], "halt"),
+        ]{
+            let (rect, _) = ui.allocate_exact_size(vec2(2. * cell.x, cell.y), Sense::hover());
+            let visuals = ui.visuals();
+            let used = Rect::from_min_size(rect.min, vec2(instrs.len() as f32 * cell.x, cell.y));
+            ui.painter().rect_filled(used, 0., visuals.extreme_bg_color);
+            for (i, &instr) in instrs.iter().enumerate(){
+                let cell_rect = Rect::from_min_size(rect.min + vec2(i as f32 * cell.x, 0.), cell);
+                paint_instr(ui.painter(), cell_rect, instr, &font, visuals.strong_text_color());
+            }
+            ui.label(meaning);
+            ui.end_row();
+        }
+    });
+}
 
 //Shows the grid, returning the height it needs to show every arm
 pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
@@ -544,10 +581,7 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
         for step in steps.start.max(tape.first)..steps.end.min(tape.end()){
             let instr = tape.instructions[step - tape.first];
             if instr != Instr::Empty{
-                let rect = layout.cell_rect(arm, step);
-                //A gap on the right keeps neighboring instructions apart
-                painter.rect_filled(Rect::from_min_max(rect.min + vec2(0., 1.), rect.max - vec2(1., 1.)), 1., tint(instr));
-                painter.text(rect.center(), Align2::CENTER_CENTER, instr.to_char(), font.clone(), text_color);
+                paint_instr(painter, layout.cell_rect(arm, step), instr, font, text_color);
             }
         }
     }

@@ -208,6 +208,8 @@ impl EventHandler for MyMiniquadApp {
                     windows::message_window(egui_ctx, "world_message", &mut loaded.message);
                     windows::crash_window(egui_ctx, loaded);
                     windows::camera_window(egui_ctx, loaded, screen_size);
+                    windows::help_window(egui_ctx, loaded);
+                    windows::tape_help_window(egui_ctx, loaded);
                     #[cfg(feature = "editor_ui")]
                     windows::file_window(egui_ctx, loaded, &mut self.unloaded_info);
                     windows::arms_window(egui_ctx, loaded, &mut self.extra_message);
