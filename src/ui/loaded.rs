@@ -50,6 +50,9 @@ pub(super) struct Loaded{
     //The arms and caret timestep after the last tape edit, while more typing there joins its undo step
     pub(super) tape_group: Option<(Range<usize>, usize)>,
     pub(super) run_state: RunState,
+    //The timeline's time as last shown. An edit can move the timeline back to re-simulate from before its change, and
+    //it comes straight back here (or to the target, if that's earlier) instead of replaying the steps on the way.
+    shown_time: f64,
     pub(super) area_mode: AreaMode,
     pub(super) run_speed: f64,
     pub(super) popup_reload: bool,
@@ -105,6 +108,7 @@ impl Loaded{
             tape_sel: TapeSelection::default(),
             tape_group: None,
             run_state: RunState::Manual(0),
+            shown_time: 0.,
             area_mode: AreaMode::Hidden,
             run_speed: 0.05,
             popup_reload: false,
@@ -296,13 +300,15 @@ impl Loaded{
         let target_time = match self.run_state{
             RunState::Manual(target_timestep) => {
                 let target_timestep = target_timestep as f64;
-                if target_timestep > time+1.001{
+                //Moves are measured from where the timeline was shown, so one step ahead of there plays out
+                let from = time.max(self.shown_time.min(target_timestep));
+                if target_timestep > from+1.001{
                     target_timestep
                 } else {
-                    f64::min(time+self.run_speed,target_timestep)
+                    f64::min(from+self.run_speed,target_timestep)
                 }
             },
-            RunState::FreeRun => time+self.run_speed,
+            RunState::FreeRun => time.max(self.shown_time)+self.run_speed,
             RunState::Crashed{..} => return,
         };
         if target_time < time{
@@ -313,6 +319,7 @@ impl Loaded{
             self.run_state = RunState::Crashed{step: self.timeline.curr().timestep as usize, error};
             self.crash_window_open = true;
         }
+        self.shown_time = self.timeline.time();
     }
 }
 

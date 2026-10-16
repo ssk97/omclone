@@ -879,6 +879,37 @@ mod editing_tests {
         assert_eq!(arm_order(&loaded), vec![0, 1, 2]);
     }
 
+    //Shown at timestep 2, with an arm that swings back and forth, so any edit at the caret changes what it does
+    fn swinging_at_step_2() -> Loaded {
+        use Instr::{RotateClockwise as Cw, RotateCounterClockwise as Ccw};
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Cw, Ccw, Cw, Ccw]));
+        let mut loaded = Loaded::for_test(vec![], vec![arm]);
+        let right = key(Key::ArrowRight, Modifiers::NONE);
+        handle_frame(&mut loaded, &[right.clone(), right]);
+        loaded.update();
+        assert_eq!(loaded.timeline.time(), 2.);
+        loaded
+    }
+
+    //A tape edit moves the timeline back to the start to re-simulate, and when the caret then landed one step past
+    //there, the timeline replayed that step instead of going straight to it
+    #[test]
+    fn erasing_goes_straight_to_the_caret() {
+        let mut loaded = swinging_at_step_2();
+        handle_frame(&mut loaded, &[key(Key::Backspace, Modifiers::NONE)]);
+        loaded.update();
+        assert_eq!(loaded.timeline.time(), 1.);
+    }
+
+    //Like moving right, it plays the timestep from where the timeline was shown
+    #[test]
+    fn typing_plays_the_typed_step() {
+        let mut loaded = swinging_at_step_2();
+        handle_frame(&mut loaded, &[Event::Text("a".into())]);
+        loaded.update();
+        assert_eq!(loaded.timeline.time(), 2. + loaded.run_speed);
+    }
+
     #[test]
     fn keys_after_undoing_the_only_arm() {
         let mut loaded = Loaded::for_test(vec![], vec![]);

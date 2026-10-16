@@ -39,7 +39,8 @@ Part window
 Tapes (the Arms window)
 - Click a cell to move the caret (and the timeline) there. Click the ruler to pick a timestep, or an arm number to
   pick its row. Drag an arm number to reorder the arms.
-- Drag across cells, or use Shift with clicks or arrow keys, to select. Home/End and Ctrl+A also move or select.
+- Drag across cells, or use Shift with clicks or arrow keys, to select. Home/End go to step 0 or to the end of the
+  selected tapes, and Shift+Home/End select everything before or after the caret. Ctrl+A selects every tape.
 - Type instructions at the caret: w/s extend/retract, a/d rotate counterclockwise/clockwise, q/e pivot
   counterclockwise/clockwise, f/r grab/drop, g/t move forward/back along a track, o noop, b halt, space blank.
 - Backspace/Delete erase. Insert toggles overwrite ("Tape/overwrite mode"). Ctrl+C/X/V copy, cut and paste
