@@ -2,16 +2,16 @@
 use super::*;
 
 //Moving the mouse this far (in pixels) with the button held starts a drag
-pub(super) const DRAG_THRESHOLD_PX: f32 = 4.;
+pub const DRAG_THRESHOLD_PX: f32 = 4.;
 const TRACK_OUTSIDE_CHAMBERS: &str = "That would put track outside the chambers (see \"Allow overlap\")";
 //What an edit does to a part, for checking whether it's allowed right now
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(super) enum EditKind{
+pub enum EditKind{
     //Moving, rotating, resizing, or changing an arm's type
     Move, Delete, Duplicate, Reorder,
 }
 //What the left mouse button does on the board
-pub(super) enum BoardTool{
+pub enum BoardTool{
     //Clicking picks parts, and dragging one moves it. Holds the press while the button is down.
     Select(Option<Press>),
     //Clicking places a new part
@@ -20,77 +20,77 @@ pub(super) enum BoardTool{
     Track(TrackMode, Option<TrackStroke>),
 }
 impl BoardTool{
-    pub(super) fn press(&self) -> Option<&Press>{
+    pub fn press(&self) -> Option<&Press>{
         match self {BoardTool::Select(press) => press.as_ref(), _ => None}
     }
     fn press_mut(&mut self) -> Option<&mut Press>{
         match self {BoardTool::Select(press) => press.as_mut(), _ => None}
     }
-    pub(super) fn placing(&self) -> Option<&Placing>{
+    pub fn placing(&self) -> Option<&Placing>{
         match self {BoardTool::Place(placing) => Some(placing), _ => None}
     }
-    pub(super) fn track_mode(&self) -> Option<&TrackMode>{
+    pub fn track_mode(&self) -> Option<&TrackMode>{
         match self {BoardTool::Track(mode, _) => Some(mode), _ => None}
     }
-    pub(super) fn stroke(&self) -> Option<&TrackStroke>{
+    pub fn stroke(&self) -> Option<&TrackStroke>{
         match self {BoardTool::Track(_, stroke) => stroke.as_ref(), _ => None}
     }
 }
 //Left mouse button input for the board, in logical pixels on a screen of size `screen`
-pub(super) enum BoardInput{
+pub enum BoardInput{
     Press{px: (f32, f32), screen: (f32, f32), keymods: KeyMods},
     Move{px: (f32, f32), screen: (f32, f32), over_ui: bool},
     Release,
 }
 //The left mouse button is held on the board
-pub(super) struct Press{
+pub struct Press{
     press_px: (f32, f32),
     press_xy: XYPos,
     press_hex: Pos,
     //The parts under the pressed hex, top first, and which one is picked
-    pub(super) stack: Vec<PartId>,
-    pub(super) cand: usize,
+    pub stack: Vec<PartId>,
+    pub cand: usize,
     wheel_accum: f32,
     //Ctrl was held, so dragging makes a copy
-    pub(super) duplicate: bool,
-    pub(super) drag: Option<Drag>,
+    pub duplicate: bool,
+    pub drag: Option<Drag>,
 }
-pub(super) struct Drag{
+pub struct Drag{
     cursor_xy: XYPos,
     //From the rotate/length hotkeys
     rot: Rot,
     len: i32,
 }
 //A new part on the cursor, waiting to be placed
-pub(super) struct Placing{
-    pub(super) part: NewPart,
+pub struct Placing{
+    pub part: NewPart,
     rot: Rot,
     len: i32,
     //None while the cursor is off the board
     cursor_xy: Option<XYPos>,
 }
 //Strokes over the board reshape a track
-pub(super) struct TrackMode{
+pub struct TrackMode{
     //None for a new track, until its first hex is placed
-    pub(super) glyph: Option<usize>,
-    pub(super) tool: TrackTool,
+    pub glyph: Option<usize>,
+    pub tool: TrackTool,
 }
 //The track's path during a stroke (from pressing the mouse button to releasing it)
-pub(super) struct TrackStroke{
+pub struct TrackStroke{
     path: Vec<Pos>,
     //Hexes this stroke added, which going back over takes off again
     added: usize,
     last_hex: Pos,
     //Why the last hex entered wasn't used
-    pub(super) refusal: Option<&'static str>,
+    pub refusal: Option<&'static str>,
 }
 //The pending edit, made, for drawing
-pub(super) struct Preview{
+pub struct Preview{
     edit: LayoutEdit,
     //The part it places or changes
     part: PartId,
     layout: InitialWorld,
-    pub(super) world: std::result::Result<World, String>,
+    pub world: std::result::Result<World, String>,
     float_world: FloatWorld,
     polymer: Option<Polymer>,
     track: Option<TrackMaps>,
@@ -101,10 +101,10 @@ pub(super) struct Preview{
     overlaps: SmallVec<[Pos; 8]>,
 }
 impl Press{
-    pub(super) fn part(&self) -> PartId{
+    pub fn part(&self) -> PartId{
         self.stack[self.cand]
     }
-    pub(super) fn kind(&self) -> EditKind{
+    pub fn kind(&self) -> EditKind{
         if self.duplicate {EditKind::Duplicate} else {EditKind::Move}
     }
     //Where the grabbed point of the part is now
@@ -126,7 +126,7 @@ impl Press{
 }
 impl Loaded{
     //Why the layout can't be changed right now, if it can't
-    pub(super) fn edit_lock(&self) -> Option<&'static str>{
+    pub fn edit_lock(&self) -> Option<&'static str>{
         if !EDITOR_ENABLED{
             Some("Editing is disabled")
         } else if matches!(self.run_state, RunState::FreeRun){
@@ -136,7 +136,7 @@ impl Loaded{
         }
     }
     //Why the part can't be edited this way right now, if it can't
-    pub(super) fn part_lock(&self, part: PartId, kind: EditKind) -> Option<&'static str>{
+    pub fn part_lock(&self, part: PartId, kind: EditKind) -> Option<&'static str>{
         use EditKind::*;
         if let Some(reason) = self.edit_lock(){
             return Some(reason);
@@ -158,17 +158,17 @@ impl Loaded{
         }
     }
     //Why the held part can't be dragged, if it can't
-    pub(super) fn press_lock(&self) -> Option<&'static str>{
+    pub fn press_lock(&self) -> Option<&'static str>{
         let press = self.tool.press()?;
         self.part_lock(press.part(), press.kind())
     }
     //The part to outline: the candidate while the mouse is held, otherwise the selection
-    pub(super) fn highlighted_part(&self) -> Option<PartId>{
+    pub fn highlighted_part(&self) -> Option<PartId>{
         self.tool.press().map(|p| p.part()).or(self.selection)
     }
     //A track tool ends when anything but its track is selected (a new track has none yet, so it keeps on
     //when nothing is selected). So does Path text, which would otherwise be shown again unapplied.
-    pub(super) fn select(&mut self, part: Option<PartId>){
+    pub fn select(&mut self, part: Option<PartId>){
         self.selection = part;
         if self.tool.track_mode().is_some_and(|m| m.glyph.map(PartId::Glyph) != part){
             self.end_track_mode();
@@ -198,7 +198,7 @@ impl Loaded{
         Ok(())
     }
     //Makes the edit if it's allowed. A part it adds or renumbers is selected.
-    pub(super) fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
+    pub fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
         if matches!(edit, LayoutEdit::Part(e) if e.is_noop()){
             return Ok(());
         }
@@ -247,44 +247,44 @@ impl Loaded{
             }
         }
     }
-    pub(super) fn cancel_press(&mut self){
+    fn cancel_press(&mut self){
         if let BoardTool::Select(press) = &mut self.tool{
             *press = None;
         }
     }
-    pub(super) fn start_placing(&mut self, part: NewPart){
+    pub fn start_placing(&mut self, part: NewPart){
         self.tool = BoardTool::Place(Placing{part, rot: 0, len: 1, cursor_xy: None});
     }
-    pub(super) fn start_new_track(&mut self){
+    pub fn start_new_track(&mut self){
         self.select(None);
         self.tool = BoardTool::Track(TrackMode{glyph: None, tool: TrackTool::AddBack}, None);
     }
     //Sets (or with None, ends) the board tool for reshaping the track
-    pub(super) fn set_track_tool(&mut self, glyph: usize, tool: Option<TrackTool>){
+    pub fn set_track_tool(&mut self, glyph: usize, tool: Option<TrackTool>){
         self.tool = match tool{
             Some(tool) => BoardTool::Track(TrackMode{glyph: Some(glyph), tool}, None),
             None => BoardTool::Select(None),
         };
     }
-    pub(super) fn end_track_mode(&mut self){
+    pub fn end_track_mode(&mut self){
         if matches!(self.tool, BoardTool::Track(..)){
             self.tool = BoardTool::Select(None);
         }
     }
     //Goes back to picking parts, putting away the part being placed or ending the track mode
-    pub(super) fn end_tool(&mut self){
+    pub fn end_tool(&mut self){
         if !matches!(self.tool, BoardTool::Select(_)){
             self.tool = BoardTool::Select(None);
         }
     }
     //A right-click (without panning) puts away the part being placed or ends the track mode
-    pub(super) fn right_click(&mut self){
+    pub fn right_click(&mut self){
         self.end_tool();
     }
     //Takes mouse input for the board. Mouse events arrive before egui's frame sees them, so a press made while a text
     //field is being typed in waits, along with the input after it, until egui has applied the field (see
     //flush_board_input). Otherwise the press could select another part first, and the field's value would go to it.
-    pub(super) fn board_input(&mut self, input: BoardInput, typing: bool){
+    pub fn board_input(&mut self, input: BoardInput, typing: bool){
         if !self.waiting_input.is_empty() || (typing && matches!(input, BoardInput::Press{..})){
             self.waiting_input.push(input);
         } else {
@@ -292,7 +292,7 @@ impl Loaded{
         }
     }
     //Applies the input that waited for egui's frame
-    pub(super) fn flush_board_input(&mut self){
+    pub fn flush_board_input(&mut self){
         for input in std::mem::take(&mut self.waiting_input){
             self.apply_board_input(input);
         }
@@ -304,7 +304,7 @@ impl Loaded{
             BoardInput::Release => self.release(),
         }
     }
-    pub(super) fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
+    fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
         self.cancel_press();
         let press_xy = self.camera.screen_to_world(px, screen_size);
         let press_hex = xy_to_pos(press_xy);
@@ -392,7 +392,7 @@ impl Loaded{
             Err(err) => self.message = Some(err),
         }
     }
-    pub(super) fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
+    fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
         let cursor_xy = self.camera.screen_to_world(px, screen_size);
         self.pointer_over_ui = over_ui;
         //Panning and zooming keep the world under the mouse where it is, so this stays right until it moves again
@@ -442,7 +442,7 @@ impl Loaded{
             drag.len = 0;
         }
     }
-    pub(super) fn release(&mut self){
+    fn release(&mut self){
         let press = match &mut self.tool{
             BoardTool::Select(press) => press.take(),
             BoardTool::Track(..) => return self.finish_stroke(),
@@ -457,7 +457,7 @@ impl Loaded{
         }
     }
     //Returns true if the wheel was used to pick a part (rather than zoom)
-    pub(super) fn wheel(&mut self, dy: f32) -> bool{
+    pub fn wheel(&mut self, dy: f32) -> bool{
         let Some(press) = self.tool.press_mut() else {return false};
         press.wheel_accum += dy;
         //Steps once per notch, but trackpads send many small movements
@@ -469,7 +469,7 @@ impl Loaded{
         true
     }
     //Returns true if the board used the key
-    pub(super) fn handle_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
+    pub fn handle_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
         let command = keymods.ctrl || keymods.logo;
         //Only picking from the stack and fading the atoms work without the editor
         if !EDITOR_ENABLED && !matches!(keycode, KeyCode::Tab | KeyCode::Escape | KeyCode::Key1){
@@ -650,12 +650,12 @@ impl Loaded{
         };
         Preview{edit, part, layout, world, float_world, polymer, track, arm_now, timestep, landing, overlaps}
     }
-    pub(super) fn drop_preview(&mut self){
+    pub fn drop_preview(&mut self){
         self.preview = None;
         self.scene_tracks = None;
     }
     //Keeps the preview of the pending edit up to date
-    pub(super) fn refresh_preview(&mut self){
+    pub fn refresh_preview(&mut self){
         if matches!(self.run_state, RunState::FreeRun){
             //Nothing can be edited while running, though parts can still be picked
             if let BoardTool::Select(press) = &mut self.tool{
@@ -683,7 +683,7 @@ impl Loaded{
         }
         self.preview = Some(self.build_preview(edit));
     }
-    pub(super) fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
+    pub fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const CRASH_COLOR: Color = [1., 0.1, 0.1, 1.];
         self.draw_board(render, ctx);
         //Last, so nothing covers it. The board shows the moment of the crash, so it circles the parts that collided.

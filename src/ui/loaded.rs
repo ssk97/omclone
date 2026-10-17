@@ -2,93 +2,93 @@
 use super::*;
 use std::ops::Range;
 
-pub(super) enum RunState{
+pub enum RunState{
     Manual(usize), FreeRun,
     //The timestep it crashed in, and why
     Crashed{step: usize, error: SimError},
 }
 //What an undo step changed: tapes-only steps can be undone without re-simulating from the start
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) enum StepKind{
+pub enum StepKind{
     Layout, Tapes
 }
 //Hidden still checks collisions and counts area, so showing it again doesn't re-simulate
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) enum AreaMode{
+pub enum AreaMode{
     Shown, Hidden, Off
 }
 //Saved solutions are named as edited by omclone
-pub(super) fn saved_solution_name(name: &str) -> String{
+pub fn saved_solution_name(name: &str) -> String{
     if name.contains("omclone") {name.to_owned()} else {format!("{name}(omclone)")}
 }
-pub(super) struct Loaded{
-    pub(super) timeline: Timeline,
-    pub(super) float_world: FloatWorld,
+pub struct Loaded{
+    pub timeline: Timeline,
+    pub float_world: FloatWorld,
 
-    pub(super) max_timestep: usize,
-    pub(super) camera: CameraSetup,
-    pub(super) camera_window_open: bool,
-    pub(super) help_window_open: bool,
-    pub(super) tape_help_window_open: bool,
+    pub max_timestep: usize,
+    pub camera: CameraSetup,
+    pub camera_window_open: bool,
+    pub help_window_open: bool,
+    pub tape_help_window_open: bool,
     //Opened by each crash, and closable until the next
-    pub(super) crash_window_open: bool,
-    pub(super) solution: parser::FullSolution,
+    pub crash_window_open: bool,
+    pub solution: parser::FullSolution,
     //For checking the solution against the rules omsim applies when loading it
     puzzle: parser::FullPuzzle,
-    pub(super) message: Option<String>,
+    pub message: Option<String>,
     //What loading changed from the file, until Save writes the change. Only the editor shows these.
     #[cfg_attr(not(feature = "editor_ui"), allow(dead_code))]
-    pub(super) load_notes: Vec<String>,
+    pub load_notes: Vec<String>,
     //What omsim would reject the solution for, as Save would write it
     #[cfg_attr(not(feature = "editor_ui"), allow(dead_code))]
-    pub(super) rule_notes: Vec<String>,
+    pub rule_notes: Vec<String>,
     //The solution changed since it was loaded or saved
-    pub(super) dirty: bool,
+    pub dirty: bool,
     //It changed since the emergency save was last updated (see recovery)
     backup_stale: bool,
 
-    pub(super) tape_mode: bool,
-    pub(super) tape_sel: TapeSelection,
+    pub tape_mode: bool,
+    pub tape_sel: TapeSelection,
     //The arms and caret timestep after the last tape edit, while more typing there joins its undo step
-    pub(super) tape_group: Option<(Range<usize>, usize)>,
-    pub(super) run_state: RunState,
+    pub tape_group: Option<(Range<usize>, usize)>,
+    pub run_state: RunState,
     //The timeline's time as last shown. An edit can move the timeline back to re-simulate from before its change, and
     //it comes straight back here (or to the target, if that's earlier) instead of replaying the steps on the way.
     shown_time: f64,
-    pub(super) area_mode: AreaMode,
+    pub area_mode: AreaMode,
     //1 is held, so the board's atoms are drawn faintly
-    pub(super) atoms_faded: bool,
-    pub(super) run_speed: f64,
-    pub(super) popup_reload: bool,
+    pub atoms_faded: bool,
+    pub run_speed: f64,
+    pub popup_reload: bool,
 
     //Part editing
-    pub(super) selection: Option<PartId>,
+    pub selection: Option<PartId>,
     //The hex last pressed, whose parts the Part window lists as they are now
-    pub(super) list_hex: Option<Pos>,
+    pub list_hex: Option<Pos>,
     //The Part window lists every glyph instead
-    pub(super) all_glyphs: bool,
+    pub all_glyphs: bool,
     //numbering_version at the latest press, for the clicks and drags in that list (see part_window)
-    pub(super) list_press_numbering: u64,
-    pub(super) allow_overlap: bool,
-    pub(super) tool: BoardTool,
-    pub(super) allow_gaps: bool,
-    pub(super) path_text: Option<PathText>,
+    pub list_press_numbering: u64,
+    pub allow_overlap: bool,
+    pub tool: BoardTool,
+    pub allow_gaps: bool,
+    pub path_text: Option<PathText>,
     //Whatever the mouse would change now, drawn in place, and the tracks other than one it changes
-    pub(super) preview: Option<Preview>,
-    pub(super) scene_tracks: Option<(usize, TrackMaps)>,
-    pub(super) pointer_over_ui: bool,
+    pub preview: Option<Preview>,
+    pub scene_tracks: Option<(usize, TrackMaps)>,
+    pub pointer_over_ui: bool,
     //The hex the mouse was last over, kept while it's over a window
-    pub(super) hovered_hex: Option<Pos>,
+    pub hovered_hex: Option<Pos>,
     //Board input waiting for egui to apply the text field being typed in (see board_input)
-    pub(super) waiting_input: Vec<BoardInput>,
-    pub(super) history: UndoHistory<World, StepKind>,
+    pub waiting_input: Vec<BoardInput>,
+    pub history: UndoHistory<World, StepKind>,
     //Counts the changes that may renumber parts: edits that delete or reorder parts, and undoing or redoing a layout
     //edit. Clicks and drags that pick parts by number record it at their press, and do nothing if it changes before
     //they finish.
-    pub(super) numbering_version: u64,
+    pub numbering_version: u64,
 }
 impl Loaded{
-    pub(super) fn new(world: World, solution: parser::FullSolution, puzzle: parser::FullPuzzle, max_timestep: usize,
+    pub fn new(world: World, solution: parser::FullSolution, puzzle: parser::FullPuzzle, max_timestep: usize,
         camera: CameraSetup) -> Self
     {
         //A solution that already overlaps, or breaks its chambers' rules, can keep doing so
@@ -144,14 +144,14 @@ impl Loaded{
         self.rule_notes = rules::rejections(&self.puzzle, &solution).iter().map(|r| r.note()).collect();
     }
     //Sets up a layout as an edit makes it. It keeps the loop length, unless its tapes need a longer one.
-    pub(super) fn set_up(&self, layout: &InitialWorld) -> std::result::Result<World, String>{
+    pub fn set_up(&self, layout: &InitialWorld) -> std::result::Result<World, String>{
         let mut world = World::setup_sim(layout).map_err(|e| e.to_string())?;
         world.repeat_length = world.repeat_length.max(self.timeline.base().repeat_length);
         Ok(world)
     }
     //Replaces the starting world with one from set_up after a layout edit (which can be undone), then runs back to the
     //shown timestep
-    pub(super) fn commit_world(&mut self, world: World){
+    pub fn commit_world(&mut self, world: World){
         self.history.record(self.timeline.base().clone(), StepKind::Layout);
         self.tape_group = None;
         self.replace_base(world);
@@ -171,7 +171,7 @@ impl Loaded{
         self.check_rules();
     }
     //The solution as Save writes it
-    pub(super) fn solution_bytes(&self) -> Result<Vec<u8>>{
+    pub fn solution_bytes(&self) -> Result<Vec<u8>>{
         let solution = parser::create_solution(self.timeline.base(), self.solution.puzzle_name.clone(),
             saved_solution_name(&self.solution.solution_name));
         let mut data = Vec::new();
@@ -179,7 +179,7 @@ impl Loaded{
         Ok(data)
     }
     //Keeps the emergency save up to date with the unsaved changes. `path` is where Save would write.
-    pub(super) fn update_backup(&mut self, path: impl FnOnce() -> PathBuf){
+    pub fn update_backup(&mut self, path: impl FnOnce() -> PathBuf){
         if self.backup_stale && self.dirty{
             if let Ok(data) = self.solution_bytes(){
                 recovery::store(data, path());
@@ -188,7 +188,7 @@ impl Loaded{
         self.backup_stale = false;
     }
     //Why undo and redo can't be used right now, if they can't
-    pub(super) fn history_lock(&self) -> Option<&'static str>{
+    pub fn history_lock(&self) -> Option<&'static str>{
         if self.tool.press().is_some() || self.tool.stroke().is_some(){
             Some("Release the mouse button first")
         } else {
@@ -196,14 +196,14 @@ impl Loaded{
         }
     }
     //Goes back to the starting world (with its tapes) from before the last edit
-    pub(super) fn undo(&mut self){
+    pub fn undo(&mut self){
         if self.history_lock().is_some() || !self.history.can_undo(){
             return;
         }
         let (previous, kind) = self.history.undo(self.timeline.base().clone()).unwrap();
         self.restore(previous, kind);
     }
-    pub(super) fn redo(&mut self){
+    pub fn redo(&mut self){
         if self.history_lock().is_some() || !self.history.can_redo(){
             return;
         }
@@ -238,14 +238,14 @@ impl Loaded{
     //Keeps the starting world from before a tape edit, unless `joins` and the edit continues the last one: more
     //typing on the same arms, starting where the caret was left. If `extends`, more typing can join this edit.
     //`from` and `to` are the caret before and after the edit.
-    pub(super) fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool){
+    pub fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool){
         if !(joins && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
             self.history.record(self.timeline.base().clone(), StepKind::Tapes);
         }
         self.tape_group = extends.then_some((arms, to));
     }
     //Updates everything that depends on the tapes after they changed, starting from timestep `earliest`
-    pub(super) fn finish_tape_edit(&mut self, mut earliest: usize){
+    pub fn finish_tape_edit(&mut self, mut earliest: usize){
         let base = self.timeline.base();
         let longest = longest_tape(&base.arms);
         if self.max_timestep < longest{
@@ -258,7 +258,7 @@ impl Loaded{
         self.apply_base_change(earliest);
     }
     //The timestep the tape caret is at: where the timeline is headed, or where it is
-    pub(super) fn cursor_step(&self) -> usize{
+    pub fn cursor_step(&self) -> usize{
         match self.run_state{
             RunState::Manual(target) => target,
             RunState::FreeRun | RunState::Crashed{..} => self.timeline.time().floor() as usize,
@@ -266,40 +266,40 @@ impl Loaded{
     }
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.
-    pub(super) fn apply_base_change(&mut self, earliest_step: usize){
+    fn apply_base_change(&mut self, earliest_step: usize){
         self.mark_changed();
         if self.timeline.program_changed(earliest_step as u64){
             self.clear_crash();
         }
     }
     //Sets the loop length, returning the first timestep it can affect
-    pub(super) fn change_repeat_length(&mut self, length: usize) -> usize{
+    fn change_repeat_length(&mut self, length: usize) -> usize{
         if self.max_timestep < length{
             self.max_timestep = length;
         }
         self.timeline.base_mut().set_repeat_length(length)
     }
     //Sets the loop length as an edit of its own, which can be undone
-    pub(super) fn edit_repeat_length(&mut self, length: usize){
+    pub fn edit_repeat_length(&mut self, length: usize){
         self.history.record(self.timeline.base().clone(), StepKind::Tapes);
         self.tape_group = None;
         let earliest_step = self.change_repeat_length(length);
         self.apply_base_change(earliest_step);
     }
-    pub(super) fn set_area_mode(&mut self, mode: AreaMode){
+    pub fn set_area_mode(&mut self, mode: AreaMode){
         self.area_mode = mode;
         if self.timeline.set_mark_area(mode != AreaMode::Off){
             self.clear_crash();
         }
     }
     //After the timeline moved back: a crash past that point hasn't happened yet, so aim for where it was
-    pub(super) fn clear_crash(&mut self){
+    fn clear_crash(&mut self){
         if let RunState::Crashed{step, ..} = self.run_state{
             self.run_state = RunState::Manual(step);
         }
         self.message = None;
     }
-    pub(super) fn try_set_target_time(&mut self, target: usize){
+    pub fn try_set_target_time(&mut self, target: usize){
         if let RunState::Crashed{step, ..} = self.run_state{
             if step > target{
                 self.run_state = RunState::Manual(target);
@@ -308,7 +308,7 @@ impl Loaded{
             self.run_state = RunState::Manual(target);
         }
     }
-    pub(super) fn update(&mut self){
+    pub fn update(&mut self){
         let time = self.timeline.time();
         let target_time = match self.run_state{
             RunState::Manual(target_timestep) => {
@@ -339,11 +339,11 @@ impl Loaded{
 #[cfg(all(test, feature = "editor_ui"))]
 impl Loaded{
     //A solution with these parts, as if just loaded, with the board's origin in the middle of the screen
-    pub(super) fn for_test(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Self{
+    pub fn for_test(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Self{
         Self::for_test_in_chambers(glyphs, arms, Chambers::default())
     }
     //The same, for a production puzzle with these chambers
-    pub(super) fn for_test_in_chambers(glyphs: Vec<Glyph>, arms: Vec<Arm>, chambers: Chambers) -> Self{
+    pub fn for_test_in_chambers(glyphs: Vec<Glyph>, arms: Vec<Arm>, chambers: Chambers) -> Self{
         let world = World::setup_sim(&InitialWorld{glyphs, arms, chambers: chambers.clone()}).unwrap();
         let solution = parser::create_solution(&world, String::new(), String::new());
         let puzzle = parser::FullPuzzle{puzzle_name: String::new(), creator_id: 0, allowed_bitfield: u64::MAX,
@@ -351,14 +351,14 @@ impl Loaded{
         Loaded::new(world, solution, puzzle, 100, CameraSetup{scale_base: 0.05, offset: XYVec::zeros()})
     }
     //The pixel at a hex's center, on a screen of size TEST_SCREEN
-    pub(super) fn test_px(&self, x: i32, y: i32) -> (f32, f32){
+    pub fn test_px(&self, x: i32, y: i32) -> (f32, f32){
         let scale = self.camera.scale(TEST_SCREEN);
         let world = pos_to_xy(Pos::new(x, y)) + self.camera.offset;
         ((world.x*scale.0 + 1.)/2.*TEST_SCREEN.0, (1. - world.y*scale.1)/2.*TEST_SCREEN.1)
     }
 }
 #[cfg(all(test, feature = "editor_ui"))]
-pub(super) const TEST_SCREEN: (f32, f32) = (1000., 800.);
+pub const TEST_SCREEN: (f32, f32) = (1000., 800.);
 
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {

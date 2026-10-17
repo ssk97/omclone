@@ -6,17 +6,17 @@ use std::collections::VecDeque;
 //Starting worlds have no atoms made yet, so they're small enough to keep plenty
 const MAX_UNDO: usize = 100;
 
-pub(super) struct UndoHistory<T, K>{
+pub struct UndoHistory<T, K>{
     //The oldest step is dropped from the front once there are too many
     undo: VecDeque<(T, K)>,
     redo: Vec<(T, K)>,
 }
 impl<T, K: Copy> UndoHistory<T, K>{
-    pub(super) fn new() -> Self{
+    pub fn new() -> Self{
         UndoHistory{undo: VecDeque::new(), redo: Vec::new()}
     }
     //Keeps the state from before an edit; anything undone before it can't be redone any more
-    pub(super) fn record(&mut self, before: T, kind: K){
+    pub fn record(&mut self, before: T, kind: K){
         if self.undo.len() == MAX_UNDO{
             self.undo.pop_front();
         }
@@ -24,20 +24,20 @@ impl<T, K: Copy> UndoHistory<T, K>{
         self.redo.clear();
     }
     //The state to go back to, given the current one, and the kind of edit that's undone
-    pub(super) fn undo(&mut self, current: T) -> Option<(T, K)>{
+    pub fn undo(&mut self, current: T) -> Option<(T, K)>{
         let (previous, kind) = self.undo.pop_back()?;
         self.redo.push((current, kind));
         Some((previous, kind))
     }
-    pub(super) fn redo(&mut self, current: T) -> Option<(T, K)>{
+    pub fn redo(&mut self, current: T) -> Option<(T, K)>{
         let (next, kind) = self.redo.pop()?;
         self.undo.push_back((current, kind));
         Some((next, kind))
     }
-    pub(super) fn can_undo(&self) -> bool{
+    pub fn can_undo(&self) -> bool{
         !self.undo.is_empty()
     }
-    pub(super) fn can_redo(&self) -> bool{
+    pub fn can_redo(&self) -> bool{
         !self.redo.is_empty()
     }
 }

@@ -8,19 +8,19 @@ fn grid_id() -> egui::Id{
     egui::Id::new("tape_grid")
 }
 //Whether keys go to the tapes rather than to the part hotkeys
-pub(super) fn has_focus(ctx: &egui::Context) -> bool{
+pub fn has_focus(ctx: &egui::Context) -> bool{
     ctx.memory(|m| m.has_focus(grid_id()))
 }
 
 //The arms from `anchor_arm` to `arm` are selected, and the timesteps from `anchor_step` to the caret.
 //With no anchor step, the caret sits before its timestep on every selected arm.
 #[derive(Default)]
-pub(super) struct TapeSelection{
-    pub(super) arm: usize,
-    pub(super) anchor_arm: usize,
-    pub(super) anchor_step: Option<usize>,
+pub struct TapeSelection{
+    pub arm: usize,
+    pub anchor_arm: usize,
+    anchor_step: Option<usize>,
     //The caret's timestep as of the last frame, to notice when something else moves it
-    pub(super) caret: usize,
+    pub caret: usize,
     //The cell a drag started on
     drag_from: Option<(usize, usize)>,
     //The arm whose number a drag started on, which dragging reorders, and the numbering_version then
@@ -36,7 +36,7 @@ impl TapeSelection{
         let anchor = self.anchor_step.unwrap_or(self.caret);
         anchor.min(self.caret)..anchor.max(self.caret)
     }
-    pub(super) fn collapse(&mut self){
+    pub fn collapse(&mut self){
         self.anchor_arm = self.arm;
         self.anchor_step = None;
     }
@@ -48,7 +48,7 @@ impl TapeSelection{
     }
 }
 
-pub(super) enum TapeOp{
+enum TapeOp{
     //Lines of instructions, written at the start of the selected timesteps in place of them.
     //A single line goes into every selected arm, and more go into an arm each.
     Write(Vec<Vec<Instr>>),
@@ -56,13 +56,13 @@ pub(super) enum TapeOp{
     EraseBack, EraseForward,
 }
 //Where the longest of these arms' tapes ends, including what their Repeats and Resets run
-pub(super) fn longest_tape(arms: &[Arm]) -> usize{
+pub fn longest_tape(arms: &[Arm]) -> usize{
     arms.iter().map(|a| a.decoded().tape.end()).max().unwrap_or(0)
 }
 //Applies `op` to `tapes` (the arms it changes, in order) at the selected timesteps `steps`, writing over or
 //blanking instructions instead of shifting them if `overwrite`. Returns where the caret goes, or None if there's
 //nothing to do.
-pub(super) fn apply_op(tapes: &mut [Tape], steps: Range<usize>, op: &TapeOp, overwrite: bool) -> Option<usize>{
+fn apply_op(tapes: &mut [Tape], steps: Range<usize>, op: &TapeOp, overwrite: bool) -> Option<usize>{
     match op{
         TapeOp::Write(lines) => {
             let width = lines.iter().map(Vec::len).max().unwrap_or(0);
@@ -430,7 +430,7 @@ fn paint_covered(painter: &egui::Painter, rect: Rect, written: Instr, runs: Inst
     }
 }
 //The instructions' letters, drawn as on the grid, and what they mean
-pub(super) fn tape_letters(ui: &mut egui::Ui){
+pub fn tape_letters(ui: &mut egui::Ui){
     use Instr::*;
     if EDITOR_ENABLED{
         ui.label("Type these at the caret. Space leaves a blank.");
@@ -463,7 +463,7 @@ pub(super) fn tape_letters(ui: &mut egui::Ui){
 }
 
 //Shows the grid, returning the height it needs to show every arm
-pub(super) fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
+pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
     let arm_count = loaded.timeline.base().arms.len();
     if arm_count == 0{
         return ui.weak("No arms").rect.height();

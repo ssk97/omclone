@@ -5,19 +5,19 @@ use super::*;
 //arm turns in place (it covers one hex, and at later timesteps it may be grabbed far from where it starts).
 //Arms can also change length and type.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct PartEdit{
-    pub(super) part: PartId,
-    pub(super) delta: Pos,
-    pub(super) rot: Rot,
-    pub(super) pivot: Pos,
-    pub(super) len: i32,
-    pub(super) arm_type: Option<ArmType>,
+pub struct PartEdit{
+    pub part: PartId,
+    pub delta: Pos,
+    pub rot: Rot,
+    pub pivot: Pos,
+    pub len: i32,
+    pub arm_type: Option<ArmType>,
 }
 impl PartEdit{
-    pub(super) fn new(part: PartId) -> Self{
+    pub fn new(part: PartId) -> Self{
         PartEdit{part, delta: Pos::zeros(), rot: 0, pivot: Pos::zeros(), len: 0, arm_type: None}
     }
-    pub(super) fn is_noop(&self) -> bool{
+    pub fn is_noop(&self) -> bool{
         self.delta == Pos::zeros() && self.rot == 0 && self.len == 0 && self.arm_type.is_none()
     }
 }
@@ -50,12 +50,12 @@ fn edit_part(layout: &mut InitialWorld, edit: &PartEdit){
 }
 //A part that can be added from the palette (track is drawn instead)
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum NewPart{
+pub enum NewPart{
     Glyph(GlyphType),
     Arm(ArmType),
 }
 impl NewPart{
-    pub(super) fn name(&self) -> String{
+    pub fn name(&self) -> String{
         match self{
             NewPart::Glyph(glyph_type) => glyph_name(glyph_type),
             NewPart::Arm(arm_type) => arm_type_name(*arm_type).to_owned(),
@@ -64,7 +64,7 @@ impl NewPart{
 }
 //A change to the layout
 #[derive(Clone, Debug, PartialEq)]
-pub(super) enum LayoutEdit{
+pub enum LayoutEdit{
     Part(PartEdit),
     //A new part at `pos`; arms start with an empty tape
     Add{part: NewPart, pos: Pos, rot: Rot, len: i32},
@@ -79,7 +79,7 @@ pub(super) enum LayoutEdit{
 }
 impl LayoutEdit{
     //The layout after the edit, and the part it placed or changed (none for a deletion)
-    pub(super) fn apply(&self, world: &World) -> (InitialWorld, Option<PartId>){
+    pub fn apply(&self, world: &World) -> (InitialWorld, Option<PartId>){
         let mut layout = world.layout();
         let part = match self{
             LayoutEdit::Part(edit) => {
@@ -149,15 +149,15 @@ impl LayoutEdit{
     }
     //Whether it adds, removes or renumbers parts, so the part it returns (none for a deletion) is selected
     //instead of keeping the selection
-    pub(super) fn is_structural(&self) -> bool{
+    pub fn is_structural(&self) -> bool{
         !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..})
     }
     //Whether parts it keeps may have other numbers afterwards (see renumbered)
-    pub(super) fn renumbers(&self) -> bool{
+    pub fn renumbers(&self) -> bool{
         matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..} | LayoutEdit::Delete(_))
     }
     //The number that a part numbered `part` before the edit has after it, or None if the edit deletes it
-    pub(super) fn renumbered(&self, part: PartId) -> Option<PartId>{
+    pub fn renumbered(&self, part: PartId) -> Option<PartId>{
         //As in apply: taken out at `from`, then put back in at `to`
         let reorder = |i: usize, from: usize, to: usize| {
             if i == from {
@@ -178,7 +178,7 @@ impl LayoutEdit{
 }
 //The number (as an index) that puts the part numbered `dragged` directly after `anchor` (or before it, if not
 //`after`), with the parts between shifting over. None if it's already there.
-pub(super) fn reorder_beside(dragged: usize, anchor: usize, after: bool) -> Option<usize>{
+pub fn reorder_beside(dragged: usize, anchor: usize, after: bool) -> Option<usize>{
     if dragged == anchor{
         return None;
     }
@@ -188,22 +188,22 @@ pub(super) fn reorder_beside(dragged: usize, anchor: usize, after: bool) -> Opti
     (to != dragged).then_some(to)
 }
 //A track's hexes, in global positions
-pub(super) fn track_path(world: &World, glyph: usize) -> Vec<Pos>{
+pub fn track_path(world: &World, glyph: usize) -> Vec<Pos>{
     world.glyphs[glyph].footprint(None).into_vec()
 }
 //Inputs, outputs and conduits come with the puzzle, so they can't be added or removed
-pub(super) fn is_puzzle_part(glyph_type: &GlyphType) -> bool{
+pub fn is_puzzle_part(glyph_type: &GlyphType) -> bool{
     use GlyphType::*;
     matches!(glyph_type, Input(..) | Output(..) | OutputRepeating(..) | Conduit(..))
 }
-pub(super) const ALL_NEW_GLYPHS: [GlyphType; 16] = {
+pub const ALL_NEW_GLYPHS: [GlyphType; 16] = {
     use GlyphType::*;
     [Bonding, Unbonding, MultiBond, TriplexBond, Calcification, Duplication, Projection, Purification,
         Animismus, Disposal, Equilibrium, Dispersion, Unification, Rejection, Division, Proliferation]
 };
-pub(super) const ALL_ARM_TYPES: [ArmType; 7] = [ArmType::PlainArm, ArmType::DoubleArm, ArmType::TripleArm, ArmType::HexArm,
+pub const ALL_ARM_TYPES: [ArmType; 7] = [ArmType::PlainArm, ArmType::DoubleArm, ArmType::TripleArm, ArmType::HexArm,
     ArmType::Piston, ArmType::VanBerlo, ArmType::Ravari];
-pub(super) fn arm_type_name(arm_type: ArmType) -> &'static str{
+pub fn arm_type_name(arm_type: ArmType) -> &'static str{
     match arm_type{
         ArmType::PlainArm => "Arm",
         ArmType::DoubleArm => "Double arm",
@@ -214,7 +214,7 @@ pub(super) fn arm_type_name(arm_type: ArmType) -> &'static str{
         ArmType::Ravari => "Ravari's wheel",
     }
 }
-pub(super) fn glyph_name(glyph_type: &GlyphType) -> String{
+fn glyph_name(glyph_type: &GlyphType) -> String{
     use GlyphType::*;
     match glyph_type{
         Calcification => "Calcification".to_owned(),
@@ -240,7 +240,7 @@ pub(super) fn glyph_name(glyph_type: &GlyphType) -> String{
         OutputRepeating(_, _, id) => format!("Polymer output {id}"),
     }
 }
-pub(super) fn part_label(world: &World, part: PartId) -> String{
+pub fn part_label(world: &World, part: PartId) -> String{
     match part{
         PartId::Arm(i) => format!("Arm {} ({})", i+1, arm_type_name(world.arms[i].arm_type)),
         PartId::Glyph(i) => format!("{} (glyph {})", glyph_name(&world.glyphs[i].glyph_type), i+1),

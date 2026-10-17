@@ -6,10 +6,10 @@ use std::sync::Mutex;
 //The unsaved solution, serialized, and where Save would write it
 static BACKUP: Mutex<Option<(Vec<u8>, PathBuf)>> = Mutex::new(None);
 
-pub(super) fn store(data: Vec<u8>, path: PathBuf){
+pub fn store(data: Vec<u8>, path: PathBuf){
     *BACKUP.lock().unwrap() = Some((data, path));
 }
-pub(super) fn clear(){
+pub fn clear(){
     *BACKUP.lock().unwrap() = None;
 }
 fn recovered_name(path: &std::path::Path, copy: usize) -> String{
@@ -19,7 +19,7 @@ fn recovered_name(path: &std::path::Path, copy: usize) -> String{
         n => format!("{stem}.recovered-{n}.solution"),
     }
 }
-pub(super) fn install_panic_hook(){
+pub fn install_panic_hook(){
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         //Skipped if the panic came while storing a backup, which holds the lock. Taken so it's saved once: on the

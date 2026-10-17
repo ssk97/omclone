@@ -66,7 +66,7 @@ fn part_fields(ui: &mut egui::Ui, world: &World, now: &World, part: PartId, lock
     (!edit.is_noop()).then_some(edit)
 }
 //A closable message, cleared when closed
-pub(super) fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut Option<String>){
+pub fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut Option<String>){
     if let Some(msg) = message{
         let mut opened = true;
         egui::Window::new("Message").id(egui::Id::new(id))
@@ -79,7 +79,7 @@ pub(super) fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut O
 //The largest max timestep or loop length that can be entered. It's far beyond real solutions, and keeps
 //the tape grid in arms_window from getting huge.
 const MAX_TIMESTEP_FIELD: usize = 1_000_000;
-pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+pub fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     egui::Window::new("World loaded").default_pos((0.,0.)).show(egui_ctx, |ui| {
         ui.style_mut().spacing.slider_width = 500.;
         //Where the timeline is headed, so that +1 clicked again before it gets there goes on another step
@@ -167,7 +167,7 @@ pub(super) fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     });
 }
 //While the run is crashed: what happened, and a button that brings it into view (the board circles it)
-pub(super) fn crash_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+pub fn crash_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     let RunState::Crashed{step, error} = loaded.run_state else {return};
     let mut open = loaded.crash_window_open;
     egui::Window::new("Crash").open(&mut open).show(egui_ctx, |ui| {
@@ -179,7 +179,7 @@ pub(super) fn crash_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     loaded.crash_window_open = open;
 }
 //Opened from the Part window
-pub(super) fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size: (f32, f32)){
+pub fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size: (f32, f32)){
     //A copy, as the window's contents use `loaded` too
     let mut open = loaded.camera_window_open;
     egui::Window::new("Camera controls").open(&mut open).show(egui_ctx, |ui| {
@@ -272,7 +272,7 @@ fn help_window_frame<'a>(title: &str, open: &'a mut bool) -> egui::Window<'a>{
     egui::Window::new(title).open(open).auto_sized()
 }
 //Opened from the Part window
-pub(super) fn help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+pub fn help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     help_window_frame("Help", &mut loaded.help_window_open).show(egui_ctx, |ui| {
         ui.weak(CMD_NOTE);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -286,7 +286,7 @@ pub(super) fn help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     });
 }
 //Opened by the ? in the Arms window. It first opens beside that window, so it doesn't cover the tapes.
-pub(super) fn tape_help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+pub fn tape_help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     let mut window = help_window_frame("Tape help", &mut loaded.tape_help_window_open);
     if let Some(arms) = egui_ctx.memory(|m| m.area_rect(arms_window_id())){
         window = window.default_pos(arms.right_top() + egui::vec2(8., 0.));
@@ -302,7 +302,7 @@ pub(super) fn tape_help_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     });
 }
 #[cfg(feature = "editor_ui")]
-pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloaded_info: &mut PathInfo){
+pub fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloaded_info: &mut PathInfo){
     egui::Window::new("File info").show(egui_ctx, |ui| {
         ui.label("solution:");
         ui.text_edit_singleline(&mut loaded.solution.solution_name);
@@ -407,7 +407,7 @@ fn arms_window_id() -> egui::Id{
 }
 //`extra_message` reports what "Optimize Pistons" changed
 #[cfg_attr(not(feature = "editor_ui"), allow(unused_variables))]
-pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_message: &mut Option<String>){
+pub fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_message: &mut Option<String>){
     let mut arm_window = egui::Window::new("Arms").id(arms_window_id());
     #[cfg(not(feature = "editor_ui"))]{
         arm_window = arm_window.default_open(false);
@@ -480,7 +480,7 @@ fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Response{
         None => response,
     }
 }
-pub(super) fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
+pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
     //Before the part's fields are drawn, since the press may end the one being typed in and apply it
     if egui_ctx.input(|i| i.pointer.primary_pressed()){
         loaded.list_press_numbering = loaded.numbering_version;
@@ -631,7 +631,7 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
 }
 //While something is dragged, scrolls the scroll area `ui` is in when the pointer is near or past the top or bottom of
 //`rect` (its visible part), faster the further in it goes. egui doesn't scroll while dragging.
-pub(super) fn drag_edge_scroll(ui: &egui::Ui, rect: egui::Rect){
+pub fn drag_edge_scroll(ui: &egui::Ui, rect: egui::Rect){
     const MARGIN: f32 = 20.;
     //Pixels a second at the edge. It's slower inside the margin, and faster past the edge, up to three times as fast.
     const SPEED: f32 = 300.;
@@ -728,14 +728,14 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     }
 }
 //The path text being edited, and the track's text when editing started
-pub(super) struct PathText{
-    pub(super) glyph: usize,
-    pub(super) shown: String,
-    pub(super) text: String,
+pub struct PathText{
+    pub glyph: usize,
+    pub shown: String,
+    pub text: String,
     //The field has focus, so the board previews the text
-    pub(super) editing: bool,
+    pub editing: bool,
     //Where typing goes in the text (in characters): the caret, or the start of the selection it replaces
-    pub(super) caret: usize,
+    pub caret: usize,
 }
 const PATH_TEXT_HELP: &str = "Steps from the first hex: w e a d z x (the keys around S), or (dx,dy) to jump. \
     Shown on the board as you type, and applied on Enter (Esc drops it); anything from the first unreadable \
@@ -855,7 +855,7 @@ fn new_part_button(ui: &mut egui::Ui, loaded: &mut Loaded, part: NewPart){
     }
 }
 //What the mouse is doing on the board: the part picked from the stack under it, or the part or tool it's using
-pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
+pub fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
     let base = loaded.timeline.base();
     let (title, note) = if let Some(press) = loaded.tool.press() {
         let copy = if press.duplicate {", copying"} else {""};
@@ -896,7 +896,7 @@ pub(super) fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
         }
     });
 }
-pub(super) fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateUpdate{
+pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
     let dirty = loaded.dirty;
     egui::Window::new("Reload?").open(&mut loaded.popup_reload).show(egui_ctx, |ui| {
@@ -922,7 +922,7 @@ pub(super) fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> Ap
     do_loading
 }
 #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
-pub(super) fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut PathInfo) -> AppStateUpdate{
+pub fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut PathInfo) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
     egui::Window::new("World Not Loaded").show(egui_ctx, |ui| {
         #[cfg(not(target_arch = "wasm32"))]{
