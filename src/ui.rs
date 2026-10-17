@@ -9,8 +9,11 @@ use std::{fs::File, path::Path};
 use eyre::Result;
 
 mod board;
+#[cfg(all(test, feature = "editor_ui", debug_assertions))]
+mod egui_test;
 mod layout_edit;
 mod loaded;
+mod part_window;
 mod recovery;
 mod tape_grid;
 mod undo;
@@ -18,9 +21,9 @@ mod windows;
 use board::*;
 use layout_edit::*;
 use loaded::{AreaMode, Loaded, RunState};
+use part_window::PathText;
 use tape_grid::{TapeSelection, longest_tape};
 use undo::UndoHistory;
-use windows::PathText;
 
 struct PathInfo{
     base: String,
@@ -219,7 +222,7 @@ impl EventHandler for OmcloneApp {
                     #[cfg(feature = "editor_ui")]
                     windows::file_window(egui_ctx, loaded, &mut self.unloaded_info);
                     windows::arms_window(egui_ctx, loaded, &mut self.extra_message);
-                    windows::part_window(egui_ctx, loaded);
+                    part_window::part_window(egui_ctx, loaded);
                     windows::cursor_tooltip(egui_ctx, loaded);
                     do_loading = windows::reload_window(egui_ctx, loaded);
                 }
