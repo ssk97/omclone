@@ -1,5 +1,5 @@
-//The simulation, the file formats and an omsim-style verifier, without any UI. The app, the verify library and the
-//tests share them.
+//The simulation and the editor's timeline over it, the file formats and an omsim-style verifier, without any UI.
+//The app, the verify library and the tests share them.
 pub mod parser;
 pub mod rules;
 pub mod sim;
@@ -7,11 +7,3 @@ pub mod timeline;
 pub mod verifier;
 #[cfg(test)]
 mod test;
-
-//The base folder, puzzle and solution to load at first, from src/default_paths.txt
-//(or the sample, if there isn't one; see build.rs)
-pub fn default_paths() -> (&'static str, &'static str, &'static str){
-    let mut lines = include_str!(env!("OMCLONE_DEFAULT_PATHS")).lines();
-    let mut next = || lines.next().unwrap_or("");
-    (next(), next(), next())
-}

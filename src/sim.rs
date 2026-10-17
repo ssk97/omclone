@@ -1,14 +1,5 @@
 use bitflags::bitflags;
-#[cfg(feature = "color-eyre")]
-use color_eyre::{
-    eyre::{ensure, eyre},
-    Result,
-};
-#[cfg(not(feature = "color-eyre"))]
-use simple_eyre::{
-    eyre::{ensure, eyre},
-    Result,
-};
+use eyre::{ensure, eyre, Result};
 pub use nalgebra::Vector2;
 use slotmap::{new_key_type, Key, SecondaryMap, SlotMap};
 use std::collections::VecDeque;
@@ -20,7 +11,7 @@ use enum_primitive_derive::Primitive;
 mod collision;
 mod track;
 pub use track::*;
-pub mod coords;
+mod coords;
 pub use coords::*;
 mod tape;
 pub use tape::*;

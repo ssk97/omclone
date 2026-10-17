@@ -26,7 +26,7 @@ fn main() -> Result< () >{
         .. Default::default()
     };
     miniquad::start(conf, || {
-        Box::new(ui::MyMiniquadApp::new())
+        Box::new(ui::OmcloneApp::new())
     });
     Ok(())
 }

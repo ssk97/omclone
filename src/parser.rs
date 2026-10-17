@@ -1,15 +1,6 @@
 use crate::sim::*;
 
-#[cfg(feature = "color-eyre")]
-use color_eyre::{
-    eyre::{ensure, eyre},
-    Result,
-};
-#[cfg(not(feature = "color-eyre"))]
-use simple_eyre::{
-    eyre::{ensure, eyre},
-    Result,
-};
+use eyre::{ensure, eyre, Result};
 
 use num_traits::FromPrimitive;
 use std::collections::HashMap;

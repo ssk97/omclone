@@ -6,10 +6,7 @@ use std::{io::BufReader, io::prelude::*, path::PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs::File, path::Path};
 
-#[cfg(feature = "color-eyre")]
-use color_eyre::eyre::Result;
-#[cfg(not(feature = "color-eyre"))]
-use simple_eyre::eyre::Result;
+use eyre::Result;
 
 mod board;
 mod layout_edit;
@@ -27,6 +24,8 @@ use windows::PathText;
 
 struct PathInfo{
     base: String,
+    //The web build loads the puzzle from the page's file picker instead
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     puzzle: String,
     solution: String,
 }
@@ -38,6 +37,13 @@ fn solution_path(info: &PathInfo) -> PathBuf{
         std::path::Path::new(&info.base).join(&info.solution)
     }
 }
+//The base folder, puzzle and solution to load at first, from src/default_paths.txt
+//(or the sample, if there isn't one; see build.rs)
+fn default_paths() -> (&'static str, &'static str, &'static str){
+    let mut lines = include_str!(env!("OMCLONE_DEFAULT_PATHS")).lines();
+    let mut next = || lines.next().unwrap_or("");
+    (next(), next(), next())
+}
 enum AppState{
     NotLoaded,Loaded(Loaded) 
 }
@@ -46,7 +52,7 @@ enum AppStateUpdate{
 }
 use AppState::*;
 
-pub struct MyMiniquadApp {
+pub struct OmcloneApp {
     mq_ctx: Box<dyn RenderingBackend>,
     egui_mq: egui_miniquad::EguiMq,
     render_data: RenderDataBase,
@@ -65,13 +71,13 @@ pub struct MyMiniquadApp {
     held_motion: Option<(f32, f32)>,
 }
 
-impl MyMiniquadApp {
+impl OmcloneApp {
     pub fn new() -> Self {
         //Here rather than in main, as miniquad replaces the panic hook on the web before this runs
         recovery::install_panic_hook();
         let mut mq_ctx = window::new_rendering_backend();
         let render_data = RenderDataBase::new(mq_ctx.as_mut());
-        let (base_str, puzzle_str, solution_str) = omclone::default_paths();
+        let (base_str, puzzle_str, solution_str) = default_paths();
         let base = String::from(base_str);
         let puzzle = String::from(puzzle_str);
         let solution = String::from(solution_str);
@@ -170,7 +176,7 @@ fn download(data: &[u8], name: &str){
 
 const EDITOR_ENABLED: bool = cfg!(feature = "editor_ui");
 
-impl EventHandler for MyMiniquadApp {
+impl EventHandler for OmcloneApp {
     fn update(&mut self) {
         if let Loaded(loaded) = &mut self.app_state{
             //Before simulating, so a crash running an edit still has that edit

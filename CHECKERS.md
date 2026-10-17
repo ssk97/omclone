@@ -148,7 +148,8 @@ let stats = world.get_stats();
 2. **Choose a front end.**
    - **Native command line (simplest).** Add a `[[bin]]` with a feature in `required-features`, as the
      `omclone` binary does with `display_ui`. Unlike `[lib]`, `required-features` works for binaries. Read the puzzle and
-     solution paths from the arguments, or use `omclone::default_paths()`. No JS toolchain is needed.
+     solution paths from the arguments, or from `src/default_paths.txt` as the app's `default_paths` (in `src/ui.rs`)
+     does: `build.rs` sets `OMCLONE_DEFAULT_PATHS` for every target in the package. No JS toolchain is needed.
    - **Inside the app.** Add a window to the existing UI. It works natively and in the existing web build
      with no new tooling, but a long sweep has to be split across frames (a few variants per `update()`)
      so the UI doesn't freeze.

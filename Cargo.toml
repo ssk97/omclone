@@ -54,6 +54,8 @@ fontdue = { version = "0.9", optional = true}
 egui-miniquad = { path = "../egui-miniquad", optional = true }
 image = {version = "0.25", optional = true, default-features = false, features = ["png"]}
 
+#Errors are eyre's; color-eyre or simple-eyre reports them (see main.rs)
+eyre = "0.6"
 color-eyre = {version = "0.6", optional = true}
 simple-eyre = "0.3"
 
