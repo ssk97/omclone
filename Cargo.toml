@@ -51,13 +51,10 @@ egui = {version = "0.35", optional = true}
 miniquad = { version = "0.4.11", optional = true}
 fontdue = { version = "0.9", optional = true}
 #egui-miniquad = {version = "0.14", optional = true}
-egui-miniquad = { path = "../egui-miniquad", optional = true }
+egui-miniquad = { git = "https://github.com/ssk97/egui-miniquad", rev="c72e032c1fc42c6b77c877aaa32a62ffa6cae850", optional = true }
 image = {version = "0.25", optional = true, default-features = false, features = ["png"]}
 
 #Errors are eyre's; color-eyre or simple-eyre reports them (see main.rs)
 eyre = "0.6"
 color-eyre = {version = "0.6", optional = true}
 simple-eyre = "0.3"
-
-[patch.crates-io]
-miniquad = { path = "../miniquad" }
