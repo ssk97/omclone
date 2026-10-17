@@ -402,12 +402,12 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
     //that's short of the loop length, a Noop extends one of them.
     let loop_len = world.repeat_length;
     let saved_spans: Vec<(usize, usize, usize)> = world.arms.iter().enumerate()
-        .filter(|(_, arm)| !arm.decoded.tape.halts())
+        .filter(|(_, arm)| !arm.decoded().tape.runs_once())
         .filter_map(|(id, arm)| {
-            let tape = &arm.tape;
+            let tape = arm.tape();
             let start = tape.first + tape.instructions.iter().position(|&i| i != Instr::Empty)?;
             let last = tape.first + tape.instructions.iter().rposition(|&i| i != Instr::Empty)? + 1;
-            let end = arm.decoded.spans.last().map_or(last, |span| span.end.max(last));
+            let end = arm.decoded().spans.last().map_or(last, |span| span.end.max(last));
             Some((id, start, end - start))
         }).collect();
     let longest = saved_spans.iter().map(|&(_, _, len)| len).max().unwrap_or(0);
@@ -425,7 +425,7 @@ pub fn create_solution(world: &World, puzzle_name: String, solution_name: String
         let input_output_index = 0;
 
         let mut instructions = Vec::new();
-        let tape = &arm.tape;
+        let tape = arm.tape();
         let mut step = tape.first as i32;
         for &instr in &tape.instructions{
             if instr != Instr::Empty{
@@ -727,7 +727,7 @@ mod tests {
         };
         let init = puzzle_prep(&empty_puzzle(), &solution).unwrap();
         let tapes: Vec<(usize, Vec<Instr>)> = init.arms.iter()
-            .map(|a| (a.tape.first, a.tape.instructions.clone())).collect();
+            .map(|a| (a.tape().first, a.tape().instructions.clone())).collect();
         assert_eq!(tapes, vec![(0, vec![Grab, Empty, Drop]), (5, vec![RotateClockwise])]);
     }
 

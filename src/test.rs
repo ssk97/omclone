@@ -42,7 +42,8 @@ struct TestResults{
     panics: usize,
 }
 
-//With `rebuild`, the world is set up a second time from its own layout (as part edits do) before running
+//With `rebuild`, the world is saved and loaded again, then set up a second time from its own layout (as part edits
+//do), before running
 fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap, rebuild: bool){
     let check_area = check_area_enabled();
     let f_sol = File::open(fpath).unwrap();
@@ -67,12 +68,16 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
         Ok(s) => s
     };
     if rebuild {
-        let rebuilt = match World::setup_sim(&world.layout()){
+        let mut data = Vec::new();
+        write_solution(&mut data, &create_solution(&world, sol.puzzle_name.clone(), sol.solution_name.clone())).unwrap();
+        let rebuilt = parse_solution(&mut data.as_slice()).and_then(|saved| puzzle_prep(&puzzle, &saved))
+            .and_then(|init| World::setup_sim(&init)).and_then(|loaded| World::setup_sim(&loaded.layout()));
+        let rebuilt = match rebuilt{
             Err(e) => {println!("Failed to rebuild {:?}: {}",fpath, e); results.setup_errors += 1; return}
             Ok(s) => s
         };
-        let same_tapes = world.arms.iter().zip(&rebuilt.arms).all(|(a, b)| a.decoded.tape.first == b.decoded.tape.first
-            && a.decoded.tape.instructions == b.decoded.tape.instructions && a.decoded.overlap == b.decoded.overlap);
+        let same_tapes = world.arms.len() == rebuilt.arms.len() && world.arms.iter().zip(&rebuilt.arms).all(|(a, b)|
+            a.decoded().tape.first == b.decoded().tape.first && a.decoded().tape.instructions == b.decoded().tape.instructions);
         if !same_tapes || world.cost != rebuilt.cost || world.repeat_length != rebuilt.repeat_length
             || world.instruction_count() != rebuilt.instruction_count() || world.area_touched != rebuilt.area_touched {
             println!("Rebuild changed the world: {:?}", fpath);
@@ -134,7 +139,7 @@ fn check_solution(results: &mut TestResults, fpath:&Path, puzzle_map: &PuzzleMap
 fn check_all(){
     sweep(false);
 }
-//Like check_all, but each world is set up again from its own layout first
+//Like check_all, but each world is saved and loaded again, then set up again from its own layout, first
 #[test]
 #[ignore = "Long running test, only run on explicit request"]
 fn check_all_rebuilt(){
@@ -937,11 +942,11 @@ mod regression_tests {
     fn noop_before_repeat_is_repeated() {
         //Like omsim, the repeated block runs through the Noop: R _ R _
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Noop, Repeat])], 0);
-        assert_eq!(world.arms[0].decoded.tape.instructions, [RotateClockwise, Noop, RotateClockwise, Noop]);
+        assert_eq!(world.arms[0].decoded().tape.instructions, [RotateClockwise, Noop, RotateClockwise, Noop]);
         assert_eq!(world.repeat_length, 4);
         //A halt between moves in a repeated block is copied rather than rejected
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, Halt, RotateClockwise, Repeat])], 0);
-        assert_eq!(world.arms[0].decoded.tape.instructions,
+        assert_eq!(world.arms[0].decoded().tape.instructions,
             [RotateClockwise, Halt, RotateClockwise, RotateClockwise, Halt, RotateClockwise]);
     }
 
@@ -1030,7 +1035,7 @@ mod regression_tests {
             arm(0, 0, ArmType::PlainArm, vec![RotateClockwise]),
             arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, Empty, RotateClockwise])], 0);
         let (_, _, init) = round_trip(&world, "a");
-        assert!(init.arms.iter().all(|a| !a.tape.instructions.contains(&Noop)));
+        assert!(init.arms.iter().all(|a| !a.tape().instructions.contains(&Noop)));
 
         //A longer loop is kept with a Noop on an arm that loops (not the halted one)
         let mut world = run(vec![], vec![
@@ -1038,7 +1043,7 @@ mod regression_tests {
             arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
         world.repeat_length = 5;
         let (_, _, init) = round_trip(&world, "a");
-        assert!(!init.arms[0].tape.instructions.contains(&Noop));
+        assert!(!init.arms[0].tape().instructions.contains(&Noop));
         assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
     }
 
@@ -1053,7 +1058,7 @@ mod regression_tests {
         //Leading and trailing Noops are both saved
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![Noop, RotateClockwise, Noop])], 0);
         let (_, _, init) = round_trip(&world, "a");
-        assert_eq!(init.arms[0].tape.first, 0);
+        assert_eq!(init.arms[0].tape().first, 0);
         assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 3);
     }
 
@@ -1073,7 +1078,7 @@ mod regression_tests {
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateCounterClockwise, Reset])], 0);
         assert_eq!(world.repeat_length, 3);
         let (_, _, init) = round_trip(&world, "a");
-        assert_eq!(init.arms[0].tape.instructions, [RotateClockwise, RotateCounterClockwise, Reset]);
+        assert_eq!(init.arms[0].tape().instructions, [RotateClockwise, RotateCounterClockwise, Reset]);
         assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 3);
     }
 
@@ -1084,9 +1089,20 @@ mod regression_tests {
         let world = run(vec![], vec![arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise, Reset])], 0);
         assert_eq!(world.repeat_length, 4);
         let (_, _, init) = round_trip(&world, "a");
-        assert_eq!(init.arms[0].tape.instructions, [RotateClockwise, RotateClockwise, Reset]);
+        assert_eq!(init.arms[0].tape().instructions, [RotateClockwise, RotateClockwise, Reset]);
         let loaded = World::setup_sim(&init).unwrap();
-        assert_eq!((loaded.repeat_length, loaded.arms[0].decoded.overlap), (4, None));
+        assert_eq!((loaded.repeat_length, loaded.arms[0].first_clash()), (4, None));
+    }
+
+    #[test]
+    fn saved_loop_length_skips_clashing_tapes() {
+        //The first arm's tape clashes, so it runs once and doesn't set the loop; the second arm's does
+        let world = run(vec![], vec![
+            arm(0, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise, Reset, Grab]),
+            arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
+        assert_eq!(world.repeat_length, 2);
+        let (_, _, init) = round_trip(&world, "a");
+        assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 2);
     }
 
     #[test]
@@ -1097,20 +1113,20 @@ mod regression_tests {
             arm(5, 0, ArmType::PlainArm, vec![RotateClockwise, RotateClockwise])], 0);
         world.repeat_length = 5;
         let (_, _, init) = round_trip(&world, "a");
-        assert!(init.arms[0].tape.instructions.is_empty());
-        assert!(init.arms[1].tape.instructions.contains(&Noop));
+        assert!(init.arms[0].tape().instructions.is_empty());
+        assert!(init.arms[1].tape().instructions.contains(&Noop));
         assert_eq!(World::setup_sim(&init).unwrap().repeat_length, 5);
     }
 
     #[test]
     fn tape_edits_track_halting() {
         let mut tape = Tape::new(0, vec![RotateClockwise]);
-        assert!(!tape.halts());
+        assert!(!tape.runs_once());
         tape.insert(1, &[Halt], false);
-        assert!(tape.halts());
+        assert!(tape.runs_once());
         assert_eq!(tape.get(5, 2), Empty, "halting tapes don't loop");
         tape.delete(1..2, false);
-        assert!(!tape.halts());
+        assert!(!tape.runs_once());
         assert_eq!(tape.get(2, 2), RotateClockwise);
     }
 
@@ -1144,7 +1160,7 @@ mod regression_tests {
         assert_eq!(world.repeat_length, 2);
         assert_eq!(world.min_repeat_length(), 2);
         //Without its Halt, it loops
-        let mut tape = world.arms[1].tape.clone();
+        let mut tape = world.arms[1].tape().clone();
         tape.delete(5..6, false);
         world.set_tape(1, tape);
         assert_eq!(world.min_repeat_length(), 5);
@@ -1388,7 +1404,7 @@ mod track_tests {
         let arm = Arm::new(Pos::new(arm_pos.0, arm_pos.1), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
         let glyphs = tracks.iter().map(|t| track(t)).collect();
         let world = World::setup_sim(&InitialWorld { glyphs, arms: vec![arm], ..Default::default() }).unwrap();
-        world.arms[0].decoded.tape.instructions.clone()
+        world.arms[0].decoded().tape.instructions.clone()
     }
 
     #[test]
@@ -1460,14 +1476,13 @@ mod track_tests {
         let mut world = World::setup_sim(&InitialWorld { glyphs: vec![track(&[(0, 0), (1, 0), (2, 0)])], arms, ..Default::default() }).unwrap();
         //Longer than the tapes, so they loop after a few empty steps
         world.set_repeat_length(9);
-        let start = world.layout().arms;
+        let start = world.clone();
         let pose = |arm: &Arm| (arm.pos, arm.rot, arm.len);
         let mut motion = WorldStepInfo::new();
         for _ in 0..30 {
             world.run_step(false, &mut motion).unwrap();
-            for (i, arm) in start.iter().enumerate() {
-                let mut alone = arm.clone();
-                alone.run_moves(world.timestep, world.repeat_length, &world.track_maps);
+            for i in 0..start.arms.len() {
+                let alone = start.arm_after(i, world.timestep);
                 assert_eq!(pose(&alone), pose(&world.arms[i]), "arm {i} after timestep {}", world.timestep);
             }
         }
@@ -1501,21 +1516,21 @@ mod repeat_reset_tests {
     fn repeats_and_resets_cover_what_they_run() {
         //R R X runs r r from step 2, then C repeats all four from step 4
         let w = world(vec![], vec![arm(vec![RotateClockwise, RotateClockwise, Reset, Empty, Repeat])]);
-        let decoded = &w.arms[0].decoded;
+        let decoded = w.arms[0].decoded();
         assert_eq!(decoded.tape.instructions, [RotateClockwise, RotateClockwise, RotateCounterClockwise, RotateCounterClockwise].repeat(2));
         assert_eq!(decoded.spans, [2..4, 4..8]);
-        assert_eq!(decoded.overlap, None);
+        assert_eq!(w.arms[0].first_clash(), None);
         //With nothing to run, each still takes its own cell
         let w = world(vec![], vec![arm(vec![Repeat, Grab, Drop, Reset])]);
-        assert_eq!(w.arms[0].decoded.tape.instructions, [Empty, Grab, Drop, Empty]);
-        assert_eq!(w.arms[0].decoded.spans, [0..1, 3..4]);
+        assert_eq!(w.arms[0].decoded().tape.instructions, [Empty, Grab, Drop, Empty]);
+        assert_eq!(w.arms[0].decoded().spans, [0..1, 3..4]);
     }
 
     //A halt after a Repeat started the next block without ending it, so the next Repeat's block ended before it began
     #[test]
     fn a_repeat_of_only_a_halt_runs_nothing() {
         let w = world(vec![], vec![arm(vec![RotateClockwise, Repeat, Halt, Repeat])]);
-        assert_eq!(w.arms[0].decoded.tape.instructions, [RotateClockwise, RotateClockwise, Halt, Empty]);
+        assert_eq!(w.arms[0].decoded().tape.instructions, [RotateClockwise, RotateClockwise, Halt, Empty]);
     }
 
     //These failed to load
@@ -1523,9 +1538,8 @@ mod repeat_reset_tests {
     fn instructions_inside_what_runs_crash_there() {
         //R R X runs r r over steps 2 and 3, where the G is
         let mut w = world(vec![], vec![arm(vec![RotateClockwise, RotateClockwise, Reset, Grab])]);
-        assert_eq!(w.arms[0].decoded.overlap, Some((3, Reset)));
-        //What the Reset runs is still decoded there, for showing under the G
-        assert_eq!(w.arms[0].decoded.tape.instructions[3], RotateCounterClockwise);
+        assert_eq!(w.arms[0].decoded().tape.instructions, [RotateClockwise, RotateClockwise, RotateCounterClockwise, Clash]);
+        assert_eq!(w.arms[0].first_clash(), Some((3, Reset)));
         assert_eq!(crash(&mut w, 10), Some(("Instruction inside a Reset's expansion!", 3)));
         //A step later, the G is clear of it
         let mut w = world(vec![], vec![arm(vec![RotateClockwise, RotateClockwise, Reset, Empty, Grab])]);
@@ -1536,6 +1550,44 @@ mod repeat_reset_tests {
         //R G C repeats R G over steps 2 and 3
         let mut w = world(vec![], vec![arm(vec![RotateClockwise, Grab, Repeat, Drop])]);
         assert_eq!(crash(&mut w, 10), Some(("Instruction inside a Repeat's expansion!", 3)));
+    }
+
+    //A later Repeat copies what an earlier clashing cell would have run, so the Clash is only where it was written
+    #[test]
+    fn a_repeat_copies_what_a_clashing_cell_would_run() {
+        //R R X runs r r over steps 2 and 3, where the G clashes; C repeats all four
+        let w = world(vec![], vec![arm(vec![RotateClockwise, RotateClockwise, Reset, Grab, Repeat])]);
+        assert_eq!(w.arms[0].decoded().tape.instructions,
+            [RotateClockwise, RotateClockwise, RotateCounterClockwise, Clash, RotateClockwise, RotateClockwise,
+                RotateCounterClockwise, RotateCounterClockwise]);
+    }
+
+    //A Halt covered by an expansion was decoded as a blank, so the tape looped, and the loop length was raised to fit it
+    #[test]
+    fn a_clashing_tape_runs_once() {
+        //The Reset runs three turns back over steps 3 to 5, so the Halt at 5 clashes
+        let turner = Arm::new(Pos::new(5, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![RotateClockwise]));
+        let clashing = arm(vec![RotateClockwise, RotateClockwise, RotateClockwise, Reset, Empty, Halt]);
+        let mut w = world(vec![], vec![turner, clashing]);
+        assert_eq!(w.repeat_length, 1, "only the turner sets the loop");
+        //It doesn't start over each loop: the Reset's first turn back runs at step 3
+        assert_eq!(crash(&mut w, 4), None);
+        assert_eq!(w.arms[1].rot, -2);
+        assert_eq!(crash(&mut w, 10), Some(("Instruction inside a Reset's expansion!", 5)));
+    }
+
+    //A tape with a clash already runs once, so a Halt added to it changes nothing before the Halt. The written tape
+    //doesn't show the clash, so going by it, the Halt would also stop the tape starting over after the first loop.
+    #[test]
+    fn a_halt_added_to_a_clashing_tape_changes_the_run_from_the_halt() {
+        let turner = Arm::new(Pos::new(5, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![RotateClockwise]));
+        //The Reset runs two turns back over steps 5 and 6, so the G at 6 clashes
+        let clashing = arm(vec![RotateClockwise, Empty, Empty, Empty, RotateClockwise, Reset, Grab]);
+        let w = world(vec![], vec![turner, clashing]);
+        assert_eq!(w.repeat_length, 1);
+        let mut tape = w.arms[1].tape().clone();
+        tape.insert(3, &[Halt], true);
+        assert_eq!(w.tape_change(1, &tape), Some(3));
     }
 
     #[test]
@@ -1550,7 +1602,7 @@ mod repeat_reset_tests {
             inputs: vec![], outputs: vec![], output_multiplier: 1, chambers: Chambers::default(), conduits: vec![],
         };
         let loaded = World::setup_sim(&puzzle_prep(&puzzle, &parse_solution(&mut data.as_slice()).unwrap()).unwrap()).unwrap();
-        assert_eq!(loaded.arms[0].decoded.tape.instructions, w.arms[0].decoded.tape.instructions);
+        assert_eq!(loaded.arms[0].decoded().tape.instructions, w.arms[0].decoded().tape.instructions);
         assert_eq!(loaded.repeat_length, w.repeat_length);
     }
 
@@ -1564,28 +1616,12 @@ mod repeat_reset_tests {
     fn resets_follow_the_layout() {
         //Off track, its moves do nothing, so the Reset has nothing to undo
         let off = world(vec![], vec![arm(vec![Forward, Forward, Reset])]);
-        assert_eq!(off.arms[0].decoded.tape.instructions, [Forward, Forward, Empty]);
+        assert_eq!(off.arms[0].decoded().tape.instructions, [Forward, Forward, Empty]);
         //A track added under it, as a part edit sets the world up again, makes the Reset bring it back
         let mut layout = off.layout();
         layout.glyphs.push(track());
         let on = World::setup_sim(&layout).unwrap();
-        assert_eq!(on.arms[0].decoded.tape.instructions, [Forward, Forward, Back, Back]);
-    }
-
-    //Moved onto track, the arm's Reset runs longer, so the loop gets longer. A drag's preview, which runs the arm
-    //alone, kept the loop from before.
-    #[test]
-    fn an_arm_run_alone_loops_its_whole_tape() {
-        let mut on = world(vec![track()], vec![arm(vec![Forward, Forward, Reset])]);
-        assert_eq!(on.repeat_length, 4);
-        let mut alone = on.layout().arms[0].clone();
-        //The loop the arm had off track
-        alone.run_moves(6, 3, &on.track_maps);
-        let mut motion = WorldStepInfo::new();
-        for _ in 0..6 {
-            on.run_step(false, &mut motion).unwrap();
-        }
-        assert_eq!(alone.pos, on.arms[0].pos);
+        assert_eq!(on.arms[0].decoded().tape.instructions, [Forward, Forward, Back, Back]);
     }
 }
 
@@ -1633,7 +1669,7 @@ mod timeline_tests {
     }
     //Inserts into arm 0's tape, as the editor does
     fn insert(timeline: &mut Timeline, index: usize, new: &[Instr], overwrite: bool) {
-        let mut tape = timeline.base().arms[0].tape.clone();
+        let mut tape = timeline.base().arms[0].tape().clone();
         tape.insert(index, new, overwrite);
         timeline.base_mut().set_tape(0, tape);
     }
@@ -1701,6 +1737,29 @@ mod timeline_tests {
         assert_eq!(timeline.base_mut().restore_program(saved), None);
     }
 
+    //A clash makes a tape run once, so an edit past the end of the loop can change what runs from there on. The written
+    //tapes don't show the clash, so going by them, nothing before the edit could change.
+    #[test]
+    fn a_clash_past_the_loop_changes_the_run_from_the_end_of_the_loop() {
+        let mut timeline = Timeline::new(World::setup_sim(&mover(1)).unwrap(), true);
+        let saved = timeline.base().clone();
+        //Leaves checkpoints at 32, 64 and 96, made while the arm started over every 4 steps
+        timeline.advance_to(100.).unwrap();
+        //The Reset runs two turns back over steps 40 and 41, so the Grab at 41 clashes
+        let mut tape = timeline.base().arms[0].tape().clone();
+        tape.insert(38, &[RotateClockwise, RotateClockwise, Reset, Grab], true);
+        let earliest = timeline.base().tape_change(0, &tape).unwrap();
+        timeline.base_mut().set_tape(0, tape);
+        timeline.program_changed(earliest as u64);
+        timeline.advance_to(40.).unwrap();
+        assert_eq!(summary(timeline.curr()), summary(&straight(&timeline.base().layout(), 40)));
+        //Undoing it starts it looping again from there
+        let earliest = timeline.base_mut().restore_program(saved.clone()).unwrap();
+        timeline.program_changed(earliest as u64);
+        timeline.advance_to(100.).unwrap();
+        assert_eq!(summary(timeline.curr()), summary(&straight(&saved.layout(), 100)));
+    }
+
     #[test]
     fn edit_ahead_of_cursor_doesnt_move_it() {
         let mut timeline = Timeline::new(World::setup_sim(&mover(100)).unwrap(), true);
@@ -1708,7 +1767,7 @@ mod timeline_tests {
         insert(&mut timeline, 250, &[Empty], true);
         assert!(!timeline.program_changed(250));
         assert_eq!(timeline.time(), 100.);
-        assert_eq!(timeline.curr().arms[0].decoded.tape.instructions, timeline.base().arms[0].decoded.tape.instructions);
+        assert_eq!(timeline.curr().arms[0].decoded().tape.instructions, timeline.base().arms[0].decoded().tape.instructions);
     }
 
     #[test]

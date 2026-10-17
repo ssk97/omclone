@@ -191,25 +191,25 @@ impl Run {
         })
     }
     //omsim's counts of the instructions run by `cycle`: each tape cell once if it's been reached (without looping),
-    //and how many times each kind of instruction has run. A tape stops counting at its first halt.
+    //and how many times each kind of instruction has run. A tape stops counting at its first halt (or clash).
     fn instructions_run(&self, cycle: i64) -> (i32, [i32; 10]) {
         let period = self.world.repeat_length as i64;
         let mut executed: i64 = 0;
         let mut executions = [0i64; 10];
         for arm in &self.world.arms {
-            let tape = &arm.decoded.tape;
+            let tape = &arm.decoded().tape;
             let start = tape.first as i64 - self.start as i64;
             if cycle < start || tape.instructions.is_empty() {
                 continue;
             }
             let elapsed = cycle - start;
-            let (times, progress) = match tape.halts() {
+            let (times, progress) = match tape.runs_once() {
                 true => (0, elapsed),
                 false if period > 0 => (elapsed / period, elapsed % period),
                 false => continue,
             };
             for (j, &instr) in tape.instructions.iter().enumerate() {
-                if instr == Instr::Halt {
+                if matches!(instr, Instr::Halt | Instr::Clash) {
                     break;
                 }
                 let Some(index) = hotkey_index(instr) else {continue};
@@ -595,7 +595,7 @@ fn decoded_metric(world: &World, puzzle: &FullPuzzle, metric: &str) -> Option<Re
                 if !b"adefgqrstwb".contains(&c) {
                     return Some(Err(VerifierError::metric("invalid instruction hotkey in 'instructions with hotkey' metric")));
                 }
-                count += world.arms.iter().flat_map(|a| &a.decoded.tape.instructions)
+                count += world.arms.iter().flat_map(|a| &a.decoded().tape.instructions)
                     .filter(|&&instr| tape_char(instr) == Some(c)).count() as i32;
             }
             count

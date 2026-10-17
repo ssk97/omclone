@@ -94,7 +94,7 @@ pub(super) struct Preview{
     float_world: FloatWorld,
     polymer: Option<Polymer>,
     track: Option<TrackMaps>,
-    //An arm as the edit would have it at `timestep`, the timeline's current one
+    //An arm as the edit would have it at `timestep`, the timeline's current one (unless the layout can't be set up)
     arm_now: Option<Arm>,
     timestep: u64,
     landing: SmallVec<[Pos; 8]>,
@@ -206,7 +206,7 @@ impl Loaded{
             return Err(reason.to_owned());
         }
         let (layout, part) = edit.apply(self.timeline.base());
-        let world = World::setup_sim(&layout).map_err(|e| e.to_string())?;
+        let world = self.set_up(&layout)?;
         if let Some(part) = part{
             self.check_overlap(&world.part_overlaps(part))?;
             self.check_chambers(&world, part)?;
@@ -623,6 +623,7 @@ impl Loaded{
         let (layout, part) = edit.apply(base);
         let part = part.expect("a pending edit places or changes a part");
         let timestep = self.timeline.curr().timestep;
+        let world = self.set_up(&layout);
         let (polymer, track, arm_now, landing) = match part{
             PartId::Glyph(i) => {
                 let glyph = &layout.glyphs[i];
@@ -631,15 +632,11 @@ impl Loaded{
                 let landing = glyph.footprint(polymer.as_ref());
                 (polymer, track, None, landing)
             }
-            //Edits to arms leave the tracks as they are, and the loop length unless the arm's tape outgrows it (which
-            //run_moves allows for)
             PartId::Arm(i) => {
-                let mut arm = layout.arms[i].clone();
-                arm.run_moves(timestep, base.repeat_length, &base.track_maps);
-                (None, None, Some(arm), smallvec![layout.arms[i].pos])
+                let arm_now = world.as_ref().ok().map(|world| world.arm_after(i, timestep));
+                (None, None, arm_now, smallvec![layout.arms[i].pos])
             }
         };
-        let world = World::setup_sim(&layout).map_err(|e| e.to_string());
         let mut float_world = FloatWorld::new();
         let overlaps = match &world{
             Ok(world) => {
@@ -746,8 +743,9 @@ impl Loaded{
             //where it will be at this step, following the mouse.
             PartId::Arm(i) => {
                 render.draw_arm_start(ctx, &self.camera, &preview.layout.arms[i], i);
-                let now = preview.arm_now.as_ref().expect("an arm's preview has it as it is now");
-                render.draw_dragged_arm(ctx, &self.camera, now, i, extra);
+                if let Some(now) = &preview.arm_now{
+                    render.draw_dragged_arm(ctx, &self.camera, now, i, extra);
+                }
             }
         }
         render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
@@ -1018,7 +1016,7 @@ mod tests {
         let mut loaded = Loaded::for_test(vec![], arms);
         (loaded.tape_sel.arm, loaded.tape_sel.anchor_arm) = (2, 2);
         //Each arm's tape starts at its original number
-        let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].tape.first;
+        let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].tape().first;
         assert_eq!(loaded.apply_edit(&LayoutEdit::ReorderArm{from: 0, to: 3}), Ok(()));
         assert_eq!(caret_arm(&loaded), 2);
         assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(PartId::Arm(0))), Ok(()));
@@ -1082,6 +1080,28 @@ mod tests {
         loaded.release();
         loaded.update();
         assert_eq!(loaded.timeline.curr().timestep, 2, "it runs back to the step it was edited at");
+        assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
+    }
+
+    //Dragged onto a track, an arm's Reset runs longer, which makes the loop longer. The preview kept the loop from
+    //before.
+    #[test]
+    fn the_drag_preview_runs_the_arm_with_the_loop_the_edit_gives() {
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track((0..4).map(|x| Pos::new(x, 0)).collect())};
+        //Off the track, the Reset has nothing to undo
+        let arm = Arm::new(Pos::new(0, 2), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Forward, Instr::Forward, Instr::Reset]));
+        let mut loaded = Loaded::for_test(vec![track], vec![arm]);
+        assert_eq!(loaded.timeline.base().repeat_length, 3);
+        loaded.timeline.advance_to(5.).unwrap();
+        press(&mut loaded, 0, 2, KeyMods::default());
+        move_to(&mut loaded, 0, 0);
+        loaded.refresh_preview();
+        let previewed = loaded.preview.as_ref().and_then(|p| p.arm_now.as_ref()).map(pose);
+        loaded.release();
+        loaded.update();
+        //On the track, it runs F F t t
+        assert_eq!(loaded.timeline.base().repeat_length, 4);
+        assert_eq!(loaded.timeline.curr().timestep, 5);
         assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
     }
 }

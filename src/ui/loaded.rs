@@ -143,9 +143,15 @@ impl Loaded{
         let solution = parser::create_solution(self.timeline.base(), String::new(), String::new());
         self.rule_notes = rules::rejections(&self.puzzle, &solution).iter().map(|r| r.note()).collect();
     }
-    //Replaces the starting world after a layout edit (which can be undone), then runs back to the shown timestep
-    pub(super) fn commit_world(&mut self, mut world: World){
+    //Sets up a layout as an edit makes it. It keeps the loop length, unless its tapes need a longer one.
+    pub(super) fn set_up(&self, layout: &InitialWorld) -> std::result::Result<World, String>{
+        let mut world = World::setup_sim(layout).map_err(|e| e.to_string())?;
         world.repeat_length = world.repeat_length.max(self.timeline.base().repeat_length);
+        Ok(world)
+    }
+    //Replaces the starting world with one from set_up after a layout edit (which can be undone), then runs back to the
+    //shown timestep
+    pub(super) fn commit_world(&mut self, world: World){
         self.history.record(self.timeline.base().clone(), StepKind::Layout);
         self.tape_group = None;
         self.replace_base(world);

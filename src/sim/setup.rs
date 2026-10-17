@@ -77,15 +77,16 @@ impl ResetState {
 
 impl Arm {
     //What `tape` runs on this arm, given where it starts: each Repeat or Reset becomes the instructions it stands
-    //for, starting in its own cell and running over the cells after it. A written instruction in those cells is an
-    //overlap, which the run crashes at; past it, decoding carries on as if the cell were blank.
+    //for, starting in its own cell and running over the cells after it. A written instruction in those cells clashes
+    //with it and runs as a Clash; for the rest of decoding, that cell counts as blank.
     pub fn decode(&self, tape: &Tape, track_maps: &TrackMaps) -> DecodedTape {
         use Instr::*;
         let written = &tape.instructions;
         //Indexes match `written`'s: each cell decodes to one instruction
         let mut instructions = Vec::with_capacity(written.len() + 8);
         let mut spans = Vec::new();
-        let mut overlap = None;
+        //Marked once decoding is done, so a Repeat copies what the cell would run without the clash
+        let mut clashes = Vec::new();
         let mut repeat_source = 0;
         let mut repeat_ending = 0;
         let mut any_nonrepeat = false;
@@ -130,10 +131,7 @@ impl Arm {
                     };
                     //One with nothing to run still takes its own cell
                     let len = runs.len().max(1);
-                    if overlap.is_none() {
-                        let covered = (curr + 1..curr + len).find(|&i| written.get(i).is_some_and(|&w| w != Empty));
-                        overlap = covered.map(|i| (tape.first + i, instr));
-                    }
+                    clashes.extend((curr + 1..curr + len).filter(|&i| written.get(i).is_some_and(|&w| w != Empty)));
                     if runs.is_empty() {
                         instructions.push(Empty);
                     } else {
@@ -151,9 +149,31 @@ impl Arm {
                     //A noop takes a cycle, so like omsim it extends the repeated block (and the loop)
                     repeat_ending = curr;
                 }
+                Clash => unreachable!("only decoded tapes have clashes"),
             };
         }
-        DecodedTape{tape: Tape::new(tape.first, instructions), spans, overlap}
+        for i in clashes {
+            instructions[i] = Clash;
+        }
+        DecodedTape{tape: Tape::new(tape.first, instructions), spans}
+    }
+    //Whether the expansion covering `step` is a Repeat's or a Reset's, if one does
+    pub fn expansion_at(&self, step: usize) -> Option<Instr> {
+        self.decoded.span_at(step).map(|span| self.tape.cell(span.start))
+    }
+    //The first timestep a written instruction clashes at, and whether that's with a Repeat or a Reset
+    pub fn first_clash(&self) -> Option<(usize, Instr)> {
+        let tape = &self.decoded.tape;
+        let step = tape.first + tape.instructions.iter().position(|&i| i == Instr::Clash)?;
+        Some((step, self.expansion_at(step)?))
+    }
+    //The first timestep at which this arm can act differently with `tape` written and `decoded` running, or None if
+    //`tape` is the one it has. The written tapes decide whether anything changed, and the decoded ones (what runs)
+    //where: only they show a Clash making the tape start or stop running once.
+    fn change_to(&self, tape: &Tape, decoded: &Tape, loop_len: usize) -> Option<usize> {
+        let written = self.tape.first_difference(tape, loop_len)?;
+        //Decoded tapes that are the same run the same (as when one clashing instruction replaces another)
+        Some(self.decoded.tape.first_difference(decoded, loop_len).unwrap_or(written))
     }
 }
 
@@ -265,17 +285,35 @@ impl World {
         if self.arms.len() == 0 { return 0 }
         self.arms.iter().map(|a|a.decoded.tape.first as u64).fold(u64::MAX, std::cmp::min)
     }
-    //The shortest loop that fits every looping tape (halting tapes run once, so they don't count)
+    //The shortest loop that fits every looping tape (tapes that run once don't count)
     pub fn min_repeat_length(&self) -> usize{
-        self.arms.iter().filter(|a| !a.decoded.tape.halts())
+        self.arms.iter().filter(|a| !a.decoded.tape.runs_once())
             .map(|a| a.decoded.tape.instructions.len()).max().unwrap_or(0)
     }
-    //Gives an arm a new tape as written, and decodes it. Nothing before the first changed cell runs differently,
-    //since a Repeat or Reset only runs over the cells after it.
+    //Gives an arm a new tape as written, and decodes it. Decoding goes by where the arm starts, so this must be a world
+    //that hasn't run (like the timeline's base).
     pub fn set_tape(&mut self, arm: usize, tape: Tape){
         let arm = &mut self.arms[arm];
         arm.decoded = arm.decode(&tape, &self.track_maps);
         arm.tape = tape;
+    }
+    //The first timestep that can act differently if arm `arm` gets `tape`, or None if it has that tape. Like set_tape,
+    //this must be a world that hasn't run.
+    pub fn tape_change(&self, arm: usize, tape: &Tape) -> Option<usize>{
+        let arm = &self.arms[arm];
+        arm.change_to(tape, &arm.decode(tape, &self.track_maps).tape, self.repeat_length)
+    }
+    //Gives this world `from`'s program (its tapes and loop length), for a version of the same parts
+    pub fn copy_program(&mut self, from: &World){
+        self.repeat_length = from.repeat_length;
+        for (arm, from) in self.arms.iter_mut().zip(&from.arms){
+            arm.tape = from.tape.clone();
+            arm.decoded = from.decoded.clone();
+        }
+    }
+    //The first timestep a written instruction clashes with a Repeat or Reset at, which the run crashes at
+    pub fn first_clash(&self) -> Option<usize>{
+        self.arms.iter().filter_map(|a| a.first_clash()).map(|(step, _)| step).min()
     }
     //Sets the loop length, returning the first timestep it can affect
     pub fn set_repeat_length(&mut self, length: usize) -> usize{
@@ -291,8 +329,7 @@ impl World {
         debug_assert_eq!(self.arms.len(), saved.arms.len());
         let mut earliest = None;
         for (arm, saved) in self.arms.iter_mut().zip(saved.arms){
-            //As in set_tape, the written tapes' first difference is where what runs can first differ
-            if let Some(step) = arm.tape.first_difference(&saved.tape, loop_len){
+            if let Some(step) = arm.change_to(&saved.tape, &saved.decoded.tape, loop_len){
                 earliest = Some(earliest.map_or(step, |e: usize| e.min(step)));
             }
             arm.tape = saved.tape;
@@ -307,7 +344,7 @@ impl World {
     //The instructions the tapes run, counting each Repeat and Reset as what it runs (as the game does)
     pub fn instruction_count(&self) -> i32 {
         self.arms.iter().flat_map(|a| &a.decoded.tape.instructions)
-            .filter(|i| !matches!(i, Instr::Empty | Instr::Halt | Instr::Noop)).count() as i32
+            .filter(|i| !matches!(i, Instr::Empty | Instr::Halt | Instr::Noop | Instr::Clash)).count() as i32
     }
     pub fn get_stats(&self) -> SolutionStats {
         let cycles = (self.timestep-self.get_first_timestep()) as i32;

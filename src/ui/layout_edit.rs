@@ -267,7 +267,7 @@ mod tests {
         World::setup_sim(&edit.apply(w).0).unwrap()
     }
     fn tape(w: &World, arm: usize) -> Vec<Instr> {
-        w.arms[arm].tape.instructions.clone()
+        w.arms[arm].tape().instructions.clone()
     }
     //Saves and loads the world, like the Save button and a reload
     fn round_trip(w: &World) -> World {
@@ -358,7 +358,7 @@ mod tests {
         let with_arm = round_trip(&applied(&w, edit));
         let arm = &with_arm.arms[1];
         assert_eq!((arm.pos, arm.rot, arm.len, arm.arm_type), (Pos::new(-2, 0), -1, 3, ArmType::Piston));
-        assert!(arm.tape.instructions.is_empty());
+        assert!(arm.tape().instructions.is_empty());
         assert_eq!(tape(&with_arm, 0), tape(&w, 0));
 
         let wheel = applied(&w, LayoutEdit::Add{part: NewPart::Arm(ArmType::VanBerlo), pos: Pos::new(9, 0), rot: 0, len: 3});
@@ -406,7 +406,7 @@ mod tests {
         let edit = LayoutEdit::ReorderArm{from: 0, to: 2};
         assert_eq!(edit.apply(&w).1, Some(PartId::Arm(2)));
         let moved = round_trip(&applied(&w, edit));
-        let order: Vec<(i32, usize)> = moved.arms.iter().map(|a| (a.pos.x, a.tape.first)).collect();
+        let order: Vec<(i32, usize)> = moved.arms.iter().map(|a| (a.pos.x, a.tape().first)).collect();
         assert_eq!(order, vec![(2, 1), (4, 2), (0, 0)]);
     }
 

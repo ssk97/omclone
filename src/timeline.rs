@@ -34,14 +34,6 @@ pub struct Completion {
     //The timestep after the one that filled the last output
     timestep: u64,
 }
-//Gives a world base's program
-fn sync_program(world: &mut World, base: &World){
-    world.repeat_length = base.repeat_length;
-    for (arm, base_arm) in world.arms.iter_mut().zip(&base.arms){
-        arm.tape = base_arm.tape.clone();
-        arm.decoded = base_arm.decoded.clone();
-    }
-}
 impl Timeline{
     pub fn new(base: World, mark_area: bool) -> Self{
         Timeline{curr: base.clone(), base, motion: WorldStepInfo::new(), substep: 0, substep_count: DEFAULT_SUBSTEPS,
@@ -84,7 +76,7 @@ impl Timeline{
         self.restore(world, step);
     }
     fn restore(&mut self, mut world: World, step: u64){
-        sync_program(&mut world, &self.base);
+        world.copy_program(&self.base);
         //The start can be shown before its first timestep
         self.time = world.timestep.min(step) as f64;
         self.curr = world;
@@ -121,7 +113,7 @@ impl Timeline{
             self.rewind(earliest);
             true
         } else {
-            sync_program(&mut self.curr, &self.base);
+            self.curr.copy_program(&self.base);
             false
         }
     }

@@ -343,11 +343,13 @@ pub(super) fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloade
         solution_stats(ui, loaded);
     });
 }
-//What loading changed, and what omsim would reject. A long list ends with how many more there are.
+//Where the tapes crash, what loading changed, and what omsim would reject. A long list ends with how many more there
+//are.
 #[cfg(feature = "editor_ui")]
 fn file_notes(ui: &mut egui::Ui, loaded: &Loaded){
     const SHOWN: usize = 4;
-    let notes: Vec<&String> = loaded.load_notes.iter().chain(&loaded.rule_notes).collect();
+    let clashes = clash_notes(loaded.timeline.base());
+    let notes: Vec<&String> = clashes.iter().chain(&loaded.load_notes).chain(&loaded.rule_notes).collect();
     let color = ui.visuals().warn_fg_color;
     for note in notes.iter().take(SHOWN){
         ui.colored_label(color, note.as_str());
@@ -355,6 +357,14 @@ fn file_notes(ui: &mut egui::Ui, loaded: &Loaded){
     if notes.len() > SHOWN{
         ui.colored_label(color, format!("…and {} more", notes.len() - SHOWN));
     }
+}
+//For each arm whose tape has a clash, where the run crashes on it
+#[cfg(feature = "editor_ui")]
+fn clash_notes(world: &World) -> Vec<String>{
+    world.arms.iter().enumerate().filter_map(|(i, arm)| arm.first_clash().map(|(step, kind)| {
+        let kind = if kind == Instr::Repeat {"Repeat"} else {"Reset"};
+        format!("Arm {} crashes at timestep {step}: an instruction is inside its {kind}'s expansion", i + 1)
+    })).collect()
 }
 //The solution's stats as the loaded file had them, and as they are now. Cycles and area are only known once the
 //timeline has run past the last output.
@@ -425,7 +435,7 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                     //Changed on a copy, so a failed setup leaves the solution as it was
                     let mut layout = loaded.timeline.base().layout();
                     for a in &mut layout.arms{
-                        if a.tape.instructions.contains(&Instr::Extend) || a.tape.instructions.contains(&Instr::Retract) {
+                        if a.tape().instructions.contains(&Instr::Extend) || a.tape().instructions.contains(&Instr::Retract) {
                             if a.arm_type == ArmType::PlainArm {
                                 a.arm_type = ArmType::Piston;
                                 pistons_added += 1;
@@ -438,9 +448,9 @@ pub(super) fn arms_window(egui_ctx: &egui::Context, loaded: &mut Loaded, extra_m
                         }
                     }
                     if pistons_added + pistons_removed > 0 {
-                        match World::setup_sim(&layout) {
+                        match loaded.set_up(&layout) {
                             Ok(world) => loaded.commit_world(world),
-                            Err(err) => loaded.message = Some(err.to_string()),
+                            Err(err) => loaded.message = Some(err),
                         }
                     }
                     *extra_message = Some(format!("{pistons_added} pistons added, {pistons_removed} pistons removed"));
@@ -1225,5 +1235,14 @@ mod tests {
         timeline_frame(click(slider.center()));
         let step = loaded.cursor_step();
         assert!((45..=55).contains(&step), "the middle of the slider is near timestep 50, not {step}");
+    }
+
+    #[test]
+    fn clashes_are_noted_for_each_arm() {
+        use Instr::*;
+        let arm = |x, instructions| Arm::new(Pos::new(x, 0), 0, 1, ArmType::PlainArm, Tape::new(0, instructions));
+        //The second arm's Reset runs two turns back over steps 2 and 3, where it has a Grab
+        let loaded = Loaded::for_test(vec![], vec![arm(0, vec![Grab]), arm(3, vec![RotateClockwise, RotateClockwise, Reset, Grab])]);
+        assert_eq!(clash_notes(loaded.timeline.base()), ["Arm 2 crashes at timestep 3: an instruction is inside its Reset's expansion"]);
     }
 }

@@ -10,6 +10,8 @@ pub enum Instr {
     Forward, Back,
     Repeat, Reset,
     Noop, Halt, Empty,
+    //Only in decoded tapes (see Arm::decode): a written instruction where a Repeat or Reset runs, which crashes there
+    Clash,
 }
 impl Instr {
     pub fn to_byte(&self) -> u8 {
@@ -30,6 +32,7 @@ impl Instr {
             Noop                    => b'O',
             Halt                   => b'B',
             Empty                   => b' ',
+            Clash                   => unreachable!("only decoded tapes have clashes, and they aren't saved"),
         }
     }
     pub fn from_byte(input: u8) -> Option<Self> {
@@ -71,6 +74,7 @@ impl Instr {
             Noop                    => 'O',
             Halt                    => 'B',
             Empty                   => ' ',
+            Clash                   => '!',
         }
     }
     pub fn from_char(input: char) -> Option<Self> {
@@ -100,22 +104,23 @@ impl Instr {
 pub struct Tape {
     pub first: usize,
     pub instructions: Vec<Instr>,
-    //Cached `instructions.contains(&Halt)`, since it's needed every step. The methods below keep it
-    //up to date; anything else that adds or removes a Halt in `instructions` must call update_halts.
-    halts: bool,
+    //Cached, since it's needed every step. The methods below keep it up to date; anything else that adds or removes a
+    //Halt or Clash in `instructions` must call update_runs_once.
+    runs_once: bool,
 }
 impl Tape {
     pub fn new(first: usize, instructions: Vec<Instr>) -> Self {
-        let mut tape = Tape { first, instructions, halts: false };
-        tape.update_halts();
+        let mut tape = Tape { first, instructions, runs_once: false };
+        tape.update_runs_once();
         tape
     }
-    pub fn update_halts(&mut self) {
-        self.halts = self.instructions.contains(&Instr::Halt);
+    pub fn update_runs_once(&mut self) {
+        self.runs_once = self.instructions.iter().any(|&i| matches!(i, Instr::Halt | Instr::Clash));
     }
-    //Halting tapes run once; all others loop
-    pub fn halts(&self) -> bool {
-        self.halts
+    //A tape with a Halt or a Clash runs once; all others loop. A Clash comes on the first pass, so the run crashes
+    //before such a tape could start over anyway.
+    pub fn runs_once(&self) -> bool {
+        self.runs_once
     }
     //The timestep just after the last instruction, before the tape loops
     pub fn end(&self) -> usize {
@@ -134,8 +139,8 @@ impl Tape {
         let start = self.first.min(other.first);
         //Tapes that only differ in blanks at the end act the same, so that's where they differ
         let mut step = (start..end_a.max(end_b)).find(|&i| self.cell(i) != other.cell(i)).unwrap_or(end_a.min(end_b));
-        //A tape that halts runs on past the loop, instead of starting over
-        if self.halts() != other.halts() {
+        //A tape that runs once goes on past the loop, instead of starting over
+        if self.runs_once() != other.runs_once() {
             step = step.min(start + loop_len);
         }
         Some(step)
@@ -144,7 +149,7 @@ impl Tape {
         use Instr::Empty;
         if timestep >= self.first{
             let after_first = timestep - self.first;
-            if self.halts{
+            if self.runs_once{
                 return *self
                     .instructions
                     .get(after_first)
@@ -205,7 +210,7 @@ impl Tape {
         }
         self.trim_end();
         self.trim_start();
-        self.update_halts();
+        self.update_runs_once();
     }
     //Deletes the absolute positions in `range`, or blanks them if `overwrite`
     pub fn delete(&mut self, range: std::ops::Range<usize>, overwrite: bool) {
@@ -225,7 +230,7 @@ impl Tape {
         }
         self.trim_end();
         self.trim_start();
-        self.update_halts();
+        self.update_runs_once();
     }
 }
 
@@ -235,9 +240,6 @@ pub struct DecodedTape {
     pub tape: Tape,
     //Each Repeat's and Reset's timesteps, in order: from its own cell to the end of what it runs
     pub spans: Vec<std::ops::Range<usize>>,
-    //The timestep of the first written instruction in a span past its own cell, and whether that span is a Repeat's
-    //or a Reset's. The run crashes there.
-    pub overlap: Option<(usize, Instr)>,
 }
 impl DecodedTape {
     //The span covering a timestep, if any
