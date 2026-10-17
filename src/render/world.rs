@@ -1,8 +1,7 @@
 use miniquad::*;
 use crate::sim::*;
 
-use crate::render_library::*;
-use crate::render_glyphs::*;
+use super::{glyphs::*, library::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use std::f32::consts::PI;
@@ -122,13 +121,13 @@ fn setup_textures(ctx: &mut dyn RenderingBackend) -> Vec<Bindings>{
     let vb = ctx.new_buffer(BufferType::VertexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_VERT_BUF));
     let index_buffer = ctx.new_buffer(BufferType::IndexBuffer,BufferUsage::Immutable, BufferSource::slice(&TEXTURE_INDEX_BUF));
     let texture_list:Vec<&[u8]> = vec![
-        include_bytes!("../images/HexGridTiling.png"),
-        include_bytes!("../images/ShadeAtomInOut.png"),
-        include_bytes!("../images/ShadeAreaFill.png"),
-        include_bytes!("../images/BondNormal.png"),
-        include_bytes!("../images/BondRed.png"),
-        include_bytes!("../images/BondWhite.png"),
-        include_bytes!("../images/BondYellow.png"),
+        include_bytes!("../../images/HexGridTiling.png"),
+        include_bytes!("../../images/ShadeAtomInOut.png"),
+        include_bytes!("../../images/ShadeAreaFill.png"),
+        include_bytes!("../../images/BondNormal.png"),
+        include_bytes!("../../images/BondRed.png"),
+        include_bytes!("../../images/BondWhite.png"),
+        include_bytes!("../../images/BondYellow.png"),
     ];
     texture_list.iter().enumerate().map(|(id, byte_data)| -> Bindings{
         let wrap = if id == HEX_GRID_ID {TextureWrap::Repeat} else {TextureWrap::Clamp};

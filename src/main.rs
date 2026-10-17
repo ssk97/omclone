@@ -1,8 +1,6 @@
 use omclone::{parser, rules, sim, timeline};
 
-mod render_library;
-mod render_glyphs;
-mod render_sim;
+mod render;
 mod ui;
 
 #[cfg(feature = "color-eyre")]

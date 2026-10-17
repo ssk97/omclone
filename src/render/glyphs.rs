@@ -1,4 +1,4 @@
-use crate::render_library::*;
+use super::library::*;
 use miniquad::*;
 use crate::sim::*;
 
@@ -97,26 +97,26 @@ impl GlyphImages {
                 images: vec![texture],
             }
         };
-        let anim1 = dot(include_bytes!("../mspaintart/dots/anim1.png"));
-        let anim2 = dot(include_bytes!("../mspaintart/dots/anim2.png"));
-        let anim3 = dot(include_bytes!("../mspaintart/dots/anim3.png"));
-        let card1 = dot(include_bytes!("../mspaintart/dots/card1.png"));
-        let disp1 = dot(include_bytes!("../mspaintart/dots/disp1.png"));
-        let disp2 = dot(include_bytes!("../mspaintart/dots/disp2.png"));
-        let disp3 = dot(include_bytes!("../mspaintart/dots/disp3.png"));
-        let disp4 = dot(include_bytes!("../mspaintart/dots/disp4.png"));
-        let disp5 = dot(include_bytes!("../mspaintart/dots/disp5.png"));
-        let div1 = dot(include_bytes!("../mspaintart/dots/div1.png"));
-        let div2 = dot(include_bytes!("../mspaintart/dots/div2.png"));
-        let metal1 = dot(include_bytes!("../mspaintart/dots/metal1.png"));
-        let metal2 = dot(include_bytes!("../mspaintart/dots/metal2.png"));
-        let metal3 = dot(include_bytes!("../mspaintart/dots/metal3.png"));
-        let quint1 = dot(include_bytes!("../mspaintart/dots/quint1.png"));
-        let quint2 = dot(include_bytes!("../mspaintart/dots/quint2.png"));
-        let salt1 = dot(include_bytes!("../mspaintart/dots/salt1.png"));
-        let triplex1 = dot(include_bytes!("../mspaintart/dots/triplex1.png"));
-        let unif1 = dot(include_bytes!("../mspaintart/dots/unif1.png"));
-        let unif2 = dot(include_bytes!("../mspaintart/dots/unif2.png"));
+        let anim1 = dot(include_bytes!("../../mspaintart/dots/anim1.png"));
+        let anim2 = dot(include_bytes!("../../mspaintart/dots/anim2.png"));
+        let anim3 = dot(include_bytes!("../../mspaintart/dots/anim3.png"));
+        let card1 = dot(include_bytes!("../../mspaintart/dots/card1.png"));
+        let disp1 = dot(include_bytes!("../../mspaintart/dots/disp1.png"));
+        let disp2 = dot(include_bytes!("../../mspaintart/dots/disp2.png"));
+        let disp3 = dot(include_bytes!("../../mspaintart/dots/disp3.png"));
+        let disp4 = dot(include_bytes!("../../mspaintart/dots/disp4.png"));
+        let disp5 = dot(include_bytes!("../../mspaintart/dots/disp5.png"));
+        let div1 = dot(include_bytes!("../../mspaintart/dots/div1.png"));
+        let div2 = dot(include_bytes!("../../mspaintart/dots/div2.png"));
+        let metal1 = dot(include_bytes!("../../mspaintart/dots/metal1.png"));
+        let metal2 = dot(include_bytes!("../../mspaintart/dots/metal2.png"));
+        let metal3 = dot(include_bytes!("../../mspaintart/dots/metal3.png"));
+        let quint1 = dot(include_bytes!("../../mspaintart/dots/quint1.png"));
+        let quint2 = dot(include_bytes!("../../mspaintart/dots/quint2.png"));
+        let salt1 = dot(include_bytes!("../../mspaintart/dots/salt1.png"));
+        let triplex1 = dot(include_bytes!("../../mspaintart/dots/triplex1.png"));
+        let unif1 = dot(include_bytes!("../../mspaintart/dots/unif1.png"));
+        let unif2 = dot(include_bytes!("../../mspaintart/dots/unif2.png"));
 
         //Pixel location of the glyph's primary hex within each image
         const ORIGIN: [f32;2] = [220., 316.];
@@ -132,33 +132,33 @@ impl GlyphImages {
         };
         //Order must match GlyphImages::get
         let glyphs = vec![
-            glyph(include_bytes!("../mspaintart/animismus.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/animismus.png"), ORIGIN, 0,
                 vec![(&anim3, p(0,0)), (&anim3, p(1,0)), (&anim1, p(0,1)), (&anim2, p(1,-1))]),
-            glyph(include_bytes!("../mspaintart/bonding.png"), ORIGIN, 0, vec![]),
-            glyph(include_bytes!("../mspaintart/calcification.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/bonding.png"), ORIGIN, 0, vec![]),
+            glyph(include_bytes!("../../mspaintart/calcification.png"), ORIGIN, 0,
                 vec![(&card1, p(0,0))]),
-            glyph(include_bytes!("../mspaintart/dispersion.png"), ORIGIN_TOP, 0,
+            glyph(include_bytes!("../../mspaintart/dispersion.png"), ORIGIN_TOP, 0,
                 vec![(&disp5, p(0,0)), (&disp4, p(1,0)), (&disp3, p(1,-1)), (&disp2, p(0,-1)), (&disp1, p(-1,0))]),
-            glyph(include_bytes!("../mspaintart/disposal.png"), ORIGIN_CENTER, 0, vec![]),
-            glyph(include_bytes!("../mspaintart/duplication.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/disposal.png"), ORIGIN_CENTER, 0, vec![]),
+            glyph(include_bytes!("../../mspaintart/duplication.png"), ORIGIN, 0,
                 vec![(&card1, p(0,0)), (&salt1, p(1,0))]),
-            glyph(include_bytes!("../mspaintart/equilibrium.png"), ORIGIN, 0, vec![]),
+            glyph(include_bytes!("../../mspaintart/equilibrium.png"), ORIGIN, 0, vec![]),
             //art is drawn mirrored from the sim's layout, rotating by 60 degrees lines it up
-            glyph(include_bytes!("../mspaintart/multibonding.png"), ORIGIN_CENTER, 1, vec![]),
-            glyph(include_bytes!("../mspaintart/projection.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/multibonding.png"), ORIGIN_CENTER, 1, vec![]),
+            glyph(include_bytes!("../../mspaintart/projection.png"), ORIGIN, 0,
                 vec![(&quint1, p(0,0)), (&metal1, p(1,0))]),
-            glyph(include_bytes!("../mspaintart/purification.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/purification.png"), ORIGIN, 0,
                 vec![(&metal2, p(0,0)), (&metal2, p(1,0)), (&metal3, p(0,1))]),
-            glyph(include_bytes!("../mspaintart/triplex.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/triplex.png"), ORIGIN, 0,
                 vec![(&triplex1, p(0,0)), (&triplex1, p(1,0)), (&triplex1, p(0,1))]),
-            glyph(include_bytes!("../mspaintart/unbonding.png"), ORIGIN, 0, vec![]),
-            glyph(include_bytes!("../mspaintart/unification.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/unbonding.png"), ORIGIN, 0, vec![]),
+            glyph(include_bytes!("../../mspaintart/unification.png"), ORIGIN, 0,
                 vec![(&unif2, p(0,0)), (&unif1, p(0,1)), (&unif1, p(-1,1)), (&unif1, p(0,-1)), (&unif1, p(1,-1))]),
-            glyph(include_bytes!("../mspaintart/rejection.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/rejection.png"), ORIGIN, 0,
                 vec![(&metal1, p(0,0)), (&quint2, p(1,0))]),
-            glyph(include_bytes!("../mspaintart/division.png"), ORIGIN_CENTER, 0,
+            glyph(include_bytes!("../../mspaintart/division.png"), ORIGIN_CENTER, 0,
                 vec![(&metal2, p(0,0)), (&div1, p(1,0)), (&div2, p(-1,0))]),
-            glyph(include_bytes!("../mspaintart/proliferation.png"), ORIGIN, 0,
+            glyph(include_bytes!("../../mspaintart/proliferation.png"), ORIGIN, 0,
                 vec![(&metal1, p(-1,1)), (&quint1, p(1,1)), (&metal3, p(1,-1))]),
         ];
         GlyphImages { glyphs }

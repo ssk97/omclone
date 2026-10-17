@@ -114,7 +114,7 @@ pub const ORIGIN_MARK: char = '@';
 /* Symbola v9.00 by George Douros ("Fonts in this site are free for any use"),
  * subsetted to only the characters we render. If a new character is needed,
  * add it to --unicodes and regenerate with fontTools:
- * pyftsubset path/to/Symbola.ttf --output-file=src/Symbola-subset.ttf
+ * pyftsubset path/to/Symbola.ttf --output-file=src/render/Symbola-subset.ttf
  *   --unicodes=U+0030-0039,U+2026,U+2609,U+263D,U+263F,U+2640,U+2642,U+2643,U+2644,U+2721,U+1F701-1F704,U+1F70D,U+1F714,
  *   U+0061,U+0064,U+0065,U+0077,U+0078,U+007A,U+0040
  */
