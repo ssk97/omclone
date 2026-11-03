@@ -58,6 +58,7 @@ pub struct Loaded{
     pub area_mode: AreaMode,
     //1 is held, so the board's atoms are drawn faintly
     pub atoms_faded: bool,
+    //In timesteps a second
     pub run_speed: f64,
     pub popup_reload: bool,
 
@@ -75,8 +76,6 @@ pub struct Loaded{
     //The arrow keys and WASD pan while held, and the ones held now
     pub keys_pan: bool,
     pub pan_keys_held: Vec<KeyCode>,
-    //When pan_with_keys last ran
-    pub key_pan_time: Option<f64>,
     pub tool: BoardTool,
     //The left button is held on the board while left drags pan
     pub pan: Option<PanPress>,
@@ -126,7 +125,7 @@ impl Loaded{
             shown_time: 0.,
             area_mode: AreaMode::Hidden,
             atoms_faded: false,
-            run_speed: 0.05,
+            run_speed: 3.,
             popup_reload: false,
 
             selection: None,
@@ -137,7 +136,6 @@ impl Loaded{
             left_drag_pans: false,
             keys_pan: false,
             pan_keys_held: Vec::new(),
-            key_pan_time: None,
             tool: BoardTool::Select(None),
             pan: None,
             allow_gaps: false,
@@ -322,7 +320,9 @@ impl Loaded{
             self.run_state = RunState::Manual(target);
         }
     }
-    pub fn update(&mut self){
+    //Moves the timeline on by a frame that took `dt` seconds
+    pub fn update(&mut self, dt: f64){
+        let step = self.run_speed*dt;
         let time = self.timeline.time();
         let target_time = match self.run_state{
             RunState::Manual(target_timestep) => {
@@ -332,10 +332,10 @@ impl Loaded{
                 if target_timestep > from+1.001{
                     target_timestep
                 } else {
-                    f64::min(from+self.run_speed,target_timestep)
+                    f64::min(from+step,target_timestep)
                 }
             },
-            RunState::FreeRun => time.max(self.shown_time)+self.run_speed,
+            RunState::FreeRun => time.max(self.shown_time)+step,
             RunState::Crashed{..} => return,
         };
         if target_time < time{
@@ -373,6 +373,9 @@ impl Loaded{
 }
 #[cfg(all(test, feature = "editor_ui"))]
 pub const TEST_SCREEN: (f32, f32) = (1000., 800.);
+//A frame's time in seconds, at 60 frames a second
+#[cfg(all(test, feature = "editor_ui"))]
+pub const TEST_FRAME: f64 = 1./60.;
 
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {
@@ -401,7 +404,7 @@ mod tests {
         let sitter = Arm::new(Pos::new(2, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
         let mut loaded = Loaded::for_test(vec![track], vec![rider, sitter]);
         loaded.run_state = RunState::Manual(5);
-        loaded.update();
+        loaded.update(TEST_FRAME);
         let RunState::Crashed{step, error} = loaded.run_state else {panic!("expected a crash")};
         assert_eq!((step, error.error_str, xy_to_pos(error.location)), (1, "Arm-Arm collision!", Pos::new(2, 0)));
         assert!(loaded.crash_window_open);

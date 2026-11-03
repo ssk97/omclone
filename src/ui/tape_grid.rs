@@ -803,6 +803,7 @@ mod tests {
 mod editing_tests {
     use super::*;
     use egui::{Event, Key, Modifiers};
+    use loaded::TEST_FRAME;
 
     fn key(key: Key, modifiers: Modifiers) -> Event {
         Event::Key{key, physical_key: None, pressed: true, repeat: false, modifiers}
@@ -974,7 +975,7 @@ mod editing_tests {
         let mut loaded = Loaded::for_test(vec![], vec![arm]);
         let right = key(Key::ArrowRight, Modifiers::NONE);
         handle_frame(&mut loaded, &[right.clone(), right]);
-        loaded.update();
+        loaded.update(TEST_FRAME);
         assert_eq!(loaded.timeline.time(), 2.);
         loaded
     }
@@ -985,7 +986,7 @@ mod editing_tests {
     fn erasing_goes_straight_to_the_caret() {
         let mut loaded = swinging_at_step_2();
         handle_frame(&mut loaded, &[key(Key::Backspace, Modifiers::NONE)]);
-        loaded.update();
+        loaded.update(TEST_FRAME);
         assert_eq!(loaded.timeline.time(), 1.);
     }
 
@@ -994,8 +995,8 @@ mod editing_tests {
     fn typing_plays_the_typed_step() {
         let mut loaded = swinging_at_step_2();
         handle_frame(&mut loaded, &[Event::Text("a".into())]);
-        loaded.update();
-        assert_eq!(loaded.timeline.time(), 2. + loaded.run_speed);
+        loaded.update(TEST_FRAME);
+        assert_eq!(loaded.timeline.time(), 2. + loaded.run_speed*TEST_FRAME);
     }
 
     fn typed(text: &str) -> Vec<Event> {

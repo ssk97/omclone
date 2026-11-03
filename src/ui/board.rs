@@ -3,11 +3,8 @@ use super::*;
 
 //Moving the mouse this far (in pixels) with the button held starts a drag
 pub const DRAG_THRESHOLD_PX: f32 = 4.;
-//How fast the view moves while a panning key is held, in pixels a second. By time rather than frames, so it's the
-//same at any refresh rate.
+//How fast the view moves while a panning key is held, in pixels a second
 const KEY_PAN_PX_PER_SEC: f64 = 600.;
-//A frame longer than this (as after a stall) pans only this far, so the view doesn't jump
-const KEY_PAN_MAX_STEP_SEC: f64 = 0.1;
 //Which way a panning key moves the view, in screen pixels (y down)
 fn pan_key_direction(keycode: KeyCode) -> Option<(f32, f32)>{
     match keycode{
@@ -550,17 +547,13 @@ impl Loaded{
     pub fn key_up(&mut self, keycode: KeyCode){
         self.pan_keys_held.retain(|&k| k != keycode);
     }
-    //Pans for the panning keys held, by the time since the last frame (`now` is in seconds). Returns true if the
-    //view moved.
-    pub fn pan_with_keys(&mut self, now: f64) -> bool{
-        let last = self.key_pan_time.replace(now);
+    //Pans for the panning keys held, through a frame that took `dt` seconds. Returns true if the view moved.
+    pub fn pan_with_keys(&mut self, dt: f64) -> bool{
         let (dx, dy) = self.pan_keys_held.iter().filter_map(|&k| pan_key_direction(k))
             .fold((0., 0.), |(x, y), (dx, dy)| (x + dx, y + dy));
         if self.moving_part() || (dx, dy) == (0., 0.){
             return false;
         }
-        //A key pressed since the last frame has been held for about a frame
-        let dt = last.map_or(1./60., |last| (now - last).clamp(0., KEY_PAN_MAX_STEP_SEC));
         let step = (KEY_PAN_PX_PER_SEC*dt) as f32;
         //The board moves the other way, as the view moves over it
         self.camera.pan_pixels(-dx*step, -dy*step);
@@ -866,7 +859,7 @@ impl Loaded{
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {
     use super::*;
-    use loaded::TEST_SCREEN as SCREEN;
+    use loaded::{TEST_FRAME, TEST_SCREEN as SCREEN};
 
     fn px(loaded: &Loaded, x: i32, y: i32) -> (f32, f32){
         loaded.test_px(x, y)
@@ -990,32 +983,13 @@ mod tests {
         loaded.keys_pan = true;
         assert!(loaded.handle_key(KeyCode::D, KeyMods::default()));
         assert!(loaded.handle_key(KeyCode::Up, KeyMods::default()));
-        loaded.pan_with_keys(10.);
-        let first = px(&loaded, 0, 0);
-        assert!(loaded.pan_with_keys(10.05));
+        assert!(loaded.pan_with_keys(TEST_FRAME));
         let moved = px(&loaded, 0, 0);
-        assert!(moved.0 < first.0 && moved.1 > first.1, "the view went right and up: {first:?} -> {moved:?}");
+        assert!(moved.0 < start.0 && moved.1 > start.1, "the view went right and up: {start:?} -> {moved:?}");
         loaded.key_up(KeyCode::D);
         loaded.key_up(KeyCode::Up);
-        assert!(!loaded.pan_with_keys(10.1));
+        assert!(!loaded.pan_with_keys(TEST_FRAME));
         assert_eq!(px(&loaded, 0, 0), moved);
-        assert_ne!(start, moved);
-    }
-
-    #[test]
-    fn key_panning_goes_by_time_not_frames() {
-        let distance = |frames: usize| {
-            let mut loaded = Loaded::for_test(vec![], vec![]);
-            loaded.keys_pan = true;
-            loaded.pan_with_keys(0.);
-            loaded.handle_key(KeyCode::Right, KeyMods::default());
-            for i in 1..=frames{
-                loaded.pan_with_keys(0.06*i as f64/frames as f64);
-            }
-            px(&loaded, 0, 0)
-        };
-        let (few, many) = (distance(2), distance(12));
-        assert!((few.0 - many.0).abs() < 1e-3, "{few:?} != {many:?}");
     }
 
     #[test]
@@ -1026,7 +1000,7 @@ mod tests {
         move_to(&mut loaded, 3, 0);
         let before = px(&loaded, 0, 0);
         assert!(loaded.handle_key(KeyCode::A, KeyMods::default()));
-        assert!(!loaded.pan_with_keys(1.));
+        assert!(!loaded.pan_with_keys(TEST_FRAME));
         assert_eq!(px(&loaded, 0, 0), before);
         loaded.release();
         assert_eq!(loaded.timeline.base().glyphs[0].rot, 1);
@@ -1314,7 +1288,7 @@ mod tests {
         let previewed = loaded.preview.as_ref().and_then(|p| p.arm_now.as_ref()).map(pose);
         assert_eq!(previewed, Some((Pos::new(3, 0), 0, 1)));
         loaded.release();
-        loaded.update();
+        loaded.update(TEST_FRAME);
         assert_eq!(loaded.timeline.curr().timestep, 2, "it runs back to the step it was edited at");
         assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
     }
@@ -1334,7 +1308,7 @@ mod tests {
         loaded.refresh_preview();
         let previewed = loaded.preview.as_ref().and_then(|p| p.arm_now.as_ref()).map(pose);
         loaded.release();
-        loaded.update();
+        loaded.update(TEST_FRAME);
         //On the track, it runs F F t t
         assert_eq!(loaded.timeline.base().repeat_length, 4);
         assert_eq!(loaded.timeline.curr().timestep, 5);

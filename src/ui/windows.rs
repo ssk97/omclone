@@ -85,8 +85,10 @@ pub fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             }
             ui.separator();
             ui.label("Speed:");
+            //Dragging changes it in proportion to its size, so it's as easy to adjust at 1 as at 1000
+            let drag_speed = loaded.run_speed*0.01;
             ui.add(egui::DragValue::new(&mut loaded.run_speed)
-                .range(0.01..=10.0f32).fixed_decimals(2).speed(0.002));
+                .range(0.5..=1500.0f32).max_decimals(1).speed(drag_speed).suffix(" steps/s"));
             let (mut running_free, enabled) = match loaded.run_state{
                 RunState::FreeRun => (true, true),
                 RunState::Manual(_) => (false, true),

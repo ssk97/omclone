@@ -79,7 +79,12 @@ pub struct OmcloneApp {
     touch_on_board: bool,
     //Two fingers pan and zoom, until every finger is up
     pinching: bool,
+    //When the last frame's update ran, in seconds
+    last_update: Option<f64>,
 }
+//A frame longer than this (as after a stall) moves the timeline and the view only this far, so they don't jump. It
+//also keeps a simulation that can't keep up from asking for more each frame, which would make the frames longer still.
+const MAX_FRAME_SEC: f64 = 0.1;
 
 impl OmcloneApp {
     pub fn new() -> Self {
@@ -103,6 +108,7 @@ impl OmcloneApp {
             extra_message:None, dragging: None, right_press: None, mouse: (0., 0.), keymods: KeyMods::default(),
             released: false, held_motion: None,
             touches: SmallVec::new(), touch_press: None, touch_on_board: false, pinching: false,
+            last_update: None,
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -198,16 +204,19 @@ const EDITOR_ENABLED: bool = cfg!(feature = "editor_ui");
 
 impl EventHandler for OmcloneApp {
     fn update(&mut self) {
+        //Speeds are by time rather than frames, so they're the same at any refresh rate
+        let now = date::now();
+        let dt = self.last_update.replace(now).map_or(0., |last| (now - last).clamp(0., MAX_FRAME_SEC));
         if let Loaded(loaded) = &mut self.app_state{
             //Before simulating, so a crash running an edit still has that edit
             loaded.update_backup(|| solution_path(&self.unloaded_info));
             //The mouse is over another hex now, though it didn't move
-            if loaded.pan_with_keys(miniquad::date::now()){
+            if loaded.pan_with_keys(dt){
                 let egui_ctx = self.egui_mq.egui_ctx();
                 let input = BoardInput::Move{px: self.mouse, screen: logical_screen_size(), over_ui: egui_ctx.is_pointer_over_egui()};
                 loaded.board_input(input, egui_ctx.text_edit_focused());
             }
-            loaded.update();
+            loaded.update(dt);
             loaded.refresh_preview();
             let timeline = &loaded.timeline;
             let display_portion = timeline.time().fract() as f32;
