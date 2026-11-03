@@ -72,6 +72,11 @@ pub struct Loaded{
     pub allow_overlap: bool,
     //A left drag on the board pans instead of moving a part (see left_drag_pans)
     pub left_drag_pans: bool,
+    //The arrow keys and WASD pan while held, and the ones held now
+    pub keys_pan: bool,
+    pub pan_keys_held: Vec<KeyCode>,
+    //When pan_with_keys last ran
+    pub key_pan_time: Option<f64>,
     pub tool: BoardTool,
     //The left button is held on the board while left drags pan
     pub pan: Option<PanPress>,
@@ -130,6 +135,9 @@ impl Loaded{
             list_press_numbering: 0,
             allow_overlap,
             left_drag_pans: false,
+            keys_pan: false,
+            pan_keys_held: Vec::new(),
+            key_pan_time: None,
             tool: BoardTool::Select(None),
             pan: None,
             allow_gaps: false,

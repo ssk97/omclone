@@ -201,6 +201,12 @@ impl EventHandler for OmcloneApp {
         if let Loaded(loaded) = &mut self.app_state{
             //Before simulating, so a crash running an edit still has that edit
             loaded.update_backup(|| solution_path(&self.unloaded_info));
+            //The mouse is over another hex now, though it didn't move
+            if loaded.pan_with_keys(miniquad::date::now()){
+                let egui_ctx = self.egui_mq.egui_ctx();
+                let input = BoardInput::Move{px: self.mouse, screen: logical_screen_size(), over_ui: egui_ctx.is_pointer_over_egui()};
+                loaded.board_input(input, egui_ctx.text_edit_focused());
+            }
             loaded.update();
             loaded.refresh_preview();
             let timeline = &loaded.timeline;
@@ -506,18 +512,22 @@ impl EventHandler for OmcloneApp {
             KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
             _ => {}
         }
-        //Even while typing, which may have started after 1 was pressed
-        if let (KeyCode::Key1, Loaded(loaded)) = (keycode, &mut self.app_state){
-            loaded.atoms_faded = false;
+        //Even while typing, which may have started after the key was pressed
+        if let Loaded(loaded) = &mut self.app_state{
+            if keycode == KeyCode::Key1{
+                loaded.atoms_faded = false;
+            }
+            loaded.key_up(keycode);
         }
         self.egui_mq.key_up_event(keycode, keymods);
     }
 
-    //Called when the window loses focus, after which 1's and the modifiers' releases may go elsewhere
+    //Called when the window loses focus, after which the releases of 1, the modifiers and the panning keys may go elsewhere
     fn window_minimized_event(&mut self) {
         self.keymods = KeyMods::default();
         if let Loaded(loaded) = &mut self.app_state{
             loaded.atoms_faded = false;
+            loaded.pan_keys_held.clear();
         }
     }
 }

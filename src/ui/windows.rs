@@ -140,6 +140,8 @@ pub fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size:
         ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut pans, "Left drag pans"))
             .on_hover_text("Dragging the board with the left button pans instead of moving parts. A click still selects.");
         loaded.left_drag_pans = pans;
+        ui.checkbox(&mut loaded.keys_pan, "Arrow keys and WASD pan")
+            .on_hover_text("While held, unless you're typing or moving a part (where A/D/W/S turn and resize it)");
     });
     loaded.camera_window_open = open;
 }
@@ -175,6 +177,7 @@ const BOARD_HELP: &[HelpEntry] = &[
     both("Right or middle drag", "Pan"),
     both("Wheel", "Zoom"),
     both("Two-finger drag; pinch", "Pan; zoom"),
+    both("Arrows or WASD", "Pan, with \"Arrow keys and WASD pan\" (Camera controls)"),
     both("Hold 1", "Fade the molecules to see the glyphs under them"),
     editor("Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z", "Undo; redo"),
 ];

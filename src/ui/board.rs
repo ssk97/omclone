@@ -3,6 +3,21 @@ use super::*;
 
 //Moving the mouse this far (in pixels) with the button held starts a drag
 pub const DRAG_THRESHOLD_PX: f32 = 4.;
+//How fast the view moves while a panning key is held, in pixels a second. By time rather than frames, so it's the
+//same at any refresh rate.
+const KEY_PAN_PX_PER_SEC: f64 = 600.;
+//A frame longer than this (as after a stall) pans only this far, so the view doesn't jump
+const KEY_PAN_MAX_STEP_SEC: f64 = 0.1;
+//Which way a panning key moves the view, in screen pixels (y down)
+fn pan_key_direction(keycode: KeyCode) -> Option<(f32, f32)>{
+    match keycode{
+        KeyCode::Left | KeyCode::A => Some((-1., 0.)),
+        KeyCode::Right | KeyCode::D => Some((1., 0.)),
+        KeyCode::Up | KeyCode::W => Some((0., -1.)),
+        KeyCode::Down | KeyCode::S => Some((0., 1.)),
+        _ => None,
+    }
+}
 const TRACK_OUTSIDE_CHAMBERS: &str = "That would put track outside the chambers (see \"Allow overlap\")";
 //What an edit does to a part, for checking whether it's allowed right now
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -516,8 +531,46 @@ impl Loaded{
         }
         true
     }
+    //A part follows the mouse, and A/D/W/S change it rather than pan
+    fn moving_part(&self) -> bool{
+        self.tool.placing().is_some() || self.tool.press().is_some_and(|p| p.drag.is_some())
+    }
+    //Starts panning while the key is held, if it's a panning key (see keys_pan)
+    fn pan_key_down(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
+        let usable = self.keys_pan && !keymods.ctrl && !keymods.logo && !self.moving_part();
+        if !usable || pan_key_direction(keycode).is_none(){
+            return false;
+        }
+        if !self.pan_keys_held.contains(&keycode){
+            self.pan_keys_held.push(keycode);
+        }
+        true
+    }
+    //Called for every key released, even while typing, so a held key can't get stuck
+    pub fn key_up(&mut self, keycode: KeyCode){
+        self.pan_keys_held.retain(|&k| k != keycode);
+    }
+    //Pans for the panning keys held, by the time since the last frame (`now` is in seconds). Returns true if the
+    //view moved.
+    pub fn pan_with_keys(&mut self, now: f64) -> bool{
+        let last = self.key_pan_time.replace(now);
+        let (dx, dy) = self.pan_keys_held.iter().filter_map(|&k| pan_key_direction(k))
+            .fold((0., 0.), |(x, y), (dx, dy)| (x + dx, y + dy));
+        if self.moving_part() || (dx, dy) == (0., 0.){
+            return false;
+        }
+        //A key pressed since the last frame has been held for about a frame
+        let dt = last.map_or(1./60., |last| (now - last).clamp(0., KEY_PAN_MAX_STEP_SEC));
+        let step = (KEY_PAN_PX_PER_SEC*dt) as f32;
+        //The board moves the other way, as the view moves over it
+        self.camera.pan_pixels(-dx*step, -dy*step);
+        true
+    }
     //Returns true if the board used the key
     pub fn handle_key(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
+        if self.pan_key_down(keycode, keymods){
+            return true;
+        }
         let command = keymods.ctrl || keymods.logo;
         //Only picking from the stack and fading the atoms work without the editor
         if !EDITOR_ENABLED && !matches!(keycode, KeyCode::Tab | KeyCode::Escape | KeyCode::Key1){
@@ -927,6 +980,56 @@ mod tests {
         loaded.board_input(BoardInput::Cancel, false);
         loaded.release();
         assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
+    }
+
+    #[test]
+    fn held_pan_keys_move_the_view_until_released() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        let start = px(&loaded, 0, 0);
+        assert!(!loaded.handle_key(KeyCode::Right, KeyMods::default()), "off unless chosen");
+        loaded.keys_pan = true;
+        assert!(loaded.handle_key(KeyCode::D, KeyMods::default()));
+        assert!(loaded.handle_key(KeyCode::Up, KeyMods::default()));
+        loaded.pan_with_keys(10.);
+        let first = px(&loaded, 0, 0);
+        assert!(loaded.pan_with_keys(10.05));
+        let moved = px(&loaded, 0, 0);
+        assert!(moved.0 < first.0 && moved.1 > first.1, "the view went right and up: {first:?} -> {moved:?}");
+        loaded.key_up(KeyCode::D);
+        loaded.key_up(KeyCode::Up);
+        assert!(!loaded.pan_with_keys(10.1));
+        assert_eq!(px(&loaded, 0, 0), moved);
+        assert_ne!(start, moved);
+    }
+
+    #[test]
+    fn key_panning_goes_by_time_not_frames() {
+        let distance = |frames: usize| {
+            let mut loaded = Loaded::for_test(vec![], vec![]);
+            loaded.keys_pan = true;
+            loaded.pan_with_keys(0.);
+            loaded.handle_key(KeyCode::Right, KeyMods::default());
+            for i in 1..=frames{
+                loaded.pan_with_keys(0.06*i as f64/frames as f64);
+            }
+            px(&loaded, 0, 0)
+        };
+        let (few, many) = (distance(2), distance(12));
+        assert!((few.0 - many.0).abs() < 1e-3, "{few:?} != {many:?}");
+    }
+
+    #[test]
+    fn pan_keys_turn_a_dragged_part_instead() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        loaded.keys_pan = true;
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 3, 0);
+        let before = px(&loaded, 0, 0);
+        assert!(loaded.handle_key(KeyCode::A, KeyMods::default()));
+        assert!(!loaded.pan_with_keys(1.));
+        assert_eq!(px(&loaded, 0, 0), before);
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].rot, 1);
     }
 
     fn small_chamber() -> Chambers {
