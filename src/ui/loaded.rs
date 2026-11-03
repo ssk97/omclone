@@ -70,7 +70,11 @@ pub struct Loaded{
     //numbering_version at the latest press, for the clicks and drags in that list (see part_window)
     pub list_press_numbering: u64,
     pub allow_overlap: bool,
+    //A left drag on the board pans instead of moving a part (see left_drag_pans)
+    pub left_drag_pans: bool,
     pub tool: BoardTool,
+    //The left button is held on the board while left drags pan
+    pub pan: Option<PanPress>,
     pub allow_gaps: bool,
     pub path_text: Option<PathText>,
     //Whatever the mouse would change now, drawn in place, and the tracks other than one it changes
@@ -125,7 +129,9 @@ impl Loaded{
             all_glyphs: false,
             list_press_numbering: 0,
             allow_overlap,
+            left_drag_pans: false,
             tool: BoardTool::Select(None),
+            pan: None,
             allow_gaps: false,
             path_text: None,
             preview: None,

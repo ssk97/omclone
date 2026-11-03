@@ -135,6 +135,11 @@ pub fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size:
             ui.add(egui::Slider::new(&mut loaded.camera.scale_base,ZOOM_RANGE)
                 .logarithmic(true));
         });
+        //Always on without the editor, as there are no parts to drag
+        let mut pans = loaded.left_drag_pans();
+        ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut pans, "Left drag pans"))
+            .on_hover_text("Dragging the board with the left button pans instead of moving parts. A click still selects.");
+        loaded.left_drag_pans = pans;
     });
     loaded.camera_window_open = open;
 }
@@ -142,20 +147,25 @@ pub fn camera_window(egui_ctx: &egui::Context, loaded: &mut Loaded, screen_size:
 struct HelpEntry{
     keys: &'static str,
     does: &'static str,
-    //It does nothing without the editor, so the display build leaves it out
-    editor_only: bool,
+    //The builds it's shown in: with the editor, without it (the display build), or both
+    in_editor: bool,
+    in_display: bool,
 }
 const fn both(keys: &'static str, does: &'static str) -> HelpEntry{
-    HelpEntry{keys, does, editor_only: false}
+    HelpEntry{keys, does, in_editor: true, in_display: true}
 }
 const fn editor(keys: &'static str, does: &'static str) -> HelpEntry{
-    HelpEntry{keys, does, editor_only: true}
+    HelpEntry{keys, does, in_editor: true, in_display: false}
+}
+const fn display(keys: &'static str, does: &'static str) -> HelpEntry{
+    HelpEntry{keys, does, in_editor: false, in_display: true}
 }
 //These are the only list of the keys: the README points here
 const BOARD_HELP: &[HelpEntry] = &[
     both("Click", "Select a part: the topmost on the hex, or the selected one if it's there"),
     both("Tab / Shift+Tab, or wheel", "While the button is held: pick another part on that hex"),
-    editor("Drag", "Move a part"),
+    editor("Drag", "Move a part, or pan with \"Left drag pans\" (Camera controls)"),
+    display("Drag", "Pan"),
     editor("Ctrl+drag", "Copy a part"),
     editor("A / D", "While dragging or placing: turn counterclockwise / clockwise"),
     editor("W / S", "While dragging or placing an arm: lengthen / shorten it"),
@@ -164,6 +174,7 @@ const BOARD_HELP: &[HelpEntry] = &[
     editor("Right-click", "Stop placing parts or drawing track"),
     both("Right or middle drag", "Pan"),
     both("Wheel", "Zoom"),
+    both("Two-finger drag; pinch", "Pan; zoom"),
     both("Hold 1", "Fade the molecules to see the glyphs under them"),
     editor("Ctrl+Z; Ctrl+Y or Ctrl+Shift+Z", "Undo; redo"),
 ];
@@ -194,7 +205,7 @@ const CMD_NOTE: &str = "Ctrl means Cmd on a Mac";
 //The entries that do something in this build
 fn help_grid(ui: &mut egui::Ui, id: &str, entries: &[HelpEntry]){
     egui::Grid::new(id).striped(true).show(ui, |ui| {
-        for entry in entries.iter().filter(|e| EDITOR_ENABLED || !e.editor_only){
+        for entry in entries.iter().filter(|e| if EDITOR_ENABLED {e.in_editor} else {e.in_display}){
             ui.strong(entry.keys);
             ui.label(entry.does);
             ui.end_row();

@@ -272,6 +272,18 @@ impl CameraSetup{
         self.scale_base = (self.scale_base*1.1f32.powf(notches)).clamp(min, max);
         self.offset += self.screen_to_world(px, screen_size) - before;
     }
+    //Follows two fingers moving from `before` to `after` (in screen pixels): their midpoint pans, and the change in
+    //the distance between them zooms around it
+    pub fn pinch(&mut self, before: [(f32, f32); 2], after: [(f32, f32); 2], screen_size: (f32, f32)) {
+        let mid = |[a, b]: [(f32, f32); 2]| ((a.0 + b.0)/2., (a.1 + b.1)/2.);
+        let dist = |[a, b]: [(f32, f32); 2]| (a.0 - b.0).hypot(a.1 - b.1);
+        let (m0, m1) = (mid(before), mid(after));
+        self.pan_pixels(m1.0 - m0.0, m1.1 - m0.1);
+        let (d0, d1) = (dist(before), dist(after));
+        if d0 > 0. && d1 > 0.{
+            self.zoom_at(m1, screen_size, (d1/d0).ln()/1.1f32.ln());
+        }
+    }
     //Fits every glyph's hexes (tracks included, but only a repeating output's own hex) and everywhere the arms can
     //reach, with a border around them
     pub fn frame_center(world: &World, screen_size:(f32,f32)) -> Self{
@@ -776,5 +788,20 @@ mod tests {
         camera.pan_pixels(37., -12.);
         let moved = camera.screen_to_world((137., 188.), screen_size);
         assert!((moved - grabbed).norm() < 1e-3, "{grabbed:?} != {moved:?}");
+    }
+    #[test]
+    fn pinch_keeps_the_points_under_both_fingers() {
+        let mut camera = CameraSetup { scale_base: 0.03, offset: XYVec::new(1.5, -2.) };
+        let screen_size = (1280., 720.);
+        let before = [(400., 300.), (600., 350.)];
+        //Apart and to the right, so it pans and zooms in
+        let after = [(450., 280.), (850., 380.)];
+        let grabbed = before.map(|px| camera.screen_to_world(px, screen_size));
+        camera.pinch(before, after, screen_size);
+        assert!(camera.scale_base > 0.03);
+        for (px, world) in after.into_iter().zip(grabbed){
+            let now = camera.screen_to_world(px, screen_size);
+            assert!((now - world).norm() < 1e-3, "{now:?} != {world:?}");
+        }
     }
 }

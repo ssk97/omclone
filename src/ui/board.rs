@@ -12,7 +12,8 @@ pub enum EditKind{
 }
 //What the left mouse button does on the board
 pub enum BoardTool{
-    //Clicking picks parts, and dragging one moves it. Holds the press while the button is down.
+    //Clicking picks parts, and dragging one moves it (or pans; see Loaded::left_drag_pans). Holds the press while the
+    //button is down.
     Select(Option<Press>),
     //Clicking places a new part
     Place(Placing),
@@ -41,6 +42,16 @@ pub enum BoardInput{
     Press{px: (f32, f32), screen: (f32, f32), keymods: KeyMods},
     Move{px: (f32, f32), screen: (f32, f32), over_ui: bool},
     Release,
+    //Lets go of the press without a click or drop, as when a second finger touches
+    Cancel,
+}
+//A left press on the board while left drags pan. Until it moves far enough to pan, it may still be a click.
+pub struct PanPress{
+    press_px: (f32, f32),
+    last_px: (f32, f32),
+    panning: bool,
+    //The Part window's hex before the press, which a pan puts back
+    list_hex: Option<Pos>,
 }
 //The left mouse button is held on the board
 pub struct Press{
@@ -125,6 +136,10 @@ impl Press{
     }
 }
 impl Loaded{
+    //Phones have only the left button (one finger), so the display build always pans with it
+    pub fn left_drag_pans(&self) -> bool{
+        !EDITOR_ENABLED || self.left_drag_pans
+    }
     //Why the layout can't be changed right now, if it can't
     pub fn edit_lock(&self) -> Option<&'static str>{
         if !EDITOR_ENABLED{
@@ -251,6 +266,7 @@ impl Loaded{
         if let BoardTool::Select(press) = &mut self.tool{
             *press = None;
         }
+        self.pan = None;
     }
     pub fn start_placing(&mut self, part: NewPart){
         self.tool = BoardTool::Place(Placing{part, rot: 0, len: 1, cursor_xy: None});
@@ -302,6 +318,10 @@ impl Loaded{
             BoardInput::Press{px, screen, keymods} => self.press(px, screen, keymods),
             BoardInput::Move{px, screen, over_ui} => self.pointer_moved(px, screen, over_ui),
             BoardInput::Release => self.release(),
+            BoardInput::Cancel => {
+                self.cancel_press();
+                self.take_stroke();
+            }
         }
     }
     fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
@@ -313,11 +333,17 @@ impl Loaded{
             BoardTool::Track(..) => return self.start_stroke(press_hex),
             BoardTool::Select(_) => {}
         }
+        if self.left_drag_pans(){
+            self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list_hex: self.list_hex});
+        }
         //Arms are picked where they are now (glyphs don't move)
         let stack = self.timeline.curr().parts_at(press_hex);
         if stack.is_empty(){
-            self.select(None);
-            self.list_hex = None;
+            //A press that may become a pan waits to see if it's a click (see release)
+            if self.pan.is_none(){
+                self.select(None);
+                self.list_hex = None;
+            }
             return;
         }
         let cand = self.selection.and_then(|s| stack.iter().position(|&p| p == s)).unwrap_or(0);
@@ -393,6 +419,20 @@ impl Loaded{
         }
     }
     fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
+        //First, so the cursor's world position below is where it is after panning
+        if let Some(mut pan) = self.pan.take(){
+            let (dx, dy) = (px.0 - pan.press_px.0, px.1 - pan.press_px.1);
+            if !pan.panning && dx*dx + dy*dy > DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX{
+                pan.panning = true;
+                self.list_hex = pan.list_hex;
+                self.cancel_press();
+            }
+            if pan.panning{
+                self.camera.pan_pixels(px.0 - pan.last_px.0, px.1 - pan.last_px.1);
+            }
+            pan.last_px = px;
+            self.pan = Some(pan);
+        }
         let cursor_xy = self.camera.screen_to_world(px, screen_size);
         self.pointer_over_ui = over_ui;
         //Panning and zooming keep the world under the mouse where it is, so this stays right until it moves again
@@ -416,7 +456,7 @@ impl Loaded{
             }
             self.put_stroke(stroke);
         }
-        let draggable = self.tool.press().is_some() && self.press_lock().is_none();
+        let draggable = self.tool.press().is_some() && self.press_lock().is_none() && !self.left_drag_pans();
         let Some(press) = self.tool.press_mut() else {return};
         match &mut press.drag{
             Some(drag) => drag.cursor_xy = cursor_xy,
@@ -443,12 +483,20 @@ impl Loaded{
         }
     }
     fn release(&mut self){
+        let pan = self.pan.take();
         let press = match &mut self.tool{
             BoardTool::Select(press) => press.take(),
             BoardTool::Track(..) => return self.finish_stroke(),
             BoardTool::Place(_) => None,
         };
-        let Some(press) = press else {return};
+        let Some(press) = press else {
+            //A click on an empty hex, which the press left for now. A pan or a cancel took the pan out.
+            if pan.is_some_and(|p| !p.panning){
+                self.select(None);
+                self.list_hex = None;
+            }
+            return;
+        };
         self.select(Some(press.part()));
         if let Some(drag) = &press.drag{
             if let Err(err) = self.apply_edit(&press.edit(drag)){
@@ -794,6 +842,91 @@ mod tests {
         assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
         assert!(loaded.dirty && loaded.history.can_undo());
+    }
+
+    fn panning(glyphs: Vec<Glyph>) -> Loaded{
+        let mut loaded = Loaded::for_test(glyphs, vec![]);
+        loaded.left_drag_pans = true;
+        loaded
+    }
+    fn click(loaded: &mut Loaded, x: i32, y: i32){
+        press(loaded, x, y, KeyMods::default());
+        loaded.release();
+    }
+
+    #[test]
+    fn with_left_drag_panning_a_drag_pans_instead_of_moving_the_part() {
+        let mut loaded = panning(vec![bonder(0, 0)]);
+        let (from, to) = (px(&loaded, 0, 0), px(&loaded, 3, 0));
+        let grabbed = loaded.camera.screen_to_world(from, SCREEN);
+        loaded.press(from, SCREEN, KeyMods::default());
+        loaded.pointer_moved(to, SCREEN, false);
+        loaded.release();
+        assert!((loaded.camera.screen_to_world(to, SCREEN) - grabbed).norm() < 1e-3, "the board follows the cursor");
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(0, 0));
+        assert_eq!(loaded.selection, None, "a pan selects nothing");
+        assert_eq!(loaded.list_hex, None);
+        assert!(!loaded.dirty);
+    }
+
+    #[test]
+    fn with_left_drag_panning_only_clicks_change_the_selection() {
+        let mut loaded = panning(vec![bonder(0, 0)]);
+        click(&mut loaded, 0, 0);
+        assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
+        assert_eq!(loaded.list_hex, Some(Pos::new(0, 0)));
+        //A drag from an empty hex, or from another part, keeps both
+        let glyph_px = px(&loaded, 0, 0);
+        for from in [(5, 5), (0, 0)]{
+            press(&mut loaded, from.0, from.1, KeyMods::default());
+            let at = px(&loaded, from.0, from.1);
+            loaded.pointer_moved((at.0 + 50., at.1), SCREEN, false);
+            loaded.release();
+            assert_eq!(loaded.selection, Some(PartId::Glyph(0)), "dragged from {from:?}");
+            assert_eq!(loaded.list_hex, Some(Pos::new(0, 0)), "dragged from {from:?}");
+        }
+        assert_ne!(px(&loaded, 0, 0), glyph_px, "it panned");
+        click(&mut loaded, 5, 5);
+        assert_eq!(loaded.selection, None);
+        assert_eq!(loaded.list_hex, None);
+    }
+
+    #[test]
+    fn with_left_drag_panning_tab_still_picks_from_the_held_stack() {
+        let mut loaded = panning(vec![bonder(0, 0), bonder(1, 0)]);
+        press(&mut loaded, 1, 0, KeyMods::default());
+        let top = loaded.tool.press().map(Press::part);
+        loaded.handle_key(KeyCode::Tab, KeyMods::default());
+        let other = loaded.tool.press().map(Press::part);
+        assert!(other.is_some() && other != top);
+        loaded.release();
+        assert_eq!(loaded.selection, other);
+    }
+
+    #[test]
+    fn with_left_drag_panning_clicks_still_place_parts() {
+        let mut loaded = panning(vec![]);
+        loaded.start_placing(NewPart::Glyph(GlyphType::Calcification));
+        click(&mut loaded, 2, 0);
+        assert_eq!(loaded.timeline.base().glyphs.iter().map(|g| g.pos).collect::<Vec<_>>(), vec![Pos::new(2, 0)]);
+    }
+
+    #[test]
+    fn cancel_drops_a_drag_without_dropping_the_part() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 3, 0);
+        loaded.board_input(BoardInput::Cancel, false);
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(0, 0));
+        assert_eq!(loaded.selection, None);
+        //And a pan press on an empty hex, which a release would otherwise take as a click
+        let mut loaded = panning(vec![bonder(0, 0)]);
+        click(&mut loaded, 0, 0);
+        press(&mut loaded, 5, 5, KeyMods::default());
+        loaded.board_input(BoardInput::Cancel, false);
+        loaded.release();
+        assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
     }
 
     fn small_chamber() -> Chambers {

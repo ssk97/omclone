@@ -72,6 +72,13 @@ pub struct OmcloneApp {
     //A mouse button was released since egui's last frame, and where the mouse has moved since (see mouse_motion_event)
     released: bool,
     held_motion: Option<(f32, f32)>,
+    //Fingers on the screen (the first two), in logical pixels, and the one acting as the left button
+    touches: SmallVec<[(u64, (f32, f32)); 2]>,
+    touch_press: Option<u64>,
+    //The left button's finger went down on the board, not on a window
+    touch_on_board: bool,
+    //Two fingers pan and zoom, until every finger is up
+    pinching: bool,
 }
 
 impl OmcloneApp {
@@ -95,6 +102,7 @@ impl OmcloneApp {
             render_data,app_state,unloaded_info,
             extra_message:None, dragging: None, right_press: None, mouse: (0., 0.), keymods: KeyMods::default(),
             released: false, held_motion: None,
+            touches: SmallVec::new(), touch_press: None, touch_on_board: false, pinching: false,
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -119,6 +127,15 @@ impl OmcloneApp {
         let file = Path::new(&self.unloaded_info.puzzle).file_stem()?.to_string_lossy();
         (!file.eq_ignore_ascii_case(wanted)).then(||
             format!("The solution is for puzzle \"{wanted}\", but the puzzle file is \"{file}\". Check that they match."))
+    }
+    //Lets go of the touch acting as the left button, at `at` (in logical pixels), without a click or a drop
+    fn cancel_touch_press(&mut self, at: (f32, f32)){
+        self.touch_press = None;
+        let dpi = window::dpi_scale();
+        self.egui_mq.mouse_button_up_event(MouseButton::Left, at.0*dpi, at.1*dpi);
+        if let Loaded(loaded) = &mut self.app_state{
+            loaded.board_input(BoardInput::Cancel, self.egui_mq.egui_ctx().text_edit_focused());
+        }
     }
 }
 //A mouse position in logical pixels (see logical_screen_size)
@@ -379,6 +396,66 @@ impl EventHandler for OmcloneApp {
                     (x-px)*(x-px) + (y-py)*(y-py) <= DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX);
                 if let (MouseButton::Right, true, Loaded(loaded)) = (mb, clicked, &mut self.app_state){
                     loaded.right_click();
+                }
+            }
+        }
+    }
+
+    //One finger is the left button (as miniquad's default does). A second finger on the board cancels that press,
+    //and the two pan and zoom instead.
+    fn touch_event(&mut self, phase: TouchPhase, id: u64, x: f32, y: f32) {
+        let pos = logical(x, y);
+        let index = self.touches.iter().position(|&(t, _)| t == id);
+        match phase{
+            TouchPhase::Started => {
+                if self.touches.len() == 2{
+                    return;
+                }
+                self.touches.push((id, pos));
+                if self.pinching{
+                    return;
+                }
+                match self.touch_press{
+                    None => {
+                        self.touch_press = Some(id);
+                        self.mouse_button_down_event(MouseButton::Left, x, y);
+                        self.touch_on_board = !self.egui_mq.egui_ctx().is_pointer_over_egui();
+                    }
+                    Some(press) if self.touch_on_board => {
+                        let at = self.touches.iter().find(|&&(t, _)| t == press).map_or(pos, |&(_, p)| p);
+                        self.cancel_touch_press(at);
+                        self.pinching = true;
+                    }
+                    Some(_) => {}
+                }
+            }
+            TouchPhase::Moved => {
+                let Some(i) = index else {return};
+                let before = self.touches.iter().map(|&(_, p)| p).collect::<SmallVec<[_; 2]>>();
+                self.touches[i].1 = pos;
+                if self.pinching{
+                    if let (Loaded(loaded), [a, b]) = (&mut self.app_state, before.as_slice()){
+                        let after = [self.touches[0].1, self.touches[1].1];
+                        loaded.camera.pinch([*a, *b], after, logical_screen_size());
+                    }
+                } else if self.touch_press == Some(id){
+                    self.mouse_motion_event(x, y);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                if let Some(i) = index{
+                    self.touches.remove(i);
+                }
+                if self.touch_press == Some(id){
+                    if phase == TouchPhase::Ended{
+                        self.touch_press = None;
+                        self.mouse_button_up_event(MouseButton::Left, x, y);
+                    } else {
+                        self.cancel_touch_press(pos);
+                    }
+                }
+                if self.touches.is_empty(){
+                    self.pinching = false;
                 }
             }
         }
