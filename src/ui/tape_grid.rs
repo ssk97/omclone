@@ -564,9 +564,11 @@ pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
         let (arm_moved, step_moved) = (sel.arm != sel.shown.0, sel.caret != sel.shown.1);
         if arm_moved || step_moved{
             sel.shown = (sel.arm, sel.caret);
-            //Clear of the arm numbers and the timestep rulers, which cover the grid's edges
-            let x = if step_moved {Rangef::new(layout.x(sel.caret) - gutter, layout.x(sel.caret + 1))} else {view.x_range()};
-            let y = if arm_moved {Rangef::new(layout.y(sel.arm) - ruler, layout.y(sel.arm + 1) + ruler_below)} else {view.y_range()};
+            //Clear of the arm numbers and the timestep rulers, which cover the grid's edges. An axis that didn't move
+            //targets a point mid-view: egui pads targets by the item spacing and checks them against the unrounded clip
+            //rect, so the view's own range would be nudged a few pixels either way.
+            let x = if step_moved {Rangef::new(layout.x(sel.caret) - gutter, layout.x(sel.caret + 1))} else {Rangef::point(view.center().x)};
+            let y = if arm_moved {Rangef::new(layout.y(sel.arm) - ruler, layout.y(sel.arm + 1) + ruler_below)} else {Rangef::point(view.center().y)};
             ui.scroll_to_rect(Rect::from_x_y_ranges(x, y), None);
         }
         paint(ui, loaded, &layout, step_count, &font, &small, response.has_focus(), drop_beside);
