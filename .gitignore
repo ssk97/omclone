@@ -1,8 +1,7 @@
 /target
 /.vscode
 /test
-/html
-/display_html
+*.wasm
 *.puzzle
 *.solution
 
