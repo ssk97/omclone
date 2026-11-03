@@ -460,6 +460,31 @@ const SAPP_MODIFIER_CTRL = 2;
 const SAPP_MODIFIER_ALT = 4;
 const SAPP_MODIFIER_SUPER = 8;
 
+// The app takes Ctrl as the command key, so on a Mac Cmd is sent as Ctrl
+const is_mac = /Mac/.test((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform);
+// A, D, S, W, Y, Z: the app's Ctrl shortcuts that the browser would also act on. Browsers never let a page block
+// Ctrl+W (close tab); the unsaved-changes warning is all that guards it.
+const APP_COMMAND_KEYS = [65, 68, 83, 87, 89, 90];
+// Mac browsers send no keyup for keys released while Cmd is held, so these get one when Cmd is released
+var keys_down_under_cmd = new Set();
+
+function key_modifiers(event) {
+    var modifiers = 0;
+    if (event.ctrlKey || (is_mac && event.metaKey)) {
+        modifiers |= SAPP_MODIFIER_CTRL;
+    }
+    if (event.shiftKey) {
+        modifiers |= SAPP_MODIFIER_SHIFT;
+    }
+    if (event.altKey) {
+        modifiers |= SAPP_MODIFIER_ALT;
+    }
+    if (event.metaKey && !is_mac) {
+        modifiers |= SAPP_MODIFIER_SUPER;
+    }
+    return modifiers;
+}
+
 function into_sapp_mousebutton(btn) {
     switch (btn) {
         case 0: return 0;
@@ -583,6 +608,8 @@ function into_sapp_keycode(key_code) {
         case "ControlLeft": return 341;
         case "AltLeft": return 342;
         case "OSLeft": return 343;
+        case "MetaLeft": return is_mac ? 341 : 343;
+        case "MetaRight": return is_mac ? 345 : 347;
         case "ShiftRight": return 344;
         case "ControlRight": return 345;
         case "AltRight": return 346;
@@ -1240,15 +1267,12 @@ var importObject = {
                         break;
                 }
 
-                var modifiers = 0;
-                if (event.ctrlKey) {
-                    modifiers |= SAPP_MODIFIER_CTRL;
+                var modifiers = key_modifiers(event);
+                if ((modifiers & SAPP_MODIFIER_CTRL) && APP_COMMAND_KEYS.includes(sapp_key_code)) {
+                    event.preventDefault();
                 }
-                if (event.shiftKey) {
-                    modifiers |= SAPP_MODIFIER_SHIFT;
-                }
-                if (event.altKey) {
-                    modifiers |= SAPP_MODIFIER_ALT;
+                if (is_mac && event.metaKey && !event.code.startsWith("Meta")) {
+                    keys_down_under_cmd.add(sapp_key_code);
                 }
                 if ((modifiers & SAPP_MODIFIER_CTRL) && sapp_key_code == 86) {
                     // sent from the "paste" handler, once the clipboard contents are known
@@ -1264,16 +1288,13 @@ var importObject = {
             };
             canvas.onkeyup = function (event) {
                 var sapp_key_code = into_sapp_keycode(event.code);
-
-                var modifiers = 0;
-                if (event.ctrlKey) {
-                    modifiers |= SAPP_MODIFIER_CTRL;
-                }
-                if (event.shiftKey) {
-                    modifiers |= SAPP_MODIFIER_SHIFT;
-                }
-                if (event.altKey) {
-                    modifiers |= SAPP_MODIFIER_ALT;
+                var modifiers = key_modifiers(event);
+                keys_down_under_cmd.delete(sapp_key_code);
+                if (is_mac && event.code.startsWith("Meta")) {
+                    for (const key of keys_down_under_cmd) {
+                        wasm_exports.key_up(key, modifiers);
+                    }
+                    keys_down_under_cmd.clear();
                 }
 
                 wasm_exports.key_up(sapp_key_code, modifiers);

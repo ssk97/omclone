@@ -436,8 +436,9 @@ impl EventHandler for OmcloneApp {
         self.egui_mq.key_up_event(keycode, keymods);
     }
 
-    //Called when the window loses focus, after which 1's release may go elsewhere
+    //Called when the window loses focus, after which 1's and the modifiers' releases may go elsewhere
     fn window_minimized_event(&mut self) {
+        self.keymods = KeyMods::default();
         if let Loaded(loaded) = &mut self.app_state{
             loaded.atoms_faded = false;
         }
