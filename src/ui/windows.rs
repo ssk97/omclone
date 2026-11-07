@@ -273,8 +273,12 @@ pub fn file_window(egui_ctx: &egui::Context, loaded: &mut Loaded, unloaded_info:
                 let saved = loaded.solution_bytes().and_then(|data| {
                     #[cfg(not(target_arch = "wasm32"))]
                     std::fs::write(solution_path(unloaded_info), &data)?;
-                    #[cfg(target_arch = "wasm32")]
-                    download(&data, &unloaded_info.solution);
+                    #[cfg(target_arch = "wasm32")]{
+                        download(&data, &unloaded_info.solution);
+                        //A reload then gives what was saved, as the native build reloads the saved file
+                        *JS_SOLUTION_NAME.lock().unwrap() = Some(unloaded_info.solution.clone());
+                        *JS_SOLUTION_INPUT.lock().unwrap() = Some(data);
+                    }
                     Ok(())
                 });
                 loaded.message = Some(match saved {
@@ -517,11 +521,10 @@ pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateU
             }
         }
         #[cfg(target_arch = "wasm32")]{
-            ui.label("Choose files first, then press:");
-            if ui.button("Reset").clicked() {
-                do_loading = AppStateUpdate::ResetHome;
+            ui.label("Uploading a puzzle or solution file loads it");
+            if ui.button("Reload").clicked() {
+                do_loading = AppStateUpdate::Load;
             }
-
         }
     });
     do_loading

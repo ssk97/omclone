@@ -51,7 +51,10 @@ enum AppState{
     NotLoaded,Loaded(Loaded) 
 }
 enum AppStateUpdate{
-    NoChange, Load, ResetHome
+    NoChange, Load,
+    //The web build loads files as they're uploaded instead
+    #[cfg(not(target_arch = "wasm32"))]
+    ResetHome,
 }
 use AppState::*;
 
@@ -164,6 +167,7 @@ pub extern "C" fn js_load_puzzle(puzzle: sapp_jsutils::JsObject){
     let mut puzzle_vec = Vec::new();
     puzzle.to_byte_buffer(&mut puzzle_vec);
     *JS_PUZZLE_INPUT.lock().unwrap() = Some(puzzle_vec);
+    UPLOADED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
@@ -171,7 +175,12 @@ pub extern "C" fn js_load_solution(solution: sapp_jsutils::JsObject){
     let mut solution_vec = Vec::new();
     solution.to_byte_buffer(&mut solution_vec);
     *JS_SOLUTION_INPUT.lock().unwrap() = Some(solution_vec);
+    UPLOADED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+//A file was uploaded since the last frame. The page sets a solution's name before its bytes, in the same JS task, so
+//a frame never sees half an upload.
+#[cfg(target_arch = "wasm32")]
+static UPLOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
 pub extern "C" fn js_load_solution_name(name: sapp_jsutils::JsObject){
@@ -273,8 +282,21 @@ impl EventHandler for OmcloneApp {
             loaded.flush_board_input();
         }
         self.egui_mq.draw(ctx);
+        //Taken every frame, so an upload the not-loaded window already loads isn't loaded again
+        #[cfg(target_arch = "wasm32")]
+        if UPLOADED.swap(false, std::sync::atomic::Ordering::Relaxed) && JS_PUZZLE_INPUT.lock().unwrap().is_some()
+            && JS_SOLUTION_INPUT.lock().unwrap().is_some(){
+            if let Loaded(loaded) = &mut self.app_state{
+                if loaded.dirty{
+                    loaded.popup_reload = true;
+                } else {
+                    do_loading = AppStateUpdate::Load;
+                }
+            }
+        }
         match do_loading{
             AppStateUpdate::NoChange => {},
+            #[cfg(not(target_arch = "wasm32"))]
             AppStateUpdate::ResetHome => {
                 self.app_state = NotLoaded;
                 recovery::clear();
@@ -295,13 +317,15 @@ impl EventHandler for OmcloneApp {
                     #[cfg(target_arch = "wasm32")]
                     {
                         let puzzle = JS_PUZZLE_INPUT.lock().unwrap();
-                        let f_puzzle = puzzle.as_ref().unwrap();
                         let solution = JS_SOLUTION_INPUT.lock().unwrap();
-                        let f_sol = solution.as_ref().unwrap();
+                        let (Some(f_puzzle), Some(f_sol)) = (puzzle.as_ref(), solution.as_ref()) else {
+                            eyre::bail!("Upload a puzzle and a solution file");
+                        };
                         //Kept, like the files, for loading again after a Reset
                         let name = JS_SOLUTION_NAME.lock().unwrap().clone();
-                        self.unloaded_info.solution = name.unwrap_or(String::from("omclone.solution"));
                         self.load(f_puzzle.as_slice(), f_sol.as_slice())?;
+                        //Only once loaded, so a bad file doesn't rename the open solution's Save
+                        self.unloaded_info.solution = name.unwrap_or(String::from("omclone.solution"));
                         Ok(None)
                     }
                 };
