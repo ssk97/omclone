@@ -1240,6 +1240,11 @@ var importObject = {
                 var btn = into_sapp_mousebutton(event.button);
                 wasm_exports.mouse_down(x, y, btn);
             };
+            // Sends the pointer's moves and release here until the button comes up, even off the page. Otherwise a
+            // release outside the canvas is lost, and egui keeps the button held.
+            canvas.addEventListener('pointerdown', function (event) {
+                canvas.setPointerCapture(event.pointerId);
+            });
             // SO WEB SO CONSISTENT
             canvas.addEventListener('wheel',
                 function (event) {
