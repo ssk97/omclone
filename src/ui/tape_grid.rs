@@ -947,11 +947,6 @@ mod editing_tests {
         drag_grid(&ctx, &mut loaded, number(&layout, 0), to(&layout), vec![escape]);
         assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3], "Esc drops it");
 
-        loaded.run_state = RunState::FreeRun;
-        drag_grid(&ctx, &mut loaded, number(&layout, 0), to(&layout), vec![]);
-        assert_eq!((arm_order(&loaded), &loaded.message), (vec![0, 1, 2, 3], &None), "not while running");
-        loaded.run_state = RunState::Manual(0);
-
         grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
         assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3]);
         assert_eq!(loaded.tape_sel.arms(), 1..2, "a click only selects the row");

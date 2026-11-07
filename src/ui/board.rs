@@ -31,9 +31,9 @@ pub enum BoardTool{
     Place(Placing),
     //Clicking and dragging reshape a track. Holds the stroke while the button is down.
     Track(TrackMode, Option<TrackStroke>),
-    //A click picks the hex to watch (see Loaded::watched_hex). Holds the pressed hex and pixel while the button is
-    //down, and drops them if the press becomes a drag.
-    PickHex(Option<(Pos, (f32, f32))>),
+    //A click picks the hex to watch (see Loaded::watched_hex), and a drag pans. Holds the pressed hex while the button
+    //is down, until the press becomes a pan.
+    PickHex(Option<Pos>),
 }
 impl BoardTool{
     pub fn press(&self) -> Option<&Press>{
@@ -157,13 +157,7 @@ impl Loaded{
     }
     //Why the layout can't be changed right now, if it can't
     pub fn edit_lock(&self) -> Option<&'static str>{
-        if !EDITOR_ENABLED{
-            Some("Editing is disabled")
-        } else if matches!(self.run_state, RunState::FreeRun){
-            Some("Editing is disabled while running")
-        } else {
-            None
-        }
+        (!EDITOR_ENABLED).then_some("Editing is disabled")
     }
     //Why the part can't be edited this way right now, if it can't
     pub fn part_lock(&self, part: PartId, kind: EditKind) -> Option<&'static str>{
@@ -277,13 +271,19 @@ impl Loaded{
             }
         }
     }
+    //Lets go of what the held button is doing, without a click or a drop
     fn cancel_press(&mut self){
         match &mut self.tool{
             BoardTool::Select(press) => *press = None,
+            BoardTool::Track(_, stroke) => *stroke = None,
             BoardTool::PickHex(hex) => *hex = None,
-            _ => {}
+            BoardTool::Place(_) => {}
         }
         self.pan = None;
+    }
+    fn holding(&self) -> bool{
+        self.pan.is_some() || matches!(self.tool,
+            BoardTool::Select(Some(_)) | BoardTool::Track(_, Some(_)) | BoardTool::PickHex(Some(_)))
     }
     //Ending the pick any way but a click leaves no hex watched
     pub fn start_picking_hex(&mut self){
@@ -340,10 +340,7 @@ impl Loaded{
             BoardInput::Press{px, screen, keymods} => self.press(px, screen, keymods),
             BoardInput::Move{px, screen, over_ui} => self.pointer_moved(px, screen, over_ui),
             BoardInput::Release => self.release(),
-            BoardInput::Cancel => {
-                self.cancel_press();
-                self.take_stroke();
-            }
+            BoardInput::Cancel => self.cancel_press(),
         }
     }
     fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
@@ -355,11 +352,12 @@ impl Loaded{
             BoardTool::Track(..) => return self.start_stroke(press_hex),
             BoardTool::PickHex(_) | BoardTool::Select(_) => {}
         }
-        if self.left_drag_pans(){
+        let picking = matches!(self.tool, BoardTool::PickHex(_));
+        if picking || self.left_drag_pans(){
             self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list_hex: self.list_hex});
         }
-        if let BoardTool::PickHex(press) = &mut self.tool{
-            *press = Some((press_hex, px));
+        if picking{
+            self.tool = BoardTool::PickHex(Some(press_hex));
             return;
         }
         //Arms are picked where they are now (glyphs don't move)
@@ -468,11 +466,6 @@ impl Loaded{
         if let BoardTool::Place(placing) = &mut self.tool{
             placing.cursor_xy = (!over_ui).then_some(cursor_xy);
         }
-        if let BoardTool::PickHex(press) = &mut self.tool{
-            if press.is_some_and(|(_, at)| (px.0 - at.0).powi(2) + (px.1 - at.1).powi(2) > DRAG_THRESHOLD_PX.powi(2)){
-                *press = None;
-            }
-        }
         if let Some(mut stroke) = self.take_stroke(){
             //Fast movements skip hexes, so go through each one on the way
             let hex = xy_to_pos(cursor_xy);
@@ -520,7 +513,7 @@ impl Loaded{
             BoardTool::Track(..) => return self.finish_stroke(),
             BoardTool::Place(_) => None,
             BoardTool::PickHex(hex) => {
-                if let Some((hex, _)) = hex.take(){
+                if let Some(hex) = hex.take(){
                     self.watched_hex = Some(hex);
                     self.end_tool();
                 }
@@ -607,19 +600,16 @@ impl Loaded{
                     self.message = Some(err);
                 }
             }
-            //Lets go of one thing at a time: the press or stroke, then the part being placed, the track mode or hex
-            //picking
+            //Lets go of one thing at a time: the press, stroke or pan, then the part being placed, the track mode or
+            //hex picking
             KeyCode::Escape => {
-                self.tool = match std::mem::replace(&mut self.tool, BoardTool::Select(None)){
-                    BoardTool::Select(None) => return false,
-                    BoardTool::Track(mode, Some(_)) => BoardTool::Track(mode, None),
-                    //Without the pan, the release isn't taken as a click on the board
-                    BoardTool::PickHex(Some(_)) => {
-                        self.pan = None;
-                        BoardTool::PickHex(None)
-                    }
-                    _ => BoardTool::Select(None),
-                };
+                if self.holding(){
+                    self.cancel_press();
+                } else if matches!(self.tool, BoardTool::Select(None)){
+                    return false;
+                } else {
+                    self.end_tool();
+                }
             }
             KeyCode::Tab if self.tool.press().is_some() => self.cycle(if keymods.shift {-1} else {1}),
             KeyCode::A | KeyCode::D | KeyCode::W | KeyCode::S => return self.turn_or_resize(keycode),
@@ -784,16 +774,6 @@ impl Loaded{
     }
     //Keeps the preview of the pending edit up to date
     pub fn refresh_preview(&mut self){
-        if matches!(self.run_state, RunState::FreeRun){
-            //Nothing can be edited while running, though parts can still be picked
-            if let BoardTool::Select(press) = &mut self.tool{
-                if press.as_ref().is_some_and(|p| p.drag.is_some()){
-                    *press = None;
-                }
-            } else {
-                self.tool = BoardTool::Select(None);
-            }
-        }
         let Some((edit, _)) = self.pending_edit() else {
             return self.drop_preview();
         };
@@ -1101,17 +1081,28 @@ mod tests {
     }
 
     #[test]
-    fn running_cancels_a_drag_but_not_a_press() {
+    fn a_drag_while_running_moves_the_part() {
         let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        loaded.run_state = RunState::FreeRun;
         press(&mut loaded, 0, 0, KeyMods::default());
-        loaded.run_state = RunState::FreeRun;
-        loaded.refresh_preview();
-        assert!(loaded.tool.press().is_some());
-        loaded.run_state = RunState::Manual(0);
         move_to(&mut loaded, 3, 0);
-        loaded.run_state = RunState::FreeRun;
+        loaded.update(TEST_FRAME);
         loaded.refresh_preview();
-        assert!(loaded.tool.press().is_none());
+        assert!(loaded.preview.is_some());
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(3, 0));
+        assert!(matches!(loaded.run_state, RunState::FreeRun));
+    }
+
+    //Esc used to drop the part but leave the pan, so the release deselected as if the board was clicked
+    #[test]
+    fn with_left_drag_panning_esc_while_held_keeps_the_selection() {
+        let mut loaded = panning(vec![bonder(0, 0)]);
+        click(&mut loaded, 0, 0);
+        press(&mut loaded, 0, 0, KeyMods::default());
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        loaded.release();
+        assert_eq!(loaded.selection, Some(PartId::Glyph(0)));
     }
 
     #[test]

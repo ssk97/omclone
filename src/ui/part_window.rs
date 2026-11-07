@@ -84,7 +84,7 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             }
             ui.separator();
             add_part_menu(ui, loaded);
-            //Watching changes nothing in the solution, so it works without the editor and while running
+            //Watching changes nothing in the solution, so it works without the editor
             if matches!(loaded.tool, BoardTool::PickHex(_)){
                 if ui.button("Cancel").on_hover_text("Stop picking, with no hex watched").clicked(){
                     loaded.end_tool();

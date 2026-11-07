@@ -180,7 +180,10 @@ impl Loaded{
         self.timeline.replace_base(world);
         self.mark_changed();
         self.clear_crash();
-        self.try_set_target_time(target);
+        //A run carries on from shown_time, which an edit leaves alone
+        if !matches!(self.run_state, RunState::FreeRun){
+            self.try_set_target_time(target);
+        }
     }
     fn mark_changed(&mut self){
         self.dirty = true;
@@ -546,7 +549,7 @@ mod watch_tests {
 
     #[cfg(feature = "editor_ui")]
     #[test]
-    fn a_drag_doesnt_pick_without_panning() {
+    fn a_drag_pans_without_left_drag_panning() {
         let mut loaded = carrier();
         loaded.left_drag_pans = false;
         loaded.start_picking_hex();
@@ -556,6 +559,40 @@ mod watch_tests {
         loaded.board_input(BoardInput::Release, false);
         assert_eq!(loaded.watched_hex, None);
         assert!(matches!(loaded.tool, BoardTool::PickHex(_)), "still picking after a drag");
+        assert_ne!(loaded.test_px(DROP.0, DROP.1), at, "it panned");
+    }
+
+    //Running used to end every tool but Select each frame, so picking ended as soon as it started
+    #[test]
+    fn picking_works_while_running() {
+        let mut loaded = carrier();
+        loaded.run_state = RunState::FreeRun;
+        loaded.start_picking_hex();
+        loaded.update(TEST_FRAME);
+        loaded.refresh_preview();
+        assert!(matches!(loaded.tool, BoardTool::PickHex(None)));
+        let at = loaded.test_px(DROP.0, DROP.1);
+        loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.watched_hex, Some(Pos::new(DROP.0, DROP.1)));
+    }
+
+    #[cfg(feature = "editor_ui")]
+    #[test]
+    fn an_edit_while_running_keeps_running_from_where_it_was() {
+        let mut loaded = carrier();
+        loaded.run_speed = 300.;
+        loaded.run_state = RunState::FreeRun;
+        loaded.update(TEST_FRAME);
+        let before = loaded.timeline.time();
+        assert!(before > 4.);
+        let output = PartEdit{part: PartId::Glyph(1), delta: Pos::new(0, 0), rot: 1, pivot: Pos::new(DROP.0, DROP.1),
+            len: 0, arm_type: None};
+        loaded.apply_edit(&LayoutEdit::Part(output)).unwrap();
+        assert_eq!(loaded.timeline.base().glyphs[1].rot, 1);
+        loaded.update(TEST_FRAME);
+        assert!(matches!(loaded.run_state, RunState::FreeRun));
+        assert!(loaded.timeline.time() > before);
     }
 }
 
