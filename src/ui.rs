@@ -169,13 +169,13 @@ fn logical(x: f32, y: f32) -> (f32, f32){
     let dpi = window::dpi_scale();
     (x/dpi, y/dpi)
 }
-//Whether an egui window is at `px` (in logical pixels). is_pointer_over_egui uses where the pointer was at egui's last
-//frame, which for a touch is where the last finger was. The background layer is egui's root UI, which covers the
-//screen but holds nothing here. Tooltips hold nothing to click either, but egui counts them, and on touch screens the
-//cursor tooltip stays where the last finger lifted, over the board. A tooltip with a button would need this changed.
+//Whether egui takes a press at `px` (in logical pixels). Like egui's hit test, that is any interactive widget from the
+//last frame within interact_radius, so it includes window edges and resize corners that reach outside the window.
+//is_pointer_over_egui uses where the pointer was at egui's last frame, which for a touch is where the last finger was.
 fn over_egui(egui_ctx: &egui::Context, px: (f32, f32)) -> bool{
-    egui_ctx.layer_id_at(egui::pos2(px.0, px.1))
-        .is_some_and(|layer| !matches!(layer.order, egui::Order::Background | egui::Order::Tooltip))
+    let pos = egui::pos2(px.0, px.1);
+    let radius = egui_ctx.global_style().interaction.interact_radius;
+    egui_ctx.interactive_rects_last_pass().iter().any(|r| r.distance_to_pos(pos) <= radius)
 }
 
 
@@ -579,5 +579,47 @@ impl EventHandler for OmcloneApp {
             loaded.atoms_faded = false;
             loaded.pan_keys_held.clear();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Event, Pos2, pos2};
+
+    //A window spanning (100, 100) to (300, 200), with nothing in it
+    fn frame(ctx: &egui::Context, events: Vec<Event>) {
+        let _ = ctx.run_ui(egui::RawInput{events, ..Default::default()}, |ui| {
+            egui::Window::new("w").title_bar(false).default_pos((100., 100.)).default_size((200., 100.))
+                .resizable(true).show(ui.ctx(), |ui| ui.allocate_space(ui.available_size()));
+        });
+    }
+    //Whether a drag from `pos` moves or resizes the window
+    fn egui_takes_press(pos: Pos2) -> bool {
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![]);
+        let press = Event::PointerButton{pos, button: egui::PointerButton::Primary, pressed: true,
+            modifiers: egui::Modifiers::NONE};
+        frame(&ctx, vec![Event::PointerMoved(pos), press]);
+        frame(&ctx, vec![Event::PointerMoved(pos + egui::vec2(15., 15.))]);
+        ctx.dragged_id().is_some()
+    }
+
+    #[test]
+    fn board_gets_only_presses_egui_does_not_take() {
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![]);
+        let rect = ctx.memory(|m| m.area_rect(ctx.layer_id_at(pos2(200., 150.)).unwrap().id)).unwrap();
+        let points = [rect.center(), rect.left_center() - egui::vec2(3., 0.), rect.right_center() + egui::vec2(3., 0.),
+            rect.center_top() - egui::vec2(0., 3.), rect.center_bottom() + egui::vec2(0., 3.),
+            rect.right_bottom() + egui::vec2(6., 6.), rect.left_top() - egui::vec2(6., 6.),
+            rect.left_center() - egui::vec2(20., 0.), rect.right_bottom() + egui::vec2(20., 20.)];
+        let mut taken = 0;
+        for p in points {
+            let takes = egui_takes_press(p);
+            taken += takes as usize;
+            assert_eq!(over_egui(&ctx, (p.x, p.y)), takes, "at {p:?}, egui takes the press: {takes}");
+        }
+        assert!(taken > 1 && taken < points.len(), "the points test both answers, beyond the window's inside");
     }
 }
