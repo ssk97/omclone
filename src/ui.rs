@@ -152,6 +152,12 @@ fn logical(x: f32, y: f32) -> (f32, f32){
     let dpi = window::dpi_scale();
     (x/dpi, y/dpi)
 }
+//Whether an egui window is at `px` (in logical pixels). is_pointer_over_egui uses where the pointer was at egui's last
+//frame, which for a touch is where the last finger was. The background layer is egui's root UI, which covers the
+//screen but holds nothing here.
+fn over_egui(egui_ctx: &egui::Context, px: (f32, f32)) -> bool{
+    egui_ctx.layer_id_at(egui::pos2(px.0, px.1)).is_some_and(|layer| layer.order != egui::Order::Background)
+}
 
 
 #[cfg(target_arch = "wasm32")]
@@ -219,9 +225,11 @@ impl EventHandler for OmcloneApp {
         if let Loaded(loaded) = &mut self.app_state{
             //Before simulating, so a crash running an edit still has that edit
             loaded.update_backup(|| solution_path(&self.unloaded_info));
+            let egui_ctx = self.egui_mq.egui_ctx();
+            //Keys held from before a text box or the tapes took focus type there instead
+            let typing = egui_ctx.text_edit_focused() || tape_grid::has_focus(egui_ctx);
             //The mouse is over another hex now, though it didn't move
-            if loaded.pan_with_keys(dt){
-                let egui_ctx = self.egui_mq.egui_ctx();
+            if !typing && loaded.pan_with_keys(dt){
                 let input = BoardInput::Move{px: self.mouse, screen: logical_screen_size(), over_ui: egui_ctx.is_pointer_over_egui()};
                 loaded.board_input(input, egui_ctx.text_edit_focused());
             }
@@ -282,16 +290,13 @@ impl EventHandler for OmcloneApp {
             loaded.flush_board_input();
         }
         self.egui_mq.draw(ctx);
-        //Taken every frame, so an upload the not-loaded window already loads isn't loaded again
+        //A puzzle alone loads too, with the solution already uploaded, as one solution may solve several puzzles
         #[cfg(target_arch = "wasm32")]
         if UPLOADED.swap(false, std::sync::atomic::Ordering::Relaxed) && JS_PUZZLE_INPUT.lock().unwrap().is_some()
             && JS_SOLUTION_INPUT.lock().unwrap().is_some(){
-            if let Loaded(loaded) = &mut self.app_state{
-                if loaded.dirty{
-                    loaded.popup_reload = true;
-                } else {
-                    do_loading = AppStateUpdate::Load;
-                }
+            match &mut self.app_state{
+                Loaded(loaded) if loaded.dirty => loaded.popup_reload = true,
+                _ => do_loading = AppStateUpdate::Load,
             }
         }
         match do_loading{
@@ -321,7 +326,7 @@ impl EventHandler for OmcloneApp {
                         let (Some(f_puzzle), Some(f_sol)) = (puzzle.as_ref(), solution.as_ref()) else {
                             eyre::bail!("Upload a puzzle and a solution file");
                         };
-                        //Kept, like the files, for loading again after a Reset
+                        //Kept, like the files, for Reload
                         let name = JS_SOLUTION_NAME.lock().unwrap().clone();
                         self.load(f_puzzle.as_slice(), f_sol.as_slice())?;
                         //Only once loaded, so a bad file doesn't rename the open solution's Save
@@ -331,13 +336,8 @@ impl EventHandler for OmcloneApp {
                 };
 
                 match do_load(){
-                    Err(err) => {
-                        self.extra_message = Some(err.to_string());
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            *JS_SOLUTION_INPUT.lock().unwrap() = None;
-                        }
-                    }
+                    //The files are kept, as either may be the good one: the next upload goes with the other
+                    Err(err) => self.extra_message = Some(err.to_string()),
                     Ok(warning) => self.extra_message = warning,
                 }
             }
@@ -398,7 +398,7 @@ impl EventHandler for OmcloneApp {
         self.egui_mq.mouse_button_down_event(mb, x, y);
         let (x, y) = logical(x, y);
         let egui_ctx = self.egui_mq.egui_ctx();
-        if !egui_ctx.is_pointer_over_egui(){
+        if !over_egui(egui_ctx, (x, y)){
             match mb {
                 MouseButton::Right | MouseButton::Middle => {
                     self.dragging = Some([x,y]);
@@ -458,7 +458,7 @@ impl EventHandler for OmcloneApp {
                     None => {
                         self.touch_press = Some(id);
                         self.mouse_button_down_event(MouseButton::Left, x, y);
-                        self.touch_on_board = !self.egui_mq.egui_ctx().is_pointer_over_egui();
+                        self.touch_on_board = !over_egui(self.egui_mq.egui_ctx(), pos);
                     }
                     Some(press) if self.touch_on_board => {
                         let at = self.touches.iter().find(|&&(t, _)| t == press).map_or(pos, |&(_, p)| p);

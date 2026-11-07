@@ -534,13 +534,15 @@ impl Loaded{
     }
     //Starts panning while the key is held, if it's a panning key (see keys_pan)
     fn pan_key_down(&mut self, keycode: KeyCode, keymods: KeyMods) -> bool{
+        //A held key's repeats are taken even once a part moves, so they don't turn it
+        if self.pan_keys_held.contains(&keycode){
+            return true;
+        }
         let usable = self.keys_pan && !keymods.ctrl && !keymods.logo && !self.moving_part();
         if !usable || pan_key_direction(keycode).is_none(){
             return false;
         }
-        if !self.pan_keys_held.contains(&keycode){
-            self.pan_keys_held.push(keycode);
-        }
+        self.pan_keys_held.push(keycode);
         true
     }
     //Called for every key released, even while typing, so a held key can't get stuck
@@ -990,6 +992,20 @@ mod tests {
         loaded.key_up(KeyCode::Up);
         assert!(!loaded.pan_with_keys(TEST_FRAME));
         assert_eq!(px(&loaded, 0, 0), moved);
+    }
+
+    #[test]
+    fn a_pan_key_held_from_before_a_drag_does_not_turn_the_part() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        loaded.keys_pan = true;
+        assert!(loaded.handle_key(KeyCode::D, KeyMods::default()));
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 3, 0);
+        //The held key's repeats
+        loaded.handle_key(KeyCode::D, KeyMods::default());
+        loaded.handle_key(KeyCode::D, KeyMods::default());
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].rot, 0);
     }
 
     #[test]

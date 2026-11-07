@@ -529,7 +529,7 @@ pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateU
     });
     do_loading
 }
-#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables, unused_mut))]
 pub fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut PathInfo) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
     egui::Window::new("World Not Loaded").show(egui_ctx, |ui| {
@@ -551,16 +551,17 @@ pub fn not_loaded_window(egui_ctx: &egui::Context, unloaded_info: &mut PathInfo)
                 do_loading = AppStateUpdate::Load;
             }
         }
+        //Uploads load as they come in (see draw)
         #[cfg(target_arch = "wasm32")]
         {
             let puzzle_loaded = JS_PUZZLE_INPUT.lock().unwrap().is_some();
             let solution_loaded = JS_SOLUTION_INPUT.lock().unwrap().is_some();
-            match (puzzle_loaded, solution_loaded) {
-                (false, false) => {ui.label("Upload puzzle and solution files");},
-                (false, true) => {ui.label("Upload puzzle file");},
-                (true, false) => {ui.label("Upload solution file");},
-                (true, true) => {do_loading = AppStateUpdate::Load;}
-            }
+            ui.label(match (puzzle_loaded, solution_loaded) {
+                (false, false) => "Upload puzzle and solution files",
+                (false, true) => "Upload puzzle file",
+                (true, false) => "Upload solution file",
+                (true, true) => "Upload a puzzle or solution file to load",
+            });
         }
     });
     do_loading
