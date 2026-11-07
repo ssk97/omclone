@@ -104,7 +104,12 @@ impl OmcloneApp {
         let egui_mq = egui_miniquad::EguiMq::new(mq_ctx.as_mut());
         //A press anywhere else applies a text field being typed in, even one that starts a drag (egui's default
         //waits for a click). The board waits for this before acting on the press (see Loaded::board_input).
-        egui_mq.egui_ctx().options_mut(|o| o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses);
+        egui_mq.egui_ctx().options_mut(|o| {
+            o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
+            //egui's web default (8) is for browsers that report wheels in pixels, but mouse_wheel_event gives it
+            //lines, so a notch barely moved. This is its native default.
+            o.input_options.line_scroll_speed = 40.;
+        });
         Self {
             mq_ctx, egui_mq,
             render_data,app_state,unloaded_info,
@@ -545,6 +550,7 @@ impl EventHandler for OmcloneApp {
             KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
             KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
             KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
+            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = false,
             _ => {}
         }
         //Even while typing, which may have started after the key was pressed
@@ -554,12 +560,16 @@ impl EventHandler for OmcloneApp {
             }
             loaded.key_up(keycode);
         }
-        self.egui_mq.key_up_event(keycode, keymods);
+        //egui keeps these until the next key event, and a Ctrl or Shift it thinks is held makes the wheel zoom or
+        //scroll sideways
+        self.egui_mq.key_up_event(keycode, self.keymods);
     }
 
     //Called when the window loses focus, after which the releases of 1, the modifiers and the panning keys may go elsewhere
     fn window_minimized_event(&mut self) {
         self.keymods = KeyMods::default();
+        //A modifier key's release only sets egui's modifiers; it sends egui no key event
+        self.egui_mq.key_up_event(KeyCode::LeftControl, KeyMods::default());
         if let Loaded(loaded) = &mut self.app_state{
             loaded.atoms_faded = false;
             loaded.pan_keys_held.clear();
