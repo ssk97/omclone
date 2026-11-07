@@ -154,9 +154,11 @@ fn logical(x: f32, y: f32) -> (f32, f32){
 }
 //Whether an egui window is at `px` (in logical pixels). is_pointer_over_egui uses where the pointer was at egui's last
 //frame, which for a touch is where the last finger was. The background layer is egui's root UI, which covers the
-//screen but holds nothing here.
+//screen but holds nothing here. Tooltips hold nothing to click either, but egui counts them, and on touch screens the
+//cursor tooltip stays where the last finger lifted, over the board. A tooltip with a button would need this changed.
 fn over_egui(egui_ctx: &egui::Context, px: (f32, f32)) -> bool{
-    egui_ctx.layer_id_at(egui::pos2(px.0, px.1)).is_some_and(|layer| layer.order != egui::Order::Background)
+    egui_ctx.layer_id_at(egui::pos2(px.0, px.1))
+        .is_some_and(|layer| !matches!(layer.order, egui::Order::Background | egui::Order::Tooltip))
 }
 
 
