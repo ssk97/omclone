@@ -181,8 +181,9 @@ const BOARD_HELP: &[HelpEntry] = &[
     editor("A / D", "While dragging or placing: turn counterclockwise / clockwise"),
     editor("W / S", "While dragging or placing an arm: lengthen / shorten it"),
     editor("Delete or Backspace", "Delete the selected part"),
-    editor("Esc", "Let go of the held part, then stop placing parts or drawing track"),
-    editor("Right-click", "Stop placing parts or drawing track"),
+    editor("Esc", "Let go of the held part, then stop placing parts, drawing track or picking a hex"),
+    editor("Right-click", "Stop placing parts, drawing track or picking a hex"),
+    display("Esc or right-click", "Stop picking a hex for Pause at hex"),
     both("Right or middle drag", "Pan"),
     both("Wheel", "Zoom"),
     both("Two-finger drag; pinch", "Pan; zoom"),
@@ -194,6 +195,7 @@ const PART_WINDOW_HELP: &[HelpEntry] = &[
     both("Click a part in the list", "Select it"),
     editor("Drag a glyph in the list", "Reorder it"),
     editor("Shift+click", "Place a part from Add part, and keep placing more"),
+    both("Pause at hex, then click a hex", "Moving forward pauses when an atom next lands there, which clears the hex. Cancel clears it too."),
     editor("Enter, or a click elsewhere", "Apply a typed value"),
     editor("w e a d z x", "In Path: steps to neighboring hexes, or (dx,dy) to jump. Esc drops what was typed."),
 ];
@@ -489,6 +491,8 @@ pub fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
         (title, Some(String::from("Esc or right-click to finish")))
     } else if let Some(placing) = loaded.tool.placing() {
         (format!("Placing {}", placing.part.name()), Some(String::from("Shift+click to place more; Esc or right-click to stop")))
+    } else if matches!(loaded.tool, BoardTool::PickHex(_)) {
+        (String::from("Click a hex to pause when an atom lands there"), Some(String::from("Esc or right-click to stop")))
     } else {
         return;
     };

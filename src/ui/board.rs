@@ -31,6 +31,8 @@ pub enum BoardTool{
     Place(Placing),
     //Clicking and dragging reshape a track. Holds the stroke while the button is down.
     Track(TrackMode, Option<TrackStroke>),
+    //A click picks the hex to watch (see Loaded::watched_hex). Holds the pressed hex while the button is down.
+    PickHex(Option<Pos>),
 }
 impl BoardTool{
     pub fn press(&self) -> Option<&Press>{
@@ -275,10 +277,17 @@ impl Loaded{
         }
     }
     fn cancel_press(&mut self){
-        if let BoardTool::Select(press) = &mut self.tool{
-            *press = None;
+        match &mut self.tool{
+            BoardTool::Select(press) => *press = None,
+            BoardTool::PickHex(hex) => *hex = None,
+            _ => {}
         }
         self.pan = None;
+    }
+    //Ending the pick any way but a click leaves no hex watched
+    pub fn start_picking_hex(&mut self){
+        self.watched_hex = None;
+        self.tool = BoardTool::PickHex(None);
     }
     pub fn start_placing(&mut self, part: NewPart){
         self.tool = BoardTool::Place(Placing{part, rot: 0, len: 1, cursor_xy: None});
@@ -343,6 +352,14 @@ impl Loaded{
         match self.tool{
             BoardTool::Place(_) => return self.place(press_hex, keymods.shift),
             BoardTool::Track(..) => return self.start_stroke(press_hex),
+            BoardTool::PickHex(_) => {
+                self.tool = BoardTool::PickHex(Some(press_hex));
+                //Panning cancels the press, so a drag doesn't pick (see release)
+                if self.left_drag_pans(){
+                    self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list_hex: self.list_hex});
+                }
+                return;
+            }
             BoardTool::Select(_) => {}
         }
         if self.left_drag_pans(){
@@ -500,6 +517,13 @@ impl Loaded{
             BoardTool::Select(press) => press.take(),
             BoardTool::Track(..) => return self.finish_stroke(),
             BoardTool::Place(_) => None,
+            BoardTool::PickHex(hex) => {
+                if let Some(hex) = hex.take(){
+                    self.watched_hex = Some(hex);
+                    self.end_tool();
+                }
+                return;
+            }
         };
         let Some(press) = press else {
             //A click on an empty hex, which the press left for now. A pan or a cancel took the pan out.
@@ -641,7 +665,7 @@ impl Loaded{
                 let edit = LayoutEdit::Add{part: placing.part.clone(), pos: hex, rot: placing.rot, len: placing.len};
                 Some((edit, cursor_xy - pos_to_xy(hex)))
             }
-            BoardTool::Select(None) | BoardTool::Track(_, None) => None,
+            BoardTool::Select(None) | BoardTool::Track(_, None) | BoardTool::PickHex(_) => None,
         }
     }
     //The Path field's text while it's being typed in (for the selected track), and that track's first hex
@@ -781,7 +805,11 @@ impl Loaded{
     }
     pub fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const CRASH_COLOR: Color = [1., 0.1, 0.1, 1.];
+        const WATCH_COLOR: Color = [1., 0.8, 0., 1.];
         self.draw_board(render, ctx);
+        if let Some(hex) = self.watched_hex{
+            render.draw_ring(ctx, &self.camera, pos_to_xy(hex), WATCH_COLOR);
+        }
         //Last, so nothing covers it. The board shows the moment of the crash, so it circles the parts that collided.
         if let RunState::Crashed{error, ..} = self.run_state{
             render.draw_ring(ctx, &self.camera, error.location, CRASH_COLOR);

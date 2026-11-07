@@ -60,6 +60,8 @@ pub struct Loaded{
     pub atoms_faded: bool,
     //In timesteps a second
     pub run_speed: f64,
+    //Moving forward stops at the first step that ends with a new atom here, which also clears it
+    pub watched_hex: Option<Pos>,
     pub popup_reload: bool,
 
     //Part editing
@@ -126,6 +128,7 @@ impl Loaded{
             area_mode: AreaMode::Hidden,
             atoms_faded: false,
             run_speed: 3.,
+            watched_hex: None,
             popup_reload: false,
 
             selection: None,
@@ -342,15 +345,38 @@ impl Loaded{
             self.timeline.rewind(target_time as u64);
             self.clear_crash();
         }
-        if let Err(error) = self.timeline.advance_to(target_time){
+        let advanced = match self.watched_hex{
+            Some(hex) => self.advance_watching(hex, target_time),
+            None => self.timeline.advance_to(target_time),
+        };
+        if let Err(error) = advanced{
             self.run_state = RunState::Crashed{step: self.timeline.curr().timestep as usize, error};
             self.crash_window_open = true;
         }
         self.shown_time = self.timeline.time();
     }
+    //Advances to `target` a step at a time, pausing at the first step past the shown time that ends with a new atom
+    //on `hex`. Steps up to the shown time aren't new: an edit replays them on its way back.
+    fn advance_watching(&mut self, hex: Pos, target: f64) -> SimResult<()>{
+        //Atoms keep their start-of-step hex until the step ends, so this holds even partway through one
+        let mut before = self.timeline.curr().atoms.visible(hex);
+        while self.timeline.time() < target{
+            let step_end = (self.timeline.curr().timestep + 1) as f64;
+            self.timeline.advance_to(step_end.min(target))?;
+            let world = self.timeline.curr();
+            let now = world.atoms.visible(hex);
+            if now.is_some() && now != before && world.timestep as f64 > self.shown_time{
+                self.watched_hex = None;
+                self.run_state = RunState::Manual(world.timestep as usize);
+                return Ok(());
+            }
+            before = now;
+        }
+        Ok(())
+    }
 }
 
-#[cfg(all(test, feature = "editor_ui"))]
+#[cfg(all(test, feature = "display_ui"))]
 impl Loaded{
     //A solution with these parts, as if just loaded, with the board's origin in the middle of the screen
     pub fn for_test(glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Self{
@@ -371,11 +397,132 @@ impl Loaded{
         ((world.x*scale.0 + 1.)/2.*TEST_SCREEN.0, (1. - world.y*scale.1)/2.*TEST_SCREEN.1)
     }
 }
-#[cfg(all(test, feature = "editor_ui"))]
+#[cfg(all(test, feature = "display_ui"))]
 pub const TEST_SCREEN: (f32, f32) = (1000., 800.);
 //A frame's time in seconds, at 60 frames a second
-#[cfg(all(test, feature = "editor_ui"))]
+#[cfg(all(test, feature = "display_ui"))]
 pub const TEST_FRAME: f64 = 1./60.;
+
+#[cfg(all(test, feature = "display_ui"))]
+mod watch_tests {
+    use super::*;
+
+    fn salt() -> Vec<Atom>{
+        vec![Atom::new(Pos::new(0, 0), AtomType::Salt)]
+    }
+    fn input_at(x: i32, y: i32) -> Glyph{
+        Glyph{pos: Pos::new(x, y), rot: 0, glyph_type: GlyphType::Input(smallvec![salt()], 0)}
+    }
+    //An arm carries salt from the input at (1,0) to the output at DROP each loop, so atoms land there at the end of
+    //steps 1 and 5 (timesteps 2 and 6), and the output takes each one away during the next step.
+    //Taking the first atom makes a new one appear on the input at timestep 2.
+    const DROP: (i32, i32) = (0, 1);
+    fn carrier() -> Loaded{
+        let output = Glyph{pos: Pos::new(DROP.0, DROP.1), rot: 0, glyph_type: GlyphType::Output(smallvec![salt()], 6, 0)};
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm,
+            Tape::new(0, vec![Instr::Grab, Instr::RotateCounterClockwise, Instr::Drop, Instr::RotateClockwise]));
+        Loaded::for_test(vec![input_at(1, 0), output], vec![arm])
+    }
+    fn watching(mut loaded: Loaded, x: i32, y: i32) -> Loaded{
+        loaded.watched_hex = Some(Pos::new(x, y));
+        loaded
+    }
+    fn jump(loaded: &mut Loaded, target: usize){
+        loaded.try_set_target_time(target);
+        loaded.update(TEST_FRAME);
+    }
+
+    #[test]
+    fn run_pauses_on_the_landing_and_then_carries_on() {
+        let mut loaded = watching(carrier(), DROP.0, DROP.1);
+        //Far past both landings in one frame
+        loaded.run_speed = 1200.;
+        loaded.run_state = RunState::FreeRun;
+        loaded.update(TEST_FRAME);
+        assert!(matches!(loaded.run_state, RunState::Manual(2)));
+        assert_eq!(loaded.timeline.time(), 2.);
+        assert_eq!(loaded.watched_hex, None);
+        //The watch is gone, so the landing at 6 doesn't stop it
+        loaded.run_state = RunState::FreeRun;
+        loaded.update(TEST_FRAME);
+        assert!(matches!(loaded.run_state, RunState::FreeRun));
+        assert!(loaded.timeline.time() > 6.);
+    }
+
+    #[test]
+    fn a_jump_stops_at_the_landing() {
+        let mut loaded = watching(carrier(), DROP.0, DROP.1);
+        jump(&mut loaded, 16);
+        assert!(matches!(loaded.run_state, RunState::Manual(2)));
+        assert_eq!(loaded.timeline.time(), 2.);
+    }
+
+    #[test]
+    fn an_atom_already_there_doesnt_count() {
+        let mut loaded = watching(carrier(), 1, 0);
+        jump(&mut loaded, 16);
+        assert!(matches!(loaded.run_state, RunState::Manual(2)), "the new atom from the input");
+    }
+
+    #[test]
+    fn passing_through_doesnt_count() {
+        //A long arm swings salt from (2,0) to (0,2), over (1,1) partway through step 1
+        let swing = || {
+            let arm = Arm::new(Pos::new(0, 0), 0, 2, ArmType::PlainArm,
+                Tape::new(0, vec![Instr::Grab, Instr::RotateCounterClockwise]));
+            Loaded::for_test(vec![input_at(2, 0)], vec![arm])
+        };
+        let mut loaded = watching(swing(), 1, 1);
+        jump(&mut loaded, 3);
+        assert_eq!(loaded.timeline.time(), 3.);
+        assert_eq!(loaded.watched_hex, Some(Pos::new(1, 1)));
+        //Where it comes to rest does count
+        let mut loaded = watching(swing(), 0, 2);
+        jump(&mut loaded, 3);
+        assert_eq!(loaded.timeline.time(), 2.);
+    }
+
+    //A rewind for an edit replays steps already shown, which aren't new even if they now land atoms elsewhere
+    #[cfg(feature = "editor_ui")]
+    #[test]
+    fn the_replay_after_an_edit_doesnt_pause() {
+        let mut loaded = carrier();
+        jump(&mut loaded, 8);
+        loaded.watched_hex = Some(Pos::new(DROP.0, DROP.1));
+        //With a longer loop, the second atom lands at timestep 7 instead
+        loaded.edit_repeat_length(5);
+        for _ in 0..3{
+            loaded.update(TEST_FRAME);
+        }
+        assert_eq!(loaded.timeline.time(), 8.);
+        assert_eq!(loaded.watched_hex, Some(Pos::new(DROP.0, DROP.1)));
+    }
+
+    #[test]
+    fn a_click_picks_the_hex_and_a_pan_doesnt() {
+        let mut loaded = carrier();
+        //Without the editor, left drags always pan
+        loaded.left_drag_pans = true;
+        loaded.watched_hex = Some(Pos::new(5, 5));
+        loaded.selection = Some(PartId::Arm(0));
+        loaded.start_picking_hex();
+        assert_eq!(loaded.watched_hex, None, "cancelling from here leaves nothing watched");
+
+        let at = loaded.test_px(DROP.0, DROP.1);
+        loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
+        loaded.board_input(BoardInput::Move{px: (at.0 + 50., at.1), screen: TEST_SCREEN, over_ui: false}, false);
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.watched_hex, None);
+        assert!(matches!(loaded.tool, BoardTool::PickHex(_)), "still picking after a pan");
+
+        let at = loaded.test_px(DROP.0, DROP.1);
+        loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.watched_hex, Some(Pos::new(DROP.0, DROP.1)));
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+        assert_eq!(loaded.selection, Some(PartId::Arm(0)), "picking a hex selects nothing");
+    }
+}
 
 #[cfg(all(test, feature = "editor_ui"))]
 mod tests {

@@ -84,6 +84,15 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             }
             ui.separator();
             add_part_menu(ui, loaded);
+            //Watching changes nothing in the solution, so it works without the editor and while running
+            if matches!(loaded.tool, BoardTool::PickHex(_)){
+                if ui.button("Cancel").on_hover_text("Stop picking, with no hex watched").clicked(){
+                    loaded.end_tool();
+                }
+            } else if ui.button("Pause at hex")
+                .on_hover_text("Click a hex, and moving forward pauses when an atom lands there").clicked(){
+                loaded.start_picking_hex();
+            }
             ui.separator();
             ui.add_enabled(EDITOR_ENABLED, egui::Checkbox::new(&mut loaded.allow_overlap, "Allow overlap"))
                 .on_hover_text("Lets parts overlap each other, and break production puzzles' chamber rules");
