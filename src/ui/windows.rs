@@ -33,6 +33,13 @@ pub fn timeline_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
                 .range(0..=loaded.max_timestep)
                 .speed(0.1));
             ui.label("Timestep");
+            let repeat_length = loaded.timeline.base().repeat_length;
+            if ui.button("-Loop").on_hover_text("Back one loop length").clicked() {
+                target_time = target_time.saturating_sub(repeat_length);
+            }
+            if ui.button("+Loop").on_hover_text("Forward one loop length").clicked() {
+                target_time += repeat_length;
+            }
         });
         ui.horizontal(|ui| {
             if ui.button("-1").clicked() {
