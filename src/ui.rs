@@ -152,6 +152,18 @@ impl OmcloneApp {
         }
     }
 }
+//The modifiers with `keycode`'s own one set to `held`. A modifier key's own event may report the state from before it
+//(as X11 does), so a release can still count the key and a press may not yet.
+fn own_modifier(mut keymods: KeyMods, keycode: KeyCode, held: bool) -> KeyMods{
+    match keycode{
+        KeyCode::LeftShift | KeyCode::RightShift => keymods.shift = held,
+        KeyCode::LeftControl | KeyCode::RightControl => keymods.ctrl = held,
+        KeyCode::LeftSuper | KeyCode::RightSuper => keymods.logo = held,
+        KeyCode::LeftAlt | KeyCode::RightAlt => keymods.alt = held,
+        _ => {}
+    }
+    keymods
+}
 //A mouse position in logical pixels (see logical_screen_size)
 fn logical(x: f32, y: f32) -> (f32, f32){
     let dpi = window::dpi_scale();
@@ -529,7 +541,8 @@ impl EventHandler for OmcloneApp {
         keymods: KeyMods,
         _repeat: bool,
     ) {
-        self.keymods = keymods;
+        self.keymods = own_modifier(keymods, keycode, true);
+        let keymods = self.keymods;
         if let Loaded(loaded) = &mut self.app_state{
             //Typing in a text box or the tapes takes priority over the part hotkeys. The tapes handle undo
             //themselves, so it happens in order with the keys typed before it. 1 isn't an instruction, so it still
@@ -544,15 +557,7 @@ impl EventHandler for OmcloneApp {
     }
 
     fn key_up_event(&mut self, keycode: KeyCode, keymods: KeyMods) {
-        self.keymods = keymods;
-        //The modifiers may still count the key being released
-        match keycode{
-            KeyCode::LeftShift | KeyCode::RightShift => self.keymods.shift = false,
-            KeyCode::LeftControl | KeyCode::RightControl => self.keymods.ctrl = false,
-            KeyCode::LeftSuper | KeyCode::RightSuper => self.keymods.logo = false,
-            KeyCode::LeftAlt | KeyCode::RightAlt => self.keymods.alt = false,
-            _ => {}
-        }
+        self.keymods = own_modifier(keymods, keycode, false);
         //Even while typing, which may have started after the key was pressed
         if let Loaded(loaded) = &mut self.app_state{
             if keycode == KeyCode::Key1{

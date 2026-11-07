@@ -287,6 +287,8 @@ impl Loaded{
     //Updates the timeline after the tapes or loop length in its base changed.
     //`earliest_step` is the first timestep whose behavior may have changed.
     fn apply_base_change(&mut self, earliest_step: usize){
+        //The preview's arm runs the old tapes
+        self.drop_preview();
         self.mark_changed();
         if self.timeline.program_changed(earliest_step as u64){
             self.clear_crash();

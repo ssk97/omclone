@@ -994,6 +994,15 @@ mod editing_tests {
         assert_eq!(loaded.timeline.time(), 2. + loaded.run_speed*TEST_FRAME);
     }
 
+    //Edits go to the caret, which a run would leave behind
+    #[test]
+    fn typing_stops_the_run() {
+        let mut loaded = swinging_at_step_2();
+        loaded.run_state = RunState::FreeRun;
+        handle_frame(&mut loaded, &[Event::Text("a".into())]);
+        assert!(matches!(loaded.run_state, RunState::Manual(_)));
+    }
+
     fn typed(text: &str) -> Vec<Event> {
         text.chars().map(|c| Event::Text(c.to_string())).collect()
     }

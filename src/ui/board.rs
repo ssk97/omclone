@@ -126,6 +126,19 @@ pub struct Preview{
     landing: SmallVec<[Pos; 8]>,
     overlaps: SmallVec<[Pos; 8]>,
 }
+impl Preview{
+    fn arm_at(world: &std::result::Result<World, String>, part: PartId, timestep: u64) -> Option<Arm>{
+        let PartId::Arm(i) = part else {return None};
+        world.as_ref().ok().map(|world| world.arm_after(i, timestep))
+    }
+    //Moves it to another timestep. Only the arm depends on the time, so the rest is kept.
+    fn set_timestep(&mut self, timestep: u64){
+        if self.timestep != timestep{
+            self.arm_now = Self::arm_at(&self.world, self.part, timestep);
+            self.timestep = timestep;
+        }
+    }
+}
 impl Press{
     pub fn part(&self) -> PartId{
         self.stack[self.cand]
@@ -155,7 +168,7 @@ impl Loaded{
     pub fn left_drag_pans(&self) -> bool{
         !EDITOR_ENABLED || self.left_drag_pans
     }
-    //Why the layout can't be changed right now, if it can't
+    //Why the layout can't be changed, if it can't
     pub fn edit_lock(&self) -> Option<&'static str>{
         (!EDITOR_ENABLED).then_some("Editing is disabled")
     }
@@ -271,19 +284,15 @@ impl Loaded{
             }
         }
     }
-    //Lets go of what the held button is doing, without a click or a drop
-    fn cancel_press(&mut self){
-        match &mut self.tool{
-            BoardTool::Select(press) => *press = None,
-            BoardTool::Track(_, stroke) => *stroke = None,
-            BoardTool::PickHex(hex) => *hex = None,
-            BoardTool::Place(_) => {}
-        }
-        self.pan = None;
-    }
-    fn holding(&self) -> bool{
-        self.pan.is_some() || matches!(self.tool,
-            BoardTool::Select(Some(_)) | BoardTool::Track(_, Some(_)) | BoardTool::PickHex(Some(_)))
+    //Lets go of what the held button is doing, without a click or a drop. Returns true if it was doing anything.
+    fn cancel_press(&mut self) -> bool{
+        let held = match &mut self.tool{
+            BoardTool::Select(press) => press.take().is_some(),
+            BoardTool::Track(_, stroke) => stroke.take().is_some(),
+            BoardTool::PickHex(hex) => hex.take().is_some(),
+            BoardTool::Place(_) => false,
+        };
+        self.pan.take().is_some() || held
     }
     //Ending the pick any way but a click leaves no hex watched
     pub fn start_picking_hex(&mut self){
@@ -340,7 +349,7 @@ impl Loaded{
             BoardInput::Press{px, screen, keymods} => self.press(px, screen, keymods),
             BoardInput::Move{px, screen, over_ui} => self.pointer_moved(px, screen, over_ui),
             BoardInput::Release => self.release(),
-            BoardInput::Cancel => self.cancel_press(),
+            BoardInput::Cancel => {self.cancel_press();}
         }
     }
     fn press(&mut self, px: (f32, f32), screen_size: (f32, f32), keymods: KeyMods){
@@ -603,11 +612,10 @@ impl Loaded{
             //Lets go of one thing at a time: the press, stroke or pan, then the part being placed, the track mode or
             //hex picking
             KeyCode::Escape => {
-                if self.holding(){
-                    self.cancel_press();
-                } else if matches!(self.tool, BoardTool::Select(None)){
-                    return false;
-                } else {
+                if !self.cancel_press(){
+                    if matches!(self.tool, BoardTool::Select(None)){
+                        return false;
+                    }
                     self.end_tool();
                 }
             }
@@ -742,19 +750,17 @@ impl Loaded{
         let part = part.expect("a pending edit places or changes a part");
         let timestep = self.timeline.curr().timestep;
         let world = self.set_up(&layout);
-        let (polymer, track, arm_now, landing) = match part{
+        let (polymer, track, landing) = match part{
             PartId::Glyph(i) => {
                 let glyph = &layout.glyphs[i];
                 let polymer = glyph.build_polymer().ok().flatten();
                 let track = glyph.is_track().then(|| TrackMaps::build([glyph]).unwrap_or_default());
                 let landing = glyph.footprint(polymer.as_ref());
-                (polymer, track, None, landing)
+                (polymer, track, landing)
             }
-            PartId::Arm(i) => {
-                let arm_now = world.as_ref().ok().map(|world| world.arm_after(i, timestep));
-                (None, None, arm_now, smallvec![layout.arms[i].pos])
-            }
+            PartId::Arm(i) => (None, None, smallvec![layout.arms[i].pos]),
         };
+        let arm_now = Preview::arm_at(&world, part, timestep);
         let mut float_world = FloatWorld::new();
         let overlaps = match &world{
             Ok(world) => {
@@ -785,11 +791,12 @@ impl Loaded{
                 (i, TrackMaps::build(others).unwrap_or_default())
             });
         }
-        //The timeline can still be on its way to the target while a part is dragged
-        if self.preview.as_ref().is_some_and(|p| p.edit == edit && p.timestep == self.timeline.curr().timestep){
-            return;
+        //The timeline can move while a part is dragged: on its way to the target, or running
+        let timestep = self.timeline.curr().timestep;
+        match &mut self.preview{
+            Some(preview) if preview.edit == edit => preview.set_timestep(timestep),
+            _ => self.preview = Some(self.build_preview(edit)),
         }
-        self.preview = Some(self.build_preview(edit));
     }
     pub fn draw_world(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const CRASH_COLOR: Color = [1., 0.1, 0.1, 1.];
@@ -1333,6 +1340,25 @@ mod tests {
         loaded.release();
         loaded.update(TEST_FRAME);
         assert_eq!(loaded.timeline.curr().timestep, 2, "it runs back to the step it was edited at");
+        assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
+    }
+
+    //The tapes can be typed in while a part is held
+    #[test]
+    fn the_drag_preview_runs_the_arm_with_tapes_changed_while_dragging() {
+        let mut loaded = carried_arm();
+        loaded.run_state = RunState::Manual(2);
+        press(&mut loaded, 2, 0, KeyMods::default());
+        move_to(&mut loaded, 4, 0);
+        loaded.refresh_preview();
+        loaded.timeline.base_mut().set_tape(0, Tape::new(0, vec![Instr::RotateClockwise]));
+        loaded.finish_tape_edit(0);
+        loaded.update(TEST_FRAME);
+        loaded.refresh_preview();
+        let previewed = loaded.preview.as_ref().and_then(|p| p.arm_now.as_ref()).map(pose);
+        loaded.release();
+        loaded.update(TEST_FRAME);
+        assert_eq!(loaded.timeline.curr().timestep, 2);
         assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
     }
 
