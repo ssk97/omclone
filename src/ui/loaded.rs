@@ -54,6 +54,8 @@ pub struct Loaded{
     pub run_state: RunState,
     //The timeline's time as last shown. An edit can move the timeline back to re-simulate from before its change, and
     //it comes straight back here (or to the target, if that's earlier) instead of replaying the steps on the way.
+    //Only update sets it, after moving the timeline, so through a rewind it keeps the time from before. Watching a
+    //hex relies on this to tell steps already shown from new ones (see advance_watching).
     shown_time: f64,
     pub area_mode: AreaMode,
     //1 is held, so the board's atoms are drawn faintly
@@ -356,7 +358,8 @@ impl Loaded{
         self.shown_time = self.timeline.time();
     }
     //Advances to `target` a step at a time, pausing at the first step past the shown time that ends with a new atom
-    //on `hex`. Steps up to the shown time aren't new: an edit replays them on its way back.
+    //on `hex`. Steps up to the shown time aren't new: an edit replays them on its way back. This needs shown_time to
+    //be the time from before any rewind, so it must be set only after this returns.
     fn advance_watching(&mut self, hex: Pos, target: f64) -> SimResult<()>{
         //Atoms keep their start-of-step hex until the step ends, so this holds even partway through one
         let mut before = self.timeline.curr().atoms.visible(hex);
@@ -521,6 +524,38 @@ mod watch_tests {
         assert_eq!(loaded.watched_hex, Some(Pos::new(DROP.0, DROP.1)));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
         assert_eq!(loaded.selection, Some(PartId::Arm(0)), "picking a hex selects nothing");
+    }
+
+    //Esc used to end the pick but leave the pan, so the release then deselected as if the board was clicked
+    #[test]
+    fn esc_while_held_drops_only_the_press() {
+        let mut loaded = carrier();
+        loaded.left_drag_pans = true;
+        loaded.selection = Some(PartId::Arm(0));
+        loaded.start_picking_hex();
+        let at = loaded.test_px(DROP.0, DROP.1);
+        loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.watched_hex, None);
+        assert!(matches!(loaded.tool, BoardTool::PickHex(None)), "still picking");
+        assert_eq!(loaded.selection, Some(PartId::Arm(0)));
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        assert!(matches!(loaded.tool, BoardTool::Select(None)));
+    }
+
+    #[cfg(feature = "editor_ui")]
+    #[test]
+    fn a_drag_doesnt_pick_without_panning() {
+        let mut loaded = carrier();
+        loaded.left_drag_pans = false;
+        loaded.start_picking_hex();
+        let at = loaded.test_px(DROP.0, DROP.1);
+        loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
+        loaded.board_input(BoardInput::Move{px: (at.0 + 50., at.1), screen: TEST_SCREEN, over_ui: false}, false);
+        loaded.board_input(BoardInput::Release, false);
+        assert_eq!(loaded.watched_hex, None);
+        assert!(matches!(loaded.tool, BoardTool::PickHex(_)), "still picking after a drag");
     }
 }
 

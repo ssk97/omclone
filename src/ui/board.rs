@@ -31,8 +31,9 @@ pub enum BoardTool{
     Place(Placing),
     //Clicking and dragging reshape a track. Holds the stroke while the button is down.
     Track(TrackMode, Option<TrackStroke>),
-    //A click picks the hex to watch (see Loaded::watched_hex). Holds the pressed hex while the button is down.
-    PickHex(Option<Pos>),
+    //A click picks the hex to watch (see Loaded::watched_hex). Holds the pressed hex and pixel while the button is
+    //down, and drops them if the press becomes a drag.
+    PickHex(Option<(Pos, (f32, f32))>),
 }
 impl BoardTool{
     pub fn press(&self) -> Option<&Press>{
@@ -308,13 +309,13 @@ impl Loaded{
             self.tool = BoardTool::Select(None);
         }
     }
-    //Goes back to picking parts, putting away the part being placed or ending the track mode
+    //Goes back to picking parts, putting away the part being placed or ending the track mode or hex picking
     pub fn end_tool(&mut self){
         if !matches!(self.tool, BoardTool::Select(_)){
             self.tool = BoardTool::Select(None);
         }
     }
-    //A right-click (without panning) puts away the part being placed or ends the track mode
+    //A right-click (without panning) puts away the part being placed or ends the track mode or hex picking
     pub fn right_click(&mut self){
         self.end_tool();
     }
@@ -352,18 +353,14 @@ impl Loaded{
         match self.tool{
             BoardTool::Place(_) => return self.place(press_hex, keymods.shift),
             BoardTool::Track(..) => return self.start_stroke(press_hex),
-            BoardTool::PickHex(_) => {
-                self.tool = BoardTool::PickHex(Some(press_hex));
-                //Panning cancels the press, so a drag doesn't pick (see release)
-                if self.left_drag_pans(){
-                    self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list_hex: self.list_hex});
-                }
-                return;
-            }
-            BoardTool::Select(_) => {}
+            BoardTool::PickHex(_) | BoardTool::Select(_) => {}
         }
         if self.left_drag_pans(){
             self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list_hex: self.list_hex});
+        }
+        if let BoardTool::PickHex(press) = &mut self.tool{
+            *press = Some((press_hex, px));
+            return;
         }
         //Arms are picked where they are now (glyphs don't move)
         let stack = self.timeline.curr().parts_at(press_hex);
@@ -471,6 +468,11 @@ impl Loaded{
         if let BoardTool::Place(placing) = &mut self.tool{
             placing.cursor_xy = (!over_ui).then_some(cursor_xy);
         }
+        if let BoardTool::PickHex(press) = &mut self.tool{
+            if press.is_some_and(|(_, at)| (px.0 - at.0).powi(2) + (px.1 - at.1).powi(2) > DRAG_THRESHOLD_PX.powi(2)){
+                *press = None;
+            }
+        }
         if let Some(mut stroke) = self.take_stroke(){
             //Fast movements skip hexes, so go through each one on the way
             let hex = xy_to_pos(cursor_xy);
@@ -518,7 +520,7 @@ impl Loaded{
             BoardTool::Track(..) => return self.finish_stroke(),
             BoardTool::Place(_) => None,
             BoardTool::PickHex(hex) => {
-                if let Some(hex) = hex.take(){
+                if let Some((hex, _)) = hex.take(){
                     self.watched_hex = Some(hex);
                     self.end_tool();
                 }
@@ -605,11 +607,17 @@ impl Loaded{
                     self.message = Some(err);
                 }
             }
-            //Lets go of one thing at a time: the press or stroke, then the part being placed or the track mode
+            //Lets go of one thing at a time: the press or stroke, then the part being placed, the track mode or hex
+            //picking
             KeyCode::Escape => {
                 self.tool = match std::mem::replace(&mut self.tool, BoardTool::Select(None)){
                     BoardTool::Select(None) => return false,
                     BoardTool::Track(mode, Some(_)) => BoardTool::Track(mode, None),
+                    //Without the pan, the release isn't taken as a click on the board
+                    BoardTool::PickHex(Some(_)) => {
+                        self.pan = None;
+                        BoardTool::PickHex(None)
+                    }
                     _ => BoardTool::Select(None),
                 };
             }
