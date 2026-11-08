@@ -507,7 +507,9 @@ pub fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
         }
     });
 }
-pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateUpdate{
+//`dropped`: natively, files dropped on the window are waiting to load
+#[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded, dropped: bool) -> AppStateUpdate{
     let mut do_loading = AppStateUpdate::NoChange;
     let dirty = loaded.dirty;
     egui::Window::new("Reload?").open(&mut loaded.popup_reload).show(egui_ctx, |ui| {
@@ -515,6 +517,9 @@ pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateU
             ui.colored_label(ui.visuals().warn_fg_color, "Unsaved changes will be lost");
         }
         #[cfg(not(target_arch = "wasm32"))]{
+            if dropped && ui.button("Load dropped files").clicked() {
+                do_loading = AppStateUpdate::LoadDropped;
+            }
             if ui.button("Reload current").clicked() {
                 do_loading = AppStateUpdate::Load;
             }
@@ -523,7 +528,7 @@ pub fn reload_window(egui_ctx: &egui::Context, loaded: &mut Loaded) -> AppStateU
             }
         }
         #[cfg(target_arch = "wasm32")]{
-            ui.label("Uploading a puzzle or solution file loads it");
+            ui.label("Uploading or dropping a puzzle or solution file loads it");
             if ui.button("Reload").clicked() {
                 do_loading = AppStateUpdate::Load;
             }

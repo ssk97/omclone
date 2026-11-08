@@ -25,6 +25,7 @@ use part_window::PathText;
 use tape_grid::{TapeSelection, longest_tape};
 use undo::UndoHistory;
 
+#[derive(Clone)]
 struct PathInfo{
     base: String,
     //The web build loads the puzzle from the page's file picker instead
@@ -55,6 +56,9 @@ enum AppStateUpdate{
     //The web build loads files as they're uploaded instead
     #[cfg(not(target_arch = "wasm32"))]
     ResetHome,
+    //Loads OmcloneApp::dropped
+    #[cfg(not(target_arch = "wasm32"))]
+    LoadDropped,
 }
 use AppState::*;
 
@@ -84,6 +88,10 @@ pub struct OmcloneApp {
     pinching: bool,
     //When the last frame's update ran, in seconds
     last_update: Option<f64>,
+    //Paths dropped on the window. They replace unloaded_info only once they load, as Save writes to its solution
+    //path. They're kept while the Reload? window asks about unsaved changes, and after a failed load.
+    #[cfg(not(target_arch = "wasm32"))]
+    dropped: Option<PathInfo>,
 }
 //A frame longer than this (as after a stall) moves the timeline and the view only this far, so they don't jump. It
 //also keeps a simulation that can't keep up from asking for more each frame, which would make the frames longer still.
@@ -117,6 +125,8 @@ impl OmcloneApp {
             released: false, held_motion: None,
             touches: SmallVec::new(), touch_press: None, touch_on_board: false, pinching: false,
             last_update: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            dropped: None,
         }
     }
     pub fn load(&mut self, f_puzzle: impl Read, f_sol: impl Read) -> Result<()>{
@@ -133,12 +143,28 @@ impl OmcloneApp {
         recovery::clear();
         Ok(())
     }
+    //Loads, returning a warning if there's something to check. Whatever loads replaces a drop that's waiting.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn load_paths(&mut self, paths: &PathInfo) -> Result<Option<String>>{
+        let base_path = Path::new(&paths.base);
+        let f_puzzle = File::open(base_path.join(&paths.puzzle))?;
+        let f_sol = File::open(base_path.join(&paths.solution))?;
+        self.load(f_puzzle, f_sol)?;
+        self.dropped = None;
+        Ok(self.puzzle_mismatch(&paths.puzzle))
+    }
+    fn report_load(&mut self, loaded: Result<Option<String>>){
+        self.extra_message = match loaded{
+            Err(err) => Some(err.to_string()),
+            Ok(warning) => warning,
+        };
+    }
     //A solution names its puzzle by the puzzle's file name, which loading doesn't check
     #[cfg(not(target_arch = "wasm32"))]
-    fn puzzle_mismatch(&self) -> Option<String>{
+    fn puzzle_mismatch(&self, puzzle: &str) -> Option<String>{
         let Loaded(loaded) = &self.app_state else {return None};
         let wanted = &loaded.solution.puzzle_name;
-        let file = Path::new(&self.unloaded_info.puzzle).file_stem()?.to_string_lossy();
+        let file = Path::new(puzzle).file_stem()?.to_string_lossy();
         (!file.eq_ignore_ascii_case(wanted)).then(||
             format!("The solution is for puzzle \"{wanted}\", but the puzzle file is \"{file}\". Check that they match."))
     }
@@ -202,9 +228,8 @@ pub extern "C" fn js_load_solution(solution: sapp_jsutils::JsObject){
     *JS_SOLUTION_INPUT.lock().unwrap() = Some(solution_vec);
     UPLOADED.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-//A file was uploaded since the last frame. The page sets a solution's name before its bytes, in the same JS task, so
-//a frame never sees half an upload.
-#[cfg(target_arch = "wasm32")]
+//Files were uploaded or dropped since the last frame. The page sets a solution's name before its bytes, in the same
+//JS task, and a drop gives all its files in one event, so a frame never sees half of either.
 static UPLOADED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(target_arch = "wasm32")]
 #[no_mangle]
@@ -277,6 +302,10 @@ impl EventHandler for OmcloneApp {
         
         let mut do_loading = AppStateUpdate::NoChange;
         let screen_size = logical_screen_size();
+        #[cfg(not(target_arch = "wasm32"))]
+        let dropped = self.dropped.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let dropped = false;
         self.egui_mq.run(ctx, |_mq_ctx, egui_ctx|{
             windows::message_window(egui_ctx, "app_message", &mut self.extra_message);
             match &mut self.app_state{
@@ -292,7 +321,7 @@ impl EventHandler for OmcloneApp {
                     windows::arms_window(egui_ctx, loaded, &mut self.extra_message);
                     part_window::part_window(egui_ctx, loaded);
                     windows::cursor_tooltip(egui_ctx, loaded);
-                    do_loading = windows::reload_window(egui_ctx, loaded);
+                    do_loading = windows::reload_window(egui_ctx, loaded, dropped);
                 }
                 NotLoaded => {
                     do_loading = windows::not_loaded_window(egui_ctx, &mut self.unloaded_info);
@@ -309,12 +338,18 @@ impl EventHandler for OmcloneApp {
             loaded.flush_board_input();
         }
         self.egui_mq.draw(ctx);
-        //A puzzle alone loads too, with the solution already uploaded, as one solution may solve several puzzles
+        //A puzzle alone loads too, with the solution already given, as one solution may solve several puzzles.
+        //Natively, there's always a path for the other file.
         #[cfg(target_arch = "wasm32")]
-        if UPLOADED.swap(false, std::sync::atomic::Ordering::Relaxed) && JS_PUZZLE_INPUT.lock().unwrap().is_some()
-            && JS_SOLUTION_INPUT.lock().unwrap().is_some(){
+        let ready = JS_PUZZLE_INPUT.lock().unwrap().is_some() && JS_SOLUTION_INPUT.lock().unwrap().is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        let ready = true;
+        if UPLOADED.swap(false, std::sync::atomic::Ordering::Relaxed) && ready{
             match &mut self.app_state{
                 Loaded(loaded) if loaded.dirty => loaded.popup_reload = true,
+                #[cfg(not(target_arch = "wasm32"))]
+                _ => do_loading = AppStateUpdate::LoadDropped,
+                #[cfg(target_arch = "wasm32")]
                 _ => do_loading = AppStateUpdate::Load,
             }
         }
@@ -325,18 +360,22 @@ impl EventHandler for OmcloneApp {
                 self.app_state = NotLoaded;
                 recovery::clear();
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            AppStateUpdate::LoadDropped => if let Some(paths) = self.dropped.clone(){
+                let loaded = self.load_paths(&paths);
+                //A failed drop is kept, so the next one can go with it
+                if loaded.is_ok(){
+                    self.unloaded_info = paths;
+                }
+                self.report_load(loaded);
+            }
             AppStateUpdate::Load => {
                 //Loads, returning a warning if there's something to check
                 let mut do_load = || -> Result<Option<String>>{
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        let dat = &self.unloaded_info;
-                        let base_path = Path::new(&dat.base);
-                        let f_puzzle = File::open(base_path.join(&dat.puzzle))?;
-                        let solution_path = base_path.join(&dat.solution);
-                        let f_sol = File::open(&solution_path)?;
-                        self.load(f_puzzle, f_sol)?;
-                        Ok(self.puzzle_mismatch())
+                        let paths = self.unloaded_info.clone();
+                        self.load_paths(&paths)
                     }
                     #[cfg(target_arch = "wasm32")]
                     {
@@ -353,17 +392,55 @@ impl EventHandler for OmcloneApp {
                         Ok(None)
                     }
                 };
-
-                match do_load(){
-                    //The files are kept, as either may be the good one: the next upload goes with the other
-                    Err(err) => self.extra_message = Some(err.to_string()),
-                    Ok(warning) => self.extra_message = warning,
-                }
+                //On the web the files are kept, as either may be the good one: the next upload goes with the other
+                let loaded = do_load();
+                self.report_load(loaded);
             }
         }
 
         // Draw things in front of egui here
         self.mq_ctx.commit_frame();
+    }
+
+    //Dropped files go where uploads (on the web) or the path fields (natively) would put them, and load in draw
+    fn files_dropped_event(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut paths = self.dropped.clone().unwrap_or_else(|| self.unloaded_info.clone());
+        let mut given = false;
+        for i in 0..window::dropped_file_count(){
+            //On the web, only the file's name
+            let Some(path) = window::dropped_file_path(i) else {continue};
+            let Some(is_puzzle) = path.extension().and_then(|ext|
+                if ext.eq_ignore_ascii_case("puzzle") {Some(true)}
+                else if ext.eq_ignore_ascii_case("solution") {Some(false)}
+                else {None}) else {continue};
+            given = true;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                //Joined to the base path, an absolute path stays as it is
+                let path = path.to_string_lossy().into_owned();
+                if is_puzzle {paths.puzzle = path} else {paths.solution = path}
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let bytes = window::dropped_file_bytes(i);
+                if is_puzzle{
+                    *JS_PUZZLE_INPUT.lock().unwrap() = bytes;
+                } else {
+                    *JS_SOLUTION_NAME.lock().unwrap() = Some(path.to_string_lossy().into_owned());
+                    *JS_SOLUTION_INPUT.lock().unwrap() = bytes;
+                }
+            }
+        }
+        if !given{
+            self.extra_message = Some(String::from("Drop a .puzzle or .solution file to load it"));
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.dropped = Some(paths);
+        }
+        UPLOADED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     fn mouse_motion_event(&mut self, x: f32, y: f32) {

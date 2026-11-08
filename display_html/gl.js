@@ -1396,10 +1396,12 @@ var importObject = {
                 wasm_exports.on_files_dropped_start();
 
                 for (let file of e.dataTransfer.files) {
-                    const nameLen = file.name.length;
+                    //In UTF-8 bytes: the name's length in UTF-16 units cut off names with other letters
+                    const nameBytes = new TextEncoder().encode(file.name);
+                    const nameLen = nameBytes.length;
                     const nameVec = wasm_exports.allocate_vec_u8(nameLen);
                     const nameHeap = new Uint8Array(wasm_memory.buffer, nameVec, nameLen);
-                    stringToUTF8(file.name, nameHeap, 0, nameLen);
+                    nameHeap.set(nameBytes, 0);
 
                     const fileBuf = await file.arrayBuffer();
                     const fileLen = fileBuf.byteLength;
