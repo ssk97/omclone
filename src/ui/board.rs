@@ -209,26 +209,30 @@ impl Loaded{
         parts.into_iter().find_map(|part| self.part_lock(part, kind))
     }
     //The parts an edit of this kind can change, out of `parts`. Copying or deleting a group leaves out the puzzle's
-    //own parts; if those are all there is, all of `parts` are kept, so the edit is refused with the reason.
-    pub fn editable_parts(&self, parts: impl IntoIterator<Item=PartId>, kind: EditKind) -> Vec<PartId>{
+    //own parts, so it's refused only if none of `parts` can be edited.
+    pub fn editable_parts(&self, parts: impl IntoIterator<Item=PartId>, kind: EditKind)
+        -> std::result::Result<Vec<PartId>, &'static str>
+    {
         let parts: Vec<PartId> = parts.into_iter().collect();
         let editable: Vec<PartId> = parts.iter().copied().filter(|&part| self.part_lock(part, kind).is_none()).collect();
-        if editable.is_empty() {parts} else {editable}
+        match self.parts_lock(parts, kind){
+            Some(reason) if editable.is_empty() => Err(reason),
+            _ => Ok(editable),
+        }
     }
     fn layout_edit_lock(&self, edit: &LayoutEdit) -> Option<&'static str>{
-        //First, so an edit of no parts is locked too
-        self.edit_lock().or_else(|| match edit{
+        match edit{
             LayoutEdit::Part(e) => self.parts_lock(e.parts.iter().copied(), EditKind::Move),
             LayoutEdit::Duplicate(e) => self.parts_lock(e.parts.iter().copied(), EditKind::Duplicate),
             LayoutEdit::Delete(parts) => self.parts_lock(parts.iter().copied(), EditKind::Delete),
             LayoutEdit::Reorder{kind, moved, ..} => self.parts_lock(moved.iter().map(|&i| kind.part(i)), EditKind::Reorder),
-            LayoutEdit::Add{..} | LayoutEdit::SetTrack{..} => None,
-        })
+            LayoutEdit::Add{..} | LayoutEdit::SetTrack{..} => self.edit_lock(),
+        }
     }
     //Why the held parts can't be dragged, if they can't
     pub fn press_lock(&self) -> Option<&'static str>{
         let press = self.tool.press()?;
-        self.parts_lock(self.editable_parts(self.grabbed_parts(press), press.kind()), press.kind())
+        self.editable_parts(self.grabbed_parts(press), press.kind()).err()
     }
     //The parts a press drags: the selection if the pressed part is in it, otherwise just that part
     fn grabbed_parts(&self, press: &Press) -> BTreeSet<PartId>{
@@ -471,18 +475,18 @@ impl Loaded{
         }
         self.tool = BoardTool::Select(Some(Held::Part(press)));
     }
-    //The edit that dropping the press's parts here would make (snapped to the nearest hex)
-    fn press_edit(&self, press: &Press, drag: &Drag) -> LayoutEdit{
+    //The edit that dropping the press's parts here would make (snapped to the nearest hex), or why it can't be made
+    fn press_edit(&self, press: &Press, drag: &Drag) -> std::result::Result<LayoutEdit, &'static str>{
         let landing = xy_to_pos(press.held_xy(drag));
         let delta = landing - press.press_hex;
-        let parts = self.editable_parts(self.grabbed_parts(press), press.kind());
+        let parts = self.editable_parts(self.grabbed_parts(press), press.kind())?;
         //A lone arm turns in place (see PartEdit), and anything else turns around the held hex
         let pivot = match parts[..]{
             [PartId::Arm(i)] => self.timeline.base().arms[i].pos + delta,
             _ => landing,
         };
         let edit = PartEdit{parts, delta, rot: drag.rot, pivot, len: drag.len, arm_type: None};
-        if press.duplicate {LayoutEdit::Duplicate(edit)} else {LayoutEdit::Part(edit)}
+        Ok(if press.duplicate {LayoutEdit::Duplicate(edit)} else {LayoutEdit::Part(edit)})
     }
     //The parts the box would add: those with any hex in it, where they are now
     fn parts_in_box(&self, selecting: &BoxSelect) -> Vec<PartId>{
@@ -672,7 +676,7 @@ impl Loaded{
             self.select(Some(press.part()));
             self.list = PartList::Hex(press.press_hex);
         }
-        if let Err(err) = self.apply_edit(&edit){
+        if let Err(err) = edit.map_err(str::to_owned).and_then(|edit| self.apply_edit(&edit)){
             self.message = Some(err);
         }
     }
@@ -745,8 +749,9 @@ impl Loaded{
                     return false;
                 }
                 self.cancel_press();
-                let parts = self.editable_parts(parts, EditKind::Delete).into_iter().collect();
-                if let Err(err) = self.apply_edit(&LayoutEdit::Delete(parts)){
+                let edit = self.editable_parts(parts, EditKind::Delete).map_err(str::to_owned)
+                    .and_then(|parts| self.apply_edit(&LayoutEdit::Delete(parts.into_iter().collect())));
+                if let Err(err) = edit{
                     self.message = Some(err);
                 }
             }
@@ -811,7 +816,7 @@ impl Loaded{
                 Some((LayoutEdit::SetTrack{glyph: mode.glyph, path: stroke.path.clone()}, XYVec::zeros())),
             BoardTool::Select(Some(Held::Part(press))) => {
                 let drag = press.drag.as_ref()?;
-                Some((self.press_edit(press, drag), press.drag_offset(drag)))
+                Some((self.press_edit(press, drag).ok()?, press.drag_offset(drag)))
             }
             BoardTool::Place(placing) => {
                 let cursor_xy = placing.cursor_xy?;

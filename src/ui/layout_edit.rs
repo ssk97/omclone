@@ -156,10 +156,11 @@ impl LayoutEdit{
     //Whether it changes nothing, so it isn't worth a step of undo
     pub fn is_noop(&self) -> bool{
         match self{
-            LayoutEdit::Part(edit) => edit.is_noop(),
+            LayoutEdit::Part(edit) => edit.parts.is_empty() || edit.is_noop(),
+            LayoutEdit::Duplicate(edit) => edit.parts.is_empty(),
             LayoutEdit::Delete(parts) => parts.is_empty(),
             LayoutEdit::Reorder{moved, ..} => moved.is_empty(),
-            LayoutEdit::Add{..} | LayoutEdit::Duplicate(_) | LayoutEdit::SetTrack{..} => false,
+            LayoutEdit::Add{..} | LayoutEdit::SetTrack{..} => false,
         }
     }
     //Whether it adds or removes parts, so the parts it returns are selected instead of the selection kept

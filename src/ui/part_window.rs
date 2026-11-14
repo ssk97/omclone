@@ -336,11 +336,11 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
 fn group_section(ui: &mut egui::Ui, loaded: &mut Loaded, count: usize){
     ui.label(format!("{count} parts selected"));
     let parts = loaded.editable_parts(loaded.selection.iter().copied(), EditKind::Delete);
-    let lock = loaded.parts_lock(parts.iter().copied(), EditKind::Delete);
-    let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
+    let delete = ui.add_enabled(parts.is_ok(), egui::Button::new("Delete"));
     let hover = "Delete or Backspace. Inputs, outputs and conduits stay.";
-    if locked_hover(delete.on_hover_text(hover), lock).clicked(){
-        if let Err(err) = loaded.apply_edit(&LayoutEdit::Delete(parts.into_iter().collect())) {
+    if locked_hover(delete.on_hover_text(hover), parts.as_ref().err().copied()).clicked(){
+        let edit = parts.map_err(str::to_owned).and_then(|parts| loaded.apply_edit(&LayoutEdit::Delete(parts.into_iter().collect())));
+        if let Err(err) = edit {
             loaded.message = Some(err);
         }
     }
