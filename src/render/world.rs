@@ -25,16 +25,18 @@ fn arm_triangles(f_arm: &FloatArm, verts: &mut Vec<GFXPos>){
     }
 }
 //The triangles of an arm drawn on its own, at rest on its hex (wheels hold their atoms, other arms are open)
-fn lone_arm_triangles(arm: &Arm) -> Vec<GFXPos>{
-    let f_arm = FloatArm{
-        pos: pos_to_xy(arm.pos),
-        rot: rot_to_angle(arm.rot),
-        len: arm.len as f32,
-        arm_type: arm.arm_type,
-        grip: steady_grip(arm.arm_type.is_wheel()),
-    };
+fn lone_arms_triangles(arms: &[(usize, &Arm)]) -> Vec<GFXPos>{
     let mut verts = Vec::new();
-    arm_triangles(&f_arm, &mut verts);
+    for (_, arm) in arms{
+        let f_arm = FloatArm{
+            pos: pos_to_xy(arm.pos),
+            rot: rot_to_angle(arm.rot),
+            len: arm.len as f32,
+            arm_type: arm.arm_type,
+            grip: steady_grip(arm.arm_type.is_wheel()),
+        };
+        arm_triangles(&f_arm, &mut verts);
+    }
     verts
 }
 
@@ -259,6 +261,12 @@ impl CameraSetup{
         let ndc_x = px.0/screen_size.0*2. - 1.;
         let ndc_y = 1. - px.1/screen_size.1*2.;
         XYPos::new(ndc_x/scale.0, ndc_y/scale.1) - self.offset
+    }
+    //The screen pixel over a world position (y down, origin top-left)
+    pub fn world_to_screen(&self, at: XYPos, screen_size: (f32, f32)) -> (f32, f32) {
+        let scale = self.scale(screen_size);
+        let ndc = at + self.offset;
+        ((ndc.x*scale.0 + 1.)/2.*screen_size.0, (1. - ndc.y*scale.1)/2.*screen_size.1)
     }
     //Puts a world position in the middle of the screen, without zooming
     pub fn center_on(&mut self, at: XYPos) {
@@ -544,7 +552,7 @@ impl RenderDataBase {
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = camera.offset.into();
         let shown_glyphs = || scene.glyphs.iter().enumerate()
-            .filter(|&(id, _)| scene.hidden != Some(PartId::Glyph(id)));
+            .filter(|&(id, _)| !scene.hidden.contains(&PartId::Glyph(id)));
 
         //Draw input/output atoms
         for (id, glyph) in shown_glyphs(){
@@ -611,7 +619,7 @@ impl RenderDataBase {
 
         //Draw arms
         let shown_arms = || scene.float_world.arms_xy.iter().enumerate()
-            .filter(|&(num, _)| scene.hidden != Some(PartId::Arm(num)));
+            .filter(|&(num, _)| !scene.hidden.contains(&PartId::Arm(num)));
         let mut arm_verts = Vec::new();
         for (_, f_arm) in shown_arms() {
             arm_triangles(f_arm, &mut arm_verts);
@@ -624,9 +632,10 @@ impl RenderDataBase {
             self.font.render_text_centered(ctx, &string, WHITE, f_arm.pos, world_offset, scale);
         }
     }
-    //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. `track` is its own track data.
+    //Draws a glyph being dragged, shifted by `extra` (world units) from its hex. A track's lines are drawn by
+    //draw_dragged_tracks.
     pub fn draw_dragged_glyph(&mut self, ctx: &mut Context, camera: &CameraSetup, glyph: &Glyph,
-        polymer: Option<&Polymer>, track: Option<&TrackMaps>, extra: XYVec)
+        polymer: Option<&Polymer>, extra: XYVec)
     {
         let scale = camera.scale(logical_screen_size());
         let world_offset: GFXPos = (camera.offset + extra).into();
@@ -638,23 +647,27 @@ impl RenderDataBase {
         self.draw_glyph_cover(ctx, glyph, polymer, world_offset, scale);
         self.font.set_pipeline(ctx);
         self.draw_conduit_number(ctx, glyph, world_offset, scale);
-        if let Some(track) = track{
-            self.dragged_track.set(ctx, &track_lines(track));
-            self.draw_stream(ctx, &self.pipeline_tracks, &self.dragged_track, WHITE, world_offset, scale);
-        }
     }
-    //Draws an arm being dragged (in its own state, not the board's), shifted by `extra` (world units) from its hex
-    pub fn draw_dragged_arm(&mut self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize, extra: XYVec){
-        self.dragged_arm.set(ctx, &lone_arm_triangles(arm));
-        self.draw_lone_arm(ctx, camera, &self.dragged_arm, arm, num, extra, 1.);
+    //Draws the tracks being dragged, from their own track data, shifted by `extra` (world units) from their hexes
+    pub fn draw_dragged_tracks(&mut self, ctx: &mut Context, camera: &CameraSetup, tracks: &TrackMaps, extra: XYVec){
+        let scale = camera.scale(logical_screen_size());
+        let world_offset: GFXPos = (camera.offset + extra).into();
+        self.dragged_track.set(ctx, &track_lines(tracks));
+        self.draw_stream(ctx, &self.pipeline_tracks, &self.dragged_track, WHITE, world_offset, scale);
     }
-    //Draws faintly, on its hex, how an arm being dragged starts
-    pub fn draw_arm_start(&mut self, ctx: &mut Context, camera: &CameraSetup, arm: &Arm, num: usize){
-        self.arm_start.set(ctx, &lone_arm_triangles(arm));
-        self.draw_lone_arm(ctx, camera, &self.arm_start, arm, num, XYVec::zeros(), ARM_START_OPACITY);
+    //Draws arms being dragged (in their own state, not the board's), with their numbers, shifted by `extra` (world
+    //units) from their hexes
+    pub fn draw_dragged_arms(&mut self, ctx: &mut Context, camera: &CameraSetup, arms: &[(usize, &Arm)], extra: XYVec){
+        self.dragged_arm.set(ctx, &lone_arms_triangles(arms));
+        self.draw_lone_arms(ctx, camera, &self.dragged_arm, arms, extra, 1.);
     }
-    //Draws an arm from `stream` (holding its lone_arm_triangles) with its number, shifted by `extra` (world units)
-    fn draw_lone_arm(&self, ctx: &mut Context, camera: &CameraSetup, stream: &VertexStream, arm: &Arm, num: usize,
+    //Draws faintly, on their hexes, how the arms being dragged start
+    pub fn draw_arm_starts(&mut self, ctx: &mut Context, camera: &CameraSetup, arms: &[(usize, &Arm)]){
+        self.arm_start.set(ctx, &lone_arms_triangles(arms));
+        self.draw_lone_arms(ctx, camera, &self.arm_start, arms, XYVec::zeros(), ARM_START_OPACITY);
+    }
+    //Draws arms from `stream` (holding their lone_arms_triangles) with their numbers, shifted by `extra` (world units)
+    fn draw_lone_arms(&self, ctx: &mut Context, camera: &CameraSetup, stream: &VertexStream, arms: &[(usize, &Arm)],
         extra: XYVec, opacity: f32)
     {
         let scale = camera.scale(logical_screen_size());
@@ -662,7 +675,9 @@ impl RenderDataBase {
         let fade = |[r, g, b, a]: Color| [r, g, b, a*opacity];
         self.draw_stream(ctx, &self.pipeline, stream, fade(ARM_COLOR), world_offset, scale);
         self.font.set_pipeline(ctx);
-        self.font.render_text_centered(ctx, &(num+1).to_string(), fade(WHITE), pos_to_xy(arm.pos), world_offset, scale);
+        for &(num, arm) in arms{
+            self.font.render_text_centered(ctx, &(num+1).to_string(), fade(WHITE), pos_to_xy(arm.pos), world_offset, scale);
+        }
     }
     //Outlines each hex
     pub fn draw_hex_rings(&self, ctx: &mut Context, camera: &CameraSetup, hexes: &[Pos], color: Color){
@@ -707,6 +722,7 @@ impl RenderDataBase {
     }
 }
 //What to draw for the world: glyph data, plus the moving atoms and arms. `hidden` isn't drawn (it's being dragged).
+//It may hold parts the world doesn't have, which hides nothing.
 pub struct Scene<'a>{
     pub glyphs: &'a [Glyph],
     pub tracks: &'a TrackMaps,
@@ -715,7 +731,7 @@ pub struct Scene<'a>{
     pub walls: &'a [Pos],
     pub area: &'a FxHashSet<Pos>,
     pub float_world: &'a FloatWorld,
-    pub hidden: Option<PartId>,
+    pub hidden: &'a [PartId],
     //Draws the moving atoms faintly (not the ones shown on inputs and outputs)
     pub faded_atoms: bool,
 }

@@ -12,6 +12,24 @@ pub enum RunState{
 pub enum StepKind{
     Layout, Tapes
 }
+//A starting world kept for undo, with what was selected and listed then. Their numbers are the world's, so undoing a
+//layout edit can put them back as they were.
+pub struct Snapshot{
+    pub world: World,
+    selection: BTreeSet<PartId>,
+    list: PartList,
+}
+//What the Part window lists: the parts that the last pick on the board found. Clicks in the list change the selection,
+//not this.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartList{
+    Nothing,
+    //The parts on this hex, as they are now
+    Hex(Pos),
+    //The selection made by a Shift+click, a box or a copy
+    Parts(Vec<PartId>),
+    All,
+}
 //Hidden still checks collisions and counts area, so showing it again doesn't re-simulate
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AreaMode{
@@ -67,11 +85,8 @@ pub struct Loaded{
     pub popup_reload: bool,
 
     //Part editing
-    pub selection: Option<PartId>,
-    //The hex last pressed, whose parts the Part window lists as they are now
-    pub list_hex: Option<Pos>,
-    //The Part window lists every glyph instead
-    pub all_glyphs: bool,
+    pub selection: BTreeSet<PartId>,
+    pub list: PartList,
     //numbering_version at the latest press, for the clicks and drags in that list (see part_window)
     pub list_press_numbering: u64,
     pub allow_overlap: bool,
@@ -87,13 +102,13 @@ pub struct Loaded{
     pub path_text: Option<PathText>,
     //Whatever the mouse would change now, drawn in place, and the tracks other than one it changes
     pub preview: Option<Preview>,
-    pub scene_tracks: Option<(usize, TrackMaps)>,
+    pub scene_tracks: Option<(Vec<usize>, TrackMaps)>,
     pub pointer_over_ui: bool,
     //The hex the mouse was last over, kept while it's over a window
     pub hovered_hex: Option<Pos>,
     //Board input waiting for egui to apply the text field being typed in (see board_input)
     pub waiting_input: Vec<BoardInput>,
-    pub history: UndoHistory<World, StepKind>,
+    pub history: UndoHistory<Snapshot, StepKind>,
     //Counts the changes that may renumber parts: edits that delete or reorder parts, and undoing or redoing a layout
     //edit. Clicks and drags that pick parts by number record it at their press, and do nothing if it changes before
     //they finish.
@@ -133,9 +148,8 @@ impl Loaded{
             watched_hex: None,
             popup_reload: false,
 
-            selection: None,
-            list_hex: None,
-            all_glyphs: false,
+            selection: BTreeSet::new(),
+            list: PartList::Nothing,
             list_press_numbering: 0,
             allow_overlap,
             left_drag_pans: false,
@@ -169,9 +183,12 @@ impl Loaded{
     //Replaces the starting world with one from set_up after a layout edit (which can be undone), then runs back to the
     //shown timestep
     pub fn commit_world(&mut self, world: World){
-        self.history.record(self.timeline.base().clone(), StepKind::Layout);
+        self.history.record(self.snapshot(), StepKind::Layout);
         self.tape_group = None;
         self.replace_base(world);
+    }
+    fn snapshot(&self) -> Snapshot{
+        Snapshot{world: self.timeline.base().clone(), selection: self.selection.clone(), list: self.list.clone()}
     }
     fn replace_base(&mut self, world: World){
         //The pending edit may be unchanged, but its preview was made from the old base
@@ -220,29 +237,30 @@ impl Loaded{
         if self.history_lock().is_some() || !self.history.can_undo(){
             return;
         }
-        let (previous, kind) = self.history.undo(self.timeline.base().clone()).unwrap();
+        let (previous, kind) = self.history.undo(self.snapshot()).unwrap();
         self.restore(previous, kind);
     }
     pub fn redo(&mut self){
         if self.history_lock().is_some() || !self.history.can_redo(){
             return;
         }
-        let (next, kind) = self.history.redo(self.timeline.base().clone()).unwrap();
+        let (next, kind) = self.history.redo(self.snapshot()).unwrap();
         self.restore(next, kind);
     }
-    fn restore(&mut self, world: World, kind: StepKind){
+    fn restore(&mut self, snapshot: Snapshot, kind: StepKind){
         self.tape_group = None;
         match kind{
-            StepKind::Layout => self.restore_base(world),
-            StepKind::Tapes => self.restore_tapes(world),
+            StepKind::Layout => self.restore_base(snapshot),
+            StepKind::Tapes => self.restore_tapes(snapshot.world),
         }
     }
-    //Parts may be numbered differently afterwards, so nothing stays selected, and the tapes' selection shrinks
-    //back to the caret
-    fn restore_base(&mut self, world: World){
-        self.replace_base(world);
+    //Parts may be numbered differently afterwards, so the selection and list go back to the ones numbered for this
+    //world, and the tapes' selection shrinks back to the caret
+    fn restore_base(&mut self, snapshot: Snapshot){
+        self.replace_base(snapshot.world);
         self.numbering_version += 1;
-        self.select(None);
+        self.set_selection(snapshot.selection);
+        self.list = snapshot.list;
         self.tape_sel.collapse();
     }
     //Puts back the tapes and loop length from a step that only changed those. The parts are the same, so the
@@ -260,7 +278,7 @@ impl Loaded{
     //`from` and `to` are the caret before and after the edit.
     pub fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool){
         if !(joins && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
-            self.history.record(self.timeline.base().clone(), StepKind::Tapes);
+            self.history.record(self.snapshot(), StepKind::Tapes);
         }
         self.tape_group = extends.then_some((arms, to));
     }
@@ -303,7 +321,7 @@ impl Loaded{
     }
     //Sets the loop length as an edit of its own, which can be undone
     pub fn edit_repeat_length(&mut self, length: usize){
-        self.history.record(self.timeline.base().clone(), StepKind::Tapes);
+        self.history.record(self.snapshot(), StepKind::Tapes);
         self.tape_group = None;
         let earliest_step = self.change_repeat_length(length);
         self.apply_base_change(earliest_step);
@@ -400,9 +418,7 @@ impl Loaded{
     }
     //The pixel at a hex's center, on a screen of size TEST_SCREEN
     pub fn test_px(&self, x: i32, y: i32) -> (f32, f32){
-        let scale = self.camera.scale(TEST_SCREEN);
-        let world = pos_to_xy(Pos::new(x, y)) + self.camera.offset;
-        ((world.x*scale.0 + 1.)/2.*TEST_SCREEN.0, (1. - world.y*scale.1)/2.*TEST_SCREEN.1)
+        self.camera.world_to_screen(pos_to_xy(Pos::new(x, y)), TEST_SCREEN)
     }
 }
 #[cfg(all(test, feature = "display_ui"))]
@@ -512,7 +528,7 @@ mod watch_tests {
         //Without the editor, left drags always pan
         loaded.left_drag_pans = true;
         loaded.watched_hex = Some(Pos::new(5, 5));
-        loaded.selection = Some(PartId::Arm(0));
+        loaded.select(Some(PartId::Arm(0)));
         loaded.start_picking_hex();
         assert_eq!(loaded.watched_hex, None, "cancelling from here leaves nothing watched");
 
@@ -528,7 +544,7 @@ mod watch_tests {
         loaded.board_input(BoardInput::Release, false);
         assert_eq!(loaded.watched_hex, Some(Pos::new(DROP.0, DROP.1)));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
-        assert_eq!(loaded.selection, Some(PartId::Arm(0)), "picking a hex selects nothing");
+        assert_eq!(loaded.single_selection(), Some(PartId::Arm(0)), "picking a hex selects nothing");
     }
 
     //Esc used to end the pick but leave the pan, so the release then deselected as if the board was clicked
@@ -536,7 +552,7 @@ mod watch_tests {
     fn esc_while_held_drops_only_the_press() {
         let mut loaded = carrier();
         loaded.left_drag_pans = true;
-        loaded.selection = Some(PartId::Arm(0));
+        loaded.select(Some(PartId::Arm(0)));
         loaded.start_picking_hex();
         let at = loaded.test_px(DROP.0, DROP.1);
         loaded.board_input(BoardInput::Press{px: at, screen: TEST_SCREEN, keymods: KeyMods::default()}, false);
@@ -544,7 +560,7 @@ mod watch_tests {
         loaded.board_input(BoardInput::Release, false);
         assert_eq!(loaded.watched_hex, None);
         assert!(matches!(loaded.tool, BoardTool::PickHex(None)), "still picking");
-        assert_eq!(loaded.selection, Some(PartId::Arm(0)));
+        assert_eq!(loaded.single_selection(), Some(PartId::Arm(0)));
         assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
         assert!(matches!(loaded.tool, BoardTool::Select(None)));
     }
@@ -588,7 +604,7 @@ mod watch_tests {
         loaded.update(TEST_FRAME);
         let before = loaded.timeline.time();
         assert!(before > 4.);
-        let output = PartEdit{part: PartId::Glyph(1), delta: Pos::new(0, 0), rot: 1, pivot: Pos::new(DROP.0, DROP.1),
+        let output = PartEdit{parts: vec![PartId::Glyph(1)], delta: Pos::new(0, 0), rot: 1, pivot: Pos::new(DROP.0, DROP.1),
             len: 0, arm_type: None};
         loaded.apply_edit(&LayoutEdit::Part(output)).unwrap();
         assert_eq!(loaded.timeline.base().glyphs[1].rot, 1);

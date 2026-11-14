@@ -65,10 +65,28 @@ pub enum ArmMovement{
 }
 
 //A part of the layout: an index into World::glyphs or World::arms
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum PartId {
     Glyph(usize),
     Arm(usize),
+}
+impl PartId {
+    pub fn kind(self) -> PartKind {
+        match self {PartId::Glyph(_) => PartKind::Glyph, PartId::Arm(_) => PartKind::Arm}
+    }
+    pub fn index(self) -> usize {
+        match self {PartId::Glyph(i) | PartId::Arm(i) => i}
+    }
+}
+//Whether a part is a glyph or an arm. Each kind is numbered on its own.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PartKind {
+    Glyph, Arm,
+}
+impl PartKind {
+    pub fn part(self, index: usize) -> PartId {
+        match self {PartKind::Glyph => PartId::Glyph(index), PartKind::Arm => PartId::Arm(index)}
+    }
 }
 
 #[derive(Debug, Default)]

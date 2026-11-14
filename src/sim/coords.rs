@@ -107,6 +107,26 @@ pub fn rotate(pos: Pos, angle: Rot) -> Pos {
 pub fn rotate_around(pos: Pos, angle: Rot, pivot: Pos) -> Pos {
     rotate(pos - pivot, angle) + pivot
 }
+//Whether any of the hex's area overlaps the rectangle with corners `a` and `b` (opposite, in any order)
+pub fn hex_meets_rect(hex: Pos, a: XYPos, b: XYPos) -> bool {
+    let (min, max) = (a.inf(&b), a.sup(&b));
+    let center = pos_to_xy(hex).coords;
+    //They overlap unless their shadows on some edge's normal are apart. The rectangle's normals are x and y; the
+    //hex's are x and the two at 60 and 120 degrees, and its edges are 1 from its center.
+    let corner = 2. / SQRT3;
+    if center.x + 1. < min.x || center.x - 1. > max.x || center.y + corner < min.y || center.y - corner > max.y {
+        return false;
+    }
+    let rect_corners = [min.coords, max.coords, XYVec::new(min.x, max.y), XYVec::new(max.x, min.y)];
+    [1., 2.].into_iter().all(|sixths: f32| {
+        let angle = sixths * std::f32::consts::PI / 3.;
+        let normal = XYVec::new(angle.cos(), angle.sin());
+        let hex_at = center.dot(&normal);
+        let shadow = rect_corners.iter().map(|c| c.dot(&normal));
+        let (low, high) = shadow.fold((f32::INFINITY, f32::NEG_INFINITY), |(l, h), d| (l.min(d), h.max(d)));
+        high >= hex_at - 1. && low <= hex_at + 1.
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -128,6 +148,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rectangles_meet_hexes_only_where_they_overlap_them() {
+        let hex = Pos::new(2, -1);
+        let at = |x: f32, y: f32| pos_to_xy(hex) + XYVec::new(x, y);
+        //Points as tiny rectangles
+        let meets_point = |x: f32, y: f32| hex_meets_rect(hex, at(x, y), at(x + 0.01, y + 0.01));
+        assert!(meets_point(0., 0.), "inside");
+        assert!(meets_point(0.95, 0.) && !meets_point(1.02, 0.), "either side of the right edge");
+        assert!(meets_point(0., 1.1) && !meets_point(0., 1.17), "either side of the top corner");
+        //Inside the hex's bounding box, but past its upper right edge
+        assert!(meets_point(0.5, 0.8) && !meets_point(0.9, 0.9), "either side of the upper right edge");
+        assert!(!meets_point(-0.9, -0.9), "past the lower left edge");
+        //A rectangle with no corner in the hex, crossing it, given by its other two corners
+        assert!(hex_meets_rect(hex, at(-3., 0.5), at(3., -0.5)));
+        assert!(!hex_meets_rect(hex, at(-3., 1.5), at(3., 1.2)));
     }
 
     #[test]

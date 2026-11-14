@@ -1,7 +1,9 @@
 use miniquad::*;
 use crate::{sim::*, parser, rules, render::*, timeline::Timeline};
-use smallvec::{SmallVec, smallvec};
-use std::{io::BufReader, io::prelude::*, path::PathBuf};
+use smallvec::SmallVec;
+#[cfg(test)]
+use smallvec::smallvec;
+use std::{collections::BTreeSet, io::BufReader, io::prelude::*, path::PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{fs::File, path::Path};
@@ -20,7 +22,7 @@ mod undo;
 mod windows;
 use board::*;
 use layout_edit::*;
-use loaded::{AreaMode, Loaded, RunState};
+use loaded::{AreaMode, Loaded, PartList, RunState};
 use part_window::PathText;
 use tape_grid::{TapeSelection, longest_tape};
 use undo::UndoHistory;
@@ -310,6 +312,7 @@ impl EventHandler for OmcloneApp {
             windows::message_window(egui_ctx, "app_message", &mut self.extra_message);
             match &mut self.app_state{
                 Loaded(loaded) => {
+                    loaded.draw_box_select(egui_ctx, screen_size);
                     windows::timeline_window(egui_ctx, loaded);
                     windows::message_window(egui_ctx, "world_message", &mut loaded.message);
                     windows::crash_window(egui_ctx, loaded);

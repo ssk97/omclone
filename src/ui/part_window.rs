@@ -28,8 +28,7 @@ fn part_fields(ui: &mut egui::Ui, world: &World, now: &World, part: PartId, lock
         PartId::Arm(i) => (world.arms[i].pos, world.arms[i].rot),
     };
     let is_track = matches!(part, PartId::Glyph(i) if world.glyphs[i].is_track());
-    let mut edit = PartEdit::new(part);
-    edit.pivot = pos;
+    let mut edit = PartEdit::new(vec![part]);
     ui.add_enabled_ui(editable, |ui| {
         let (mut x, mut y, mut r) = (pos.x, pos.y, rot);
         ui.horizontal(|ui| {
@@ -45,6 +44,8 @@ fn part_fields(ui: &mut egui::Ui, world: &World, now: &World, part: PartId, lock
         });
         edit.delta = Pos::new(x, y) - pos;
         edit.rot = r - rot;
+        //It turns in place, where it's moved to
+        edit.pivot = pos + edit.delta;
         if let PartId::Arm(i) = part{
             let arm = &world.arms[i];
             ui.horizontal(|ui| {
@@ -107,22 +108,18 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
         //Kept, blank, while nothing is selected, so selecting a part doesn't move what's below
         readout_label(ui, loaded, offset_readout(loaded).unwrap_or_default());
         ui.separator();
+        let mut select_all = false;
         ui.horizontal(|ui| {
-            for (all, label, hover) in [
-                (false, "Parts here", "The parts on the hex last clicked, topmost first. Drag a glyph to reorder it."),
-                (true, "All glyphs", "Every glyph, topmost first. Drag one to reorder it."),
-            ]{
-                if ui.selectable_label(loaded.all_glyphs == all, label).on_hover_text(format!("{hover} {GLYPH_ORDER_HELP}")).clicked(){
-                    loaded.all_glyphs = all;
-                }
-            }
+            ui.label(list_title(&loaded.list)).on_hover_text(format!("{LIST_HELP} Arms run in number order. {GLYPH_ORDER_HELP}"));
+            select_all = ui.button("Select all").on_hover_text("Ctrl+A. Lists every part too.").clicked();
         });
         let action = part_list(ui, loaded);
         ui.separator();
         //Each part's fields keep their own egui state, so text typed for one part is never applied to another
-        match loaded.selection {
-            Some(part) => {ui.push_id(part, |ui| part_section(ui, loaded, part));}
-            None => {ui.weak("No part selected");}
+        match (loaded.single_selection(), loaded.selection.len()) {
+            (Some(part), _) => {ui.push_id(part, |ui| part_section(ui, loaded, part));}
+            (None, 0) => {ui.weak("No part selected");}
+            (None, count) => group_section(ui, loaded, count),
         }
         //After the fields are drawn, so that one being typed in (which the click ends) goes to its own part first.
         //That can renumber the parts (as can an undo or Delete during a drag), and then the part clicked or dragged
@@ -130,92 +127,128 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
         let action = action.filter(|_| loaded.list_press_numbering == loaded.numbering_version);
         match action {
             Some(ListAction::Select(part)) => loaded.select(Some(part)),
-            Some(ListAction::Reorder(edit)) => if let Err(err) = loaded.apply_edit(&edit) {
-                loaded.message = Some(err);
+            Some(ListAction::Toggle(part)) => loaded.toggle_selected(part),
+            Some(ListAction::Reorder(edit, select)) => match loaded.apply_edit(&edit) {
+                Ok(()) => if select.is_some() {loaded.select(select)},
+                Err(err) => loaded.message = Some(err),
             },
             None => {}
         }
+        if select_all {
+            loaded.select_all();
+        }
     });
 }
+const LIST_HELP: &str = "Clicking the board lists the parts on that hex, topmost first. Shift+click or Shift+drag \
+    on the board lists the selection, and Select all lists every part. Click a row to select only it, or Shift+click \
+    it to add or remove it. Drag a row to reorder it, along with the other selected parts of its kind if it's \
+    selected.";
 const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
     overlap, the lower-numbered track wins.";
+fn list_title(list: &PartList) -> String{
+    match list {
+        PartList::Nothing => "Parts".to_owned(),
+        PartList::Hex(hex) => format!("Parts at ({}, {})", hex.x, hex.y),
+        PartList::Parts(parts) => format!("Selected parts ({})", parts.len()),
+        PartList::All => "All parts".to_owned(),
+    }
+}
 //What was done in the Part window's list of parts
 enum ListAction{
     Select(PartId),
-    Reorder(LayoutEdit),
+    Toggle(PartId),
+    //A reorder, and the part to select after it, if any
+    Reorder(LayoutEdit, Option<PartId>),
 }
-//The glyph being dragged in the list of parts
-struct DraggedGlyph(usize);
+//The part whose row is being dragged in the list of parts
+struct DraggedRow(PartId);
 //How many rows the list of parts shows before it scrolls
 const PART_LIST_ROWS: f32 = 12.;
-//The parts on the hex last clicked, or every glyph. Clicking one selects it, and glyphs can be dragged above or below
-//another glyph to reorder them, unless the parts are renumbered in between (see part_window).
+//The parts the Part window lists (see PartList), topmost first: arms, then glyphs, higher numbers first
+fn listed_parts(loaded: &Loaded) -> Vec<PartId>{
+    let base = loaded.timeline.base();
+    let mut parts = match &loaded.list {
+        PartList::Nothing => Vec::new(),
+        //Arms are listed where they are now, as they're picked on the board
+        PartList::Hex(hex) => loaded.timeline.curr().parts_at(*hex),
+        PartList::Parts(parts) => parts.clone(),
+        PartList::All => (0..base.glyphs.len()).map(PartId::Glyph).chain((0..base.arms.len()).map(PartId::Arm)).collect(),
+    };
+    //PartId orders glyphs before arms, each by number
+    parts.sort_by(|a, b| b.cmp(a));
+    parts
+}
+//The parts the last pick on the board found. Clicking one selects it, and a part can be dragged above or below another
+//of its kind to reorder them, unless the parts are renumbered in between (see part_window).
 fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
     let base = loaded.timeline.base();
-    let parts: Vec<PartId> = if loaded.all_glyphs {
-        (0..base.glyphs.len()).rev().map(PartId::Glyph).collect()
-    } else {
-        match loaded.list_hex {
-            //Arms are listed where they are now, as they're picked on the board
-            Some(hex) => loaded.timeline.curr().parts_at(hex),
-            None => {
-                ui.weak("(click the board)");
-                return None;
-            }
-        }
-    };
+    let parts = listed_parts(loaded);
     if parts.is_empty() {
-        ui.weak(if loaded.all_glyphs {"(no glyphs)"} else {"(nothing here now)"});
+        ui.weak(match loaded.list {
+            PartList::Nothing => "(click the board)",
+            PartList::Hex(_) => "(nothing here now)",
+            PartList::Parts(_) | PartList::All => "(none)",
+        });
         return None;
     }
     let row_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
     let ctx = ui.ctx().clone();
-    //A drag that the glyphs were renumbered during would move the wrong one (see part_window), so it's abandoned
+    //A drag that the parts were renumbered during would move the wrong ones (see part_window), so it's abandoned
     let current = loaded.list_press_numbering == loaded.numbering_version;
     if !current {
         egui::DragAndDrop::clear_payload(&ctx);
     }
-    let dragged = egui::DragAndDrop::payload::<DraggedGlyph>(&ctx).map(|d| d.0);
-    //Scrolls to the selection when it, or the list shown, changes
+    let dragged = egui::DragAndDrop::payload::<DraggedRow>(&ctx).map(|d| d.0);
+    //A selected row takes the other selected parts of its kind along
+    let moved: Vec<usize> = match dragged {
+        Some(row) if loaded.selection.contains(&row) =>
+            loaded.selection.iter().filter(|p| p.kind() == row.kind()).map(|p| p.index()).collect(),
+        Some(row) => vec![row.index()],
+        None => Vec::new(),
+    };
+    //Scrolls to the selected part when it, or the list shown, changes
     let shown_id = egui::Id::new("part_list_shown");
-    let shown = (loaded.selection, loaded.all_glyphs);
-    let scroll_to_selection = ctx.data(|d| d.get_temp(shown_id)) != Some(shown);
+    let shown = (loaded.single_selection(), loaded.list.clone());
+    let scroll_to_selection = ctx.data(|d| d.get_temp(shown_id)) != Some(shown.clone());
     ctx.data_mut(|d| d.insert_temp(shown_id, shown));
-    let highlighted = loaded.highlighted_part();
+    let highlighted = loaded.highlighted_parts();
     let can_reorder = loaded.edit_lock().is_none();
     egui::ScrollArea::vertical().id_salt("part_list").max_height(PART_LIST_ROWS * row_height).show(ui, |ui| {
         let mut action = None;
         for &part in &parts {
-            //A dragged glyph's drop target is lit up under its label
+            //A dragged row's drop target is lit up under its label
             let backdrop = ui.painter().add(egui::Shape::Noop);
-            let mut row = ui.selectable_label(highlighted == Some(part), part_label(base, part));
-            if scroll_to_selection && loaded.selection == Some(part) {
+            let mut row = ui.selectable_label(highlighted.contains(&part), part_label(base, part));
+            if scroll_to_selection && loaded.single_selection() == Some(part) {
                 row.scroll_to_me(None);
             }
             if row.clicked() {
-                action = Some(ListAction::Select(part));
+                let toggle = ui.input(|i| i.modifiers.shift);
+                action = Some(if toggle {ListAction::Toggle(part)} else {ListAction::Select(part)});
             }
-            let PartId::Glyph(glyph) = part else {continue};
             if can_reorder {
                 row = row.interact(egui::Sense::drag());
                 if current {
-                    row.dnd_set_drag_payload(DraggedGlyph(glyph));
+                    row.dnd_set_drag_payload(DraggedRow(part));
                 }
             }
-            let Some(from) = dragged else {continue};
+            let Some(from) = dragged.filter(|d| d.kind() == part.kind()) else {continue};
             //The gaps between rows count as the nearer row's, so the target doesn't flicker off between them
             let area = row.rect.expand2(egui::vec2(0., ui.spacing().item_spacing.y / 2.));
             let Some(pointer) = ui.ctx().pointer_latest_pos().filter(|_| ui.rect_contains_pointer(area)) else {continue};
-            //Higher rows have higher numbers, so the top half puts it after this glyph
+            //Higher rows have higher numbers, so the top half puts them after this part
             let after = pointer.y < row.rect.center().y;
-            let Some(to) = reorder_beside(from, glyph, after) else {continue};
+            let Some(to) = reorder_block(&moved, part.index(), after) else {continue};
             let selection = ui.visuals().selection;
             ui.painter().set(backdrop, egui::Shape::rect_filled(row.rect, 2., selection.bg_fill.gamma_multiply(0.4)));
             let edge = if after {row.rect.top()} else {row.rect.bottom()};
             ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
             if ui.input(|i| i.pointer.any_released()) {
                 egui::DragAndDrop::clear_payload(&ctx);
-                action = Some(ListAction::Reorder(LayoutEdit::ReorderGlyph{from, to}));
+                let edit = LayoutEdit::Reorder{kind: part.kind(), moved: moved.clone(), to};
+                //A row that wasn't selected is, once it's moved
+                let select = (!loaded.selection.contains(&from)).then(|| part.kind().part(to));
+                action = Some(ListAction::Reorder(edit, select));
             }
         }
         if dragged.is_some() {
@@ -238,7 +271,7 @@ fn mouse_readout(loaded: &Loaded) -> String{
 }
 //How far the hex under the mouse is from the selected part
 fn offset_readout(loaded: &Loaded) -> Option<String>{
-    let (hex, part) = loaded.hovered_hex.zip(loaded.selection)?;
+    let (hex, part) = loaded.hovered_hex.zip(loaded.single_selection())?;
     let world = loaded.timeline.base();
     let pos = match part{
         PartId::Glyph(i) => world.glyphs[i].pos,
@@ -278,17 +311,14 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
         let field = ui.add_enabled(lock.is_none(), typed_number(&mut number, 1..=count));
         locked_hover(field.on_hover_text(hover), lock);
         if number != index+1{
-            let (from, to) = (index, number-1);
-            edit = Some(match part{
-                PartId::Arm(_) => LayoutEdit::ReorderArm{from, to},
-                PartId::Glyph(_) => LayoutEdit::ReorderGlyph{from, to},
-            });
+            //Taking the part out leaves its new number as its index among the rest
+            edit = Some(LayoutEdit::Reorder{kind: part.kind(), moved: vec![index], to: number-1});
         }
     });
     let lock = loaded.part_lock(part, EditKind::Delete);
     let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
     if locked_hover(delete.on_hover_text("Delete or Backspace"), lock).clicked(){
-        edit = Some(LayoutEdit::Delete(part));
+        edit = Some(LayoutEdit::Delete(vec![part]));
     }
     if let Some(edit) = edit{
         if let Err(err) = loaded.apply_edit(&edit) {
@@ -299,6 +329,19 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     if let PartId::Glyph(i) = part{
         if loaded.timeline.base().glyphs[i].is_track(){
             track_section(ui, loaded, i);
+        }
+    }
+}
+//With several parts selected there are no fields, only Delete
+fn group_section(ui: &mut egui::Ui, loaded: &mut Loaded, count: usize){
+    ui.label(format!("{count} parts selected"));
+    let parts = loaded.editable_parts(loaded.selection.iter().copied().collect(), EditKind::Delete);
+    let lock = loaded.parts_lock(&parts, EditKind::Delete);
+    let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
+    let hover = "Delete or Backspace. Inputs, outputs and conduits stay.";
+    if locked_hover(delete.on_hover_text(hover), lock).clicked(){
+        if let Err(err) = loaded.apply_edit(&LayoutEdit::Delete(parts)) {
+            loaded.message = Some(err);
         }
     }
 }
@@ -519,7 +562,7 @@ mod tests {
     //A solution with these glyphs, its Part window listing the parts at (0,0)
     fn listing_origin(ctx: &egui::Context, glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Loaded {
         let mut loaded = Loaded::for_test(glyphs, arms);
-        loaded.list_hex = Some(Pos::new(0, 0));
+        loaded.list = PartList::Hex(Pos::new(0, 0));
         settle(ctx, &mut loaded);
         loaded
     }
@@ -533,7 +576,7 @@ mod tests {
         let to = top_half(row(&ctx, "Duplication (glyph 3)"));
         drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
         assert_eq!(glyph_types(&loaded), vec![Calcification, Duplication, Bonding]);
-        assert_eq!(loaded.selection, Some(PartId::Glyph(2)));
+        assert_eq!(loaded.single_selection(), Some(PartId::Glyph(2)));
         frame(&ctx, &mut loaded, vec![]);
         row(&ctx, "Bonder (glyph 3)");
     }
@@ -570,12 +613,12 @@ mod tests {
     }
 
     #[test]
-    fn all_glyphs_lists_and_reorders_glyphs_elsewhere() {
+    fn the_whole_list_reorders_glyphs_elsewhere() {
         use GlyphType::*;
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification)], vec![]);
-        loaded.list_hex = Some(Pos::new(0, 0));
-        loaded.all_glyphs = true;
+        loaded.list = PartList::Hex(Pos::new(0, 0));
+        loaded.list = PartList::All;
         settle(&ctx, &mut loaded);
         let to = top_half(row(&ctx, "Calcification (glyph 2)"));
         drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
@@ -591,7 +634,7 @@ mod tests {
             let ctx = context();
             let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification),
                 glyph(6, 0, Duplication)], vec![]);
-            loaded.all_glyphs = true;
+            loaded.list = PartList::All;
             loaded.select(Some(PartId::Glyph(0)));
             settle(&ctx, &mut loaded);
             type_at(&ctx, &mut loaded, number_field(&ctx, "Glyph #:"), "3");
@@ -603,7 +646,7 @@ mod tests {
                 frame(&ctx, &mut loaded, click(other));
             }
             assert_eq!(glyph_types(&loaded), vec![Calcification, Duplication, Bonding], "the typed number applies");
-            assert_eq!(loaded.selection, Some(PartId::Glyph(2)), "the bonder stays selected");
+            assert_eq!(loaded.single_selection(), Some(PartId::Glyph(2)), "the bonder stays selected");
         }
     }
 
@@ -614,7 +657,7 @@ mod tests {
         use GlyphType::*;
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification)], vec![]);
-        loaded.all_glyphs = true;
+        loaded.list = PartList::All;
         let add = LayoutEdit::Add{part: NewPart::Glyph(Duplication), pos: Pos::new(6, 0), rot: 0, len: 1};
         assert_eq!(loaded.apply_edit(&add), Ok(()));
         settle(&ctx, &mut loaded);
@@ -637,7 +680,7 @@ mod tests {
         type_into(&ctx, &mut loaded, WidgetType::DragValue, "2");
         tap_board(&ctx, &mut loaded, 4, 0);
         assert_eq!(positions(&loaded), vec![Pos::new(2, 0), Pos::new(4, 0)]);
-        assert_eq!(loaded.selection, Some(PartId::Glyph(1)));
+        assert_eq!(loaded.single_selection(), Some(PartId::Glyph(1)));
     }
 
     #[test]
@@ -645,12 +688,91 @@ mod tests {
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(4, 0)], vec![]);
         loaded.select(Some(PartId::Glyph(0)));
-        loaded.all_glyphs = true;
+        loaded.list = PartList::All;
         type_into(&ctx, &mut loaded, WidgetType::DragValue, "2");
         let other = widget(&ctx, |w| w.label.as_deref() == Some("Bonder (glyph 2)"));
         frame(&ctx, &mut loaded, click(other));
         assert_eq!(positions(&loaded), vec![Pos::new(2, 0), Pos::new(4, 0)]);
-        assert_eq!(loaded.selection, Some(PartId::Glyph(1)));
+        assert_eq!(loaded.single_selection(), Some(PartId::Glyph(1)));
+    }
+
+    fn all_listed(ctx: &egui::Context, glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Loaded {
+        let mut loaded = Loaded::for_test(glyphs, arms);
+        loaded.select_all();
+        settle(ctx, &mut loaded);
+        loaded
+    }
+    fn selected(parts: &[PartId]) -> BTreeSet<PartId> {
+        parts.iter().copied().collect()
+    }
+
+    #[test]
+    fn select_all_lists_every_part_and_clicks_dont_change_the_list() {
+        use GlyphType::*;
+        let ctx = context();
+        let arm = Arm::new(Pos::new(9, 9), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = all_listed(&ctx, vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification)], vec![arm]);
+        assert_eq!(loaded.selection.len(), 3);
+        row(&ctx, "3 parts selected");
+        frame(&ctx, &mut loaded, click(row(&ctx, "Bonder (glyph 1)").center()));
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]), "a click selects only that row's part");
+        frame(&ctx, &mut loaded, vec![]);
+        row(&ctx, "Arm 1 (Arm)");
+        row(&ctx, "Calcification (glyph 2)");
+        //Shift+click adds a row's part, then takes it out
+        let arm_row = row(&ctx, "Arm 1 (Arm)").center();
+        let shift_click = |ctx: &egui::Context, loaded: &mut Loaded| {
+            let input = RawInput{events: click(arm_row), modifiers: egui::Modifiers::SHIFT, ..Default::default()};
+            let _ = ctx.run_ui(input, |ui| part_window(ui.ctx(), loaded));
+        };
+        shift_click(&ctx, &mut loaded);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0), PartId::Arm(0)]));
+        shift_click(&ctx, &mut loaded);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]));
+        assert_eq!(loaded.list, PartList::All);
+    }
+
+    #[test]
+    fn dragging_a_selected_row_moves_the_selected_parts_of_its_kind() {
+        use GlyphType::*;
+        let ctx = context();
+        let arm = Arm::new(Pos::new(9, 9), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = all_listed(&ctx, vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification), glyph(6, 0, Duplication),
+            glyph(9, 0, Disposal)], vec![arm]);
+        loaded.set_selection(selected(&[PartId::Glyph(0), PartId::Glyph(2), PartId::Arm(0)]));
+        frame(&ctx, &mut loaded, vec![]);
+        //Above glyph 4, which puts them after it, in their order
+        let to = top_half(row(&ctx, "Disposal (glyph 4)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Bonder (glyph 1)").center(), to);
+        assert_eq!(glyph_types(&loaded), vec![Calcification, Disposal, Bonding, Duplication]);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(2), PartId::Glyph(3), PartId::Arm(0)]),
+            "they stay selected");
+    }
+
+    #[test]
+    fn arm_rows_reorder_the_arms() {
+        let ctx = context();
+        let arms = (0..3).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm,
+            Tape::new(i as usize, vec![Instr::Grab]))).collect();
+        let mut loaded = all_listed(&ctx, vec![], arms);
+        loaded.select(None);
+        frame(&ctx, &mut loaded, vec![]);
+        let to = top_half(row(&ctx, "Arm 3 (Arm)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Arm 1 (Arm)").center(), to);
+        let order: Vec<(i32, usize)> = loaded.timeline.base().arms.iter().map(|a| (a.pos.x, a.tape().first)).collect();
+        assert_eq!(order, vec![(3, 1), (6, 2), (0, 0)], "it takes its tape along");
+        assert_eq!(loaded.selection, selected(&[PartId::Arm(2)]), "a row that wasn't selected is once it's moved");
+    }
+
+    #[test]
+    fn several_selected_parts_have_no_fields_but_can_be_deleted() {
+        let ctx = context();
+        let salt = vec![Atom::new(Pos::new(0, 0), AtomType::Salt)];
+        let input = glyph(0, 0, GlyphType::Input(smallvec::smallvec![salt], 0));
+        let mut loaded = all_listed(&ctx, vec![input, bonder(3, 0), bonder(6, 0)], vec![]);
+        assert!(widget_rect(&ctx, |w| w.typ == WidgetType::DragValue).is_none(), "no fields");
+        frame(&ctx, &mut loaded, click(row(&ctx, "Delete").center()));
+        assert_eq!(positions(&loaded), vec![Pos::new(0, 0)], "the input stays");
     }
 
     #[test]
@@ -662,6 +784,6 @@ mod tests {
         type_into(&ctx, &mut loaded, WidgetType::TextEdit, "d");
         tap_board(&ctx, &mut loaded, 5, 5);
         assert_eq!(track_path(loaded.timeline.base(), 0), vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)]);
-        assert_eq!(loaded.selection, None);
+        assert_eq!(loaded.single_selection(), None);
     }
 }

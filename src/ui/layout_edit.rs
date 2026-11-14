@@ -1,12 +1,13 @@
 //Edits to the layout (the parts and where they start), and how parts are named
 use super::*;
 
-//An edit to one part of the layout: it moves by `delta`, then rotates by `rot`. A glyph rotates around `pivot`, and an
-//arm turns in place (it covers one hex, and at later timesteps it may be grabbed far from where it starts).
-//Arms can also change length and type.
-#[derive(Clone, Copy, Debug, PartialEq)]
+//An edit to some parts of the layout: each moves by `delta`, then rotates by `rot` around `pivot`. Arms can also
+//change length (each clamped to what its type allows) and type.
+//A lone arm is turned in place by giving its own start as `pivot`: at later timesteps it may be grabbed far from
+//where it starts.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PartEdit{
-    pub part: PartId,
+    pub parts: Vec<PartId>,
     pub delta: Pos,
     pub rot: Rot,
     pub pivot: Pos,
@@ -14,17 +15,17 @@ pub struct PartEdit{
     pub arm_type: Option<ArmType>,
 }
 impl PartEdit{
-    pub fn new(part: PartId) -> Self{
-        PartEdit{part, delta: Pos::zeros(), rot: 0, pivot: Pos::zeros(), len: 0, arm_type: None}
+    pub fn new(parts: Vec<PartId>) -> Self{
+        PartEdit{parts, delta: Pos::zeros(), rot: 0, pivot: Pos::zeros(), len: 0, arm_type: None}
     }
     pub fn is_noop(&self) -> bool{
         self.delta == Pos::zeros() && self.rot == 0 && self.len == 0 && self.arm_type.is_none()
     }
 }
-//Moves, rotates and resizes the part in place
-fn edit_part(layout: &mut InitialWorld, edit: &PartEdit){
+//Moves, rotates and resizes one part in place
+fn edit_part(layout: &mut InitialWorld, part: PartId, edit: &PartEdit){
     let place = |pos: Pos| rotate_around(pos + edit.delta, edit.rot, edit.pivot);
-    match edit.part{
+    match part{
         PartId::Glyph(i) => {
             let glyph = &mut layout.glyphs[i];
             glyph.pos = place(glyph.pos);
@@ -39,7 +40,7 @@ fn edit_part(layout: &mut InitialWorld, edit: &PartEdit){
         }
         PartId::Arm(i) => {
             let arm = &mut layout.arms[i];
-            arm.pos += edit.delta;
+            arm.pos = place(arm.pos);
             arm.rot = (arm.rot + edit.rot) % 6;
             if let Some(arm_type) = edit.arm_type{
                 arm.arm_type = arm_type;
@@ -68,25 +69,28 @@ pub enum LayoutEdit{
     Part(PartEdit),
     //A new part at `pos`; arms start with an empty tape
     Add{part: NewPart, pos: Pos, rot: Rot, len: i32},
-    //A copy of the edited part (an arm's copy has the same tape), with the edit applied to the copy
+    //Copies of the edited parts (an arm's copy has the same tape), with the edit applied to the copies. The copies
+    //go last, in the order of `parts`.
     Duplicate(PartEdit),
-    Delete(PartId),
-    //Renumbers a part, shifting the ones between; nothing changes position on the board
-    ReorderArm{from: usize, to: usize},
-    ReorderGlyph{from: usize, to: usize},
+    Delete(Vec<PartId>),
+    //Takes the parts of this kind numbered `moved` (as indexes, in order) out, and puts them back in that order
+    //starting at index `to` among the rest. Nothing changes position on the board.
+    Reorder{kind: PartKind, moved: Vec<usize>, to: usize},
     //Gives a track this path (absolute hexes), or adds a new track if `glyph` is None
     SetTrack{glyph: Option<usize>, path: Vec<Pos>},
 }
 impl LayoutEdit{
-    //The layout after the edit, and the part it placed or changed (none for a deletion)
-    pub fn apply(&self, world: &World) -> (InitialWorld, Option<PartId>){
+    //The layout after the edit, and the parts it placed or changed (none for a deletion or a reorder)
+    pub fn apply(&self, world: &World) -> (InitialWorld, Vec<PartId>){
         let mut layout = world.layout();
-        let part = match self{
+        let parts = match self{
             LayoutEdit::Part(edit) => {
-                edit_part(&mut layout, edit);
-                Some(edit.part)
+                for &part in &edit.parts{
+                    edit_part(&mut layout, part, edit);
+                }
+                edit.parts.clone()
             }
-            LayoutEdit::Add{part, pos, rot, len} => Some(match part{
+            LayoutEdit::Add{part, pos, rot, len} => vec![match part{
                 NewPart::Glyph(glyph_type) => {
                     layout.glyphs.push(Glyph{pos: *pos, rot: normalize_dir(*rot), glyph_type: glyph_type.clone()});
                     PartId::Glyph(layout.glyphs.len()-1)
@@ -96,9 +100,9 @@ impl LayoutEdit{
                     layout.arms.push(Arm::new(*pos, *rot, len, *arm_type, Tape::new(0, Vec::new())));
                     PartId::Arm(layout.arms.len()-1)
                 }
-            }),
+            }],
             LayoutEdit::Duplicate(edit) => {
-                let copy = match edit.part{
+                let copies: Vec<PartId> = edit.parts.iter().map(|&part| match part{
                     PartId::Glyph(i) => {
                         layout.glyphs.push(layout.glyphs[i].clone());
                         PartId::Glyph(layout.glyphs.len()-1)
@@ -107,26 +111,28 @@ impl LayoutEdit{
                         layout.arms.push(layout.arms[i].clone());
                         PartId::Arm(layout.arms.len()-1)
                     }
-                };
-                edit_part(&mut layout, &PartEdit{part: copy, ..*edit});
-                Some(copy)
-            }
-            LayoutEdit::Delete(part) => {
-                match *part{
-                    PartId::Glyph(i) => {layout.glyphs.remove(i);}
-                    PartId::Arm(i) => {layout.arms.remove(i);}
+                }).collect();
+                for &copy in &copies{
+                    edit_part(&mut layout, copy, edit);
                 }
-                None
+                copies
             }
-            LayoutEdit::ReorderArm{from, to} => {
-                let arm = layout.arms.remove(*from);
-                layout.arms.insert(*to, arm);
-                Some(PartId::Arm(*to))
+            LayoutEdit::Delete(parts) => {
+                let (mut glyphs, mut arms) = (Vec::new(), Vec::new());
+                for &part in parts{
+                    match part {PartId::Glyph(i) => glyphs.push(i), PartId::Arm(i) => arms.push(i)}
+                }
+                remove_all(&mut layout.glyphs, glyphs);
+                remove_all(&mut layout.arms, arms);
+                Vec::new()
             }
-            LayoutEdit::ReorderGlyph{from, to} => {
-                let glyph = layout.glyphs.remove(*from);
-                layout.glyphs.insert(*to, glyph);
-                Some(PartId::Glyph(*to))
+            LayoutEdit::Reorder{kind: PartKind::Glyph, moved, to} => {
+                move_block(&mut layout.glyphs, moved, *to);
+                Vec::new()
+            }
+            LayoutEdit::Reorder{kind: PartKind::Arm, moved, to} => {
+                move_block(&mut layout.arms, moved, *to);
+                Vec::new()
             }
             LayoutEdit::SetTrack{glyph, path} => {
                 //The track's position is its first hex
@@ -142,50 +148,73 @@ impl LayoutEdit{
                         layout.glyphs.len()-1
                     }
                 };
-                Some(PartId::Glyph(i))
+                vec![PartId::Glyph(i)]
             }
         };
-        (layout, part)
+        (layout, parts)
     }
-    //Whether it adds, removes or renumbers parts, so the part it returns (none for a deletion) is selected
-    //instead of keeping the selection
+    //Whether it adds or removes parts, so the parts it returns are selected instead of the selection kept
     pub fn is_structural(&self) -> bool{
-        !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..})
+        !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..} | LayoutEdit::Reorder{..})
     }
     //Whether parts it keeps may have other numbers afterwards (see renumbered)
     pub fn renumbers(&self) -> bool{
-        matches!(self, LayoutEdit::ReorderArm{..} | LayoutEdit::ReorderGlyph{..} | LayoutEdit::Delete(_))
+        matches!(self, LayoutEdit::Reorder{..} | LayoutEdit::Delete(_))
     }
     //The number that a part numbered `part` before the edit has after it, or None if the edit deletes it
     pub fn renumbered(&self, part: PartId) -> Option<PartId>{
-        //As in apply: taken out at `from`, then put back in at `to`
-        let reorder = |i: usize, from: usize, to: usize| {
-            if i == from {
-                return to;
+        let i = part.index();
+        match self{
+            LayoutEdit::Delete(parts) => {
+                if parts.contains(&part){
+                    return None;
+                }
+                let deleted_below = parts.iter().filter(|p| p.kind() == part.kind() && p.index() < i).count();
+                Some(part.kind().part(i - deleted_below))
             }
-            let removed = if i > from {i - 1} else {i};
-            if removed >= to {removed + 1} else {removed}
-        };
-        let delete = |i: usize, deleted: usize| (i != deleted).then_some(if i > deleted {i - 1} else {i});
-        match (self, part){
-            (LayoutEdit::ReorderArm{from, to}, PartId::Arm(i)) => Some(PartId::Arm(reorder(i, *from, *to))),
-            (LayoutEdit::ReorderGlyph{from, to}, PartId::Glyph(i)) => Some(PartId::Glyph(reorder(i, *from, *to))),
-            (LayoutEdit::Delete(PartId::Arm(deleted)), PartId::Arm(i)) => delete(i, *deleted).map(PartId::Arm),
-            (LayoutEdit::Delete(PartId::Glyph(deleted)), PartId::Glyph(i)) => delete(i, *deleted).map(PartId::Glyph),
+            //As in apply: the block goes in at `to` among the rest, which keep their order
+            LayoutEdit::Reorder{kind, moved, to} if *kind == part.kind() => {
+                let now = match moved.iter().position(|&m| m == i){
+                    Some(place) => to + place,
+                    None => {
+                        let among_rest = i - moved.iter().filter(|&&m| m < i).count();
+                        if among_rest < *to {among_rest} else {among_rest + moved.len()}
+                    }
+                };
+                Some(kind.part(now))
+            }
             _ => Some(part),
         }
     }
 }
-//The number (as an index) that puts the part numbered `dragged` directly after `anchor` (or before it, if not
-//`after`), with the parts between shifting over. None if it's already there.
-pub fn reorder_beside(dragged: usize, anchor: usize, after: bool) -> Option<usize>{
-    if dragged == anchor{
+//Removes the items at these indexes
+fn remove_all<T>(items: &mut Vec<T>, mut indexes: Vec<usize>){
+    //From the back, so each removal leaves the indexes still to go where they were
+    indexes.sort_unstable();
+    indexes.dedup();
+    for i in indexes.into_iter().rev(){
+        items.remove(i);
+    }
+}
+//Takes the items at `moved` (indexes in increasing order) out and puts them back in order, starting at index `to`
+//among the rest
+fn move_block<T>(items: &mut Vec<T>, moved: &[usize], to: usize){
+    let mut taken: Vec<T> = moved.iter().rev().map(|&i| items.remove(i)).collect();
+    taken.reverse();
+    items.splice(to..to, taken);
+}
+//The `to` of a Reorder that puts the parts numbered `moved` (indexes in increasing order) directly after `anchor`
+//(or before it, if not `after`), in their order, with the other parts keeping theirs. None if that changes nothing.
+pub fn reorder_block(moved: &[usize], anchor: usize, after: bool) -> Option<usize>{
+    if moved.contains(&anchor){
         return None;
     }
-    //Taking out a part before the anchor shifts the anchor down one
-    let anchor_after_removal = if dragged < anchor {anchor - 1} else {anchor};
-    let to = if after {anchor_after_removal + 1} else {anchor_after_removal};
-    (to != dragged).then_some(to)
+    //Taking out the parts before the anchor shifts it down
+    let anchor_among_rest = anchor - moved.iter().filter(|&&m| m < anchor).count();
+    let to = if after {anchor_among_rest + 1} else {anchor_among_rest};
+    //Only a run of consecutive numbers put back where it was stays the same
+    let unchanged = moved.windows(2).all(|w| w[1] == w[0] + 1) && moved.first() == Some(&to);
+    (!unchanged).then_some(to)
 }
 //A track's hexes, in global positions
 pub fn track_path(world: &World, glyph: usize) -> Vec<Pos>{
@@ -287,7 +316,7 @@ mod tests {
         let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding)], vec![]);
         //Held by its second hex at (1,0), moved two hexes right, then rotated
         let held = Pos::new(3, 0);
-        let edit = PartEdit { delta: Pos::new(2, 0), rot: 1, pivot: held, ..PartEdit::new(PartId::Glyph(0)) };
+        let edit = PartEdit { delta: Pos::new(2, 0), rot: 1, pivot: held, ..PartEdit::new(vec![PartId::Glyph(0)]) };
         let moved = edited(&w, edit);
         assert_eq!(moved.glyphs[0].rot, 1);
         assert!(moved.glyph_footprint(0).contains(&held));
@@ -298,7 +327,7 @@ mod tests {
     fn tracks_rotate_their_path() {
         let path = vec![Pos::new(0, 0), Pos::new(1, 0), Pos::new(2, 0)];
         let w = world(vec![glyph(5, 5, 0, GlyphType::Track(path))], vec![]);
-        let edit = PartEdit { rot: 2, pivot: Pos::new(5, 5), ..PartEdit::new(PartId::Glyph(0)) };
+        let edit = PartEdit { rot: 2, pivot: Pos::new(5, 5), ..PartEdit::new(vec![PartId::Glyph(0)]) };
         let rotated = edited(&w, edit);
         assert_eq!(rotated.glyphs[0].rot, 0);
         let expected: Vec<Pos> = (0..3).map(|i| Pos::new(5, 5) + rotate(Pos::new(i, 0), 2)).collect();
@@ -310,9 +339,9 @@ mod tests {
     #[test]
     fn arm_edits_clamp_length() {
         let w = world(vec![], vec![arm(0, 0, 2, ArmType::Piston), arm(4, 0, 1, ArmType::PlainArm)]);
-        let longer = edited(&w, PartEdit { len: 5, ..PartEdit::new(PartId::Arm(0)) });
+        let longer = edited(&w, PartEdit { len: 5, ..PartEdit::new(vec![PartId::Arm(0)]) });
         assert_eq!(longer.arms[0].len, 3);
-        let wheel = edited(&w, PartEdit { len: 1, arm_type: Some(ArmType::VanBerlo), ..PartEdit::new(PartId::Arm(1)) });
+        let wheel = edited(&w, PartEdit { len: 1, arm_type: Some(ArmType::VanBerlo), ..PartEdit::new(vec![PartId::Arm(1)]) });
         assert_eq!((wheel.arms[1].len, wheel.arms[1].arm_type), (1, ArmType::VanBerlo));
         assert_eq!(wheel.cost, w.cost + 10, "a wheel costs more than a plain arm");
         assert_eq!(tape(&wheel, 0), tape(&w, 0));
@@ -326,10 +355,10 @@ mod tests {
         let w = world(vec![conduit_a, conduit_b, track, glyph(3, 3, 0, GlyphType::Unification)],
             vec![arm(0, 4, 1, ArmType::PlainArm)]);
         let edits = [
-            PartEdit { delta: Pos::new(0, -3), rot: 1, pivot: Pos::new(0, -3), ..PartEdit::new(PartId::Glyph(0)) },
-            PartEdit { delta: Pos::new(1, 1), rot: -2, pivot: Pos::new(1, 5), ..PartEdit::new(PartId::Glyph(2)) },
-            PartEdit { rot: 3, pivot: Pos::new(4, 3), ..PartEdit::new(PartId::Glyph(3)) },
-            PartEdit { delta: Pos::new(2, 2), rot: -1, pivot: Pos::new(2, 6), len: 1, ..PartEdit::new(PartId::Arm(0)) },
+            PartEdit { delta: Pos::new(0, -3), rot: 1, pivot: Pos::new(0, -3), ..PartEdit::new(vec![PartId::Glyph(0)]) },
+            PartEdit { delta: Pos::new(1, 1), rot: -2, pivot: Pos::new(1, 5), ..PartEdit::new(vec![PartId::Glyph(2)]) },
+            PartEdit { rot: 3, pivot: Pos::new(4, 3), ..PartEdit::new(vec![PartId::Glyph(3)]) },
+            PartEdit { delta: Pos::new(2, 2), rot: -1, pivot: Pos::new(2, 6), len: 1, ..PartEdit::new(vec![PartId::Arm(0)]) },
         ];
         let mut w = w;
         for edit in edits {
@@ -349,12 +378,12 @@ mod tests {
     fn added_parts_go_last() {
         let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding)], vec![arm(5, 5, 1, ArmType::PlainArm)]);
         let edit = LayoutEdit::Add{part: NewPart::Glyph(GlyphType::Calcification), pos: Pos::new(3, 1), rot: 2, len: 1};
-        assert_eq!(edit.apply(&w).1, Some(PartId::Glyph(1)));
+        assert_eq!(edit.apply(&w).1, vec![PartId::Glyph(1)]);
         let with_glyph = round_trip(&applied(&w, edit));
         assert_eq!((with_glyph.glyphs[1].pos, with_glyph.glyphs[1].rot), (Pos::new(3, 1), 2));
 
         let edit = LayoutEdit::Add{part: NewPart::Arm(ArmType::Piston), pos: Pos::new(-2, 0), rot: -1, len: 7};
-        assert_eq!(edit.apply(&w).1, Some(PartId::Arm(1)));
+        assert_eq!(edit.apply(&w).1, vec![PartId::Arm(1)]);
         let with_arm = round_trip(&applied(&w, edit));
         let arm = &with_arm.arms[1];
         assert_eq!((arm.pos, arm.rot, arm.len, arm.arm_type), (Pos::new(-2, 0), -1, 3, ArmType::Piston));
@@ -371,11 +400,11 @@ mod tests {
             Arm::new(Pos::new(0, 3), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Grab])),
             Arm::new(Pos::new(3, 3), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Drop])),
         ]);
-        assert_eq!(LayoutEdit::Delete(PartId::Arm(0)).apply(&w).1, None);
-        let no_arm = round_trip(&applied(&w, LayoutEdit::Delete(PartId::Arm(0))));
+        assert_eq!(LayoutEdit::Delete(vec![PartId::Arm(0)]).apply(&w).1, vec![]);
+        let no_arm = round_trip(&applied(&w, LayoutEdit::Delete(vec![PartId::Arm(0)])));
         assert_eq!(no_arm.arms.len(), 1);
         assert_eq!((no_arm.arms[0].pos, tape(&no_arm, 0)), (Pos::new(3, 3), vec![Instr::Drop]));
-        let no_glyph = applied(&w, LayoutEdit::Delete(PartId::Glyph(0)));
+        let no_glyph = applied(&w, LayoutEdit::Delete(vec![PartId::Glyph(0)]));
         assert_eq!(no_glyph.glyphs.len(), 1);
         assert_eq!(no_glyph.glyphs[0].glyph_type, GlyphType::Calcification);
     }
@@ -385,17 +414,35 @@ mod tests {
         let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding)], vec![
             Arm::new(Pos::new(0, 3), 1, 2, ArmType::Piston, Tape::new(0, vec![Instr::Grab, Instr::Extend])),
         ]);
-        let edit = LayoutEdit::Duplicate(PartEdit{delta: Pos::new(4, 0), ..PartEdit::new(PartId::Arm(0))});
-        assert_eq!(edit.apply(&w).1, Some(PartId::Arm(1)));
+        let edit = LayoutEdit::Duplicate(PartEdit{delta: Pos::new(4, 0), ..PartEdit::new(vec![PartId::Arm(0)])});
+        assert_eq!(edit.apply(&w).1, vec![PartId::Arm(1)]);
         let copied = round_trip(&applied(&w, edit));
         assert_eq!(copied.arms[0].pos, Pos::new(0, 3), "the original stays");
         let copy = &copied.arms[1];
         assert_eq!((copy.pos, copy.rot, copy.len, copy.arm_type), (Pos::new(4, 3), 1, 2, ArmType::Piston));
         assert_eq!(tape(&copied, 1), tape(&w, 0));
 
-        let edit = LayoutEdit::Duplicate(PartEdit{rot: 1, pivot: Pos::new(0, 0), ..PartEdit::new(PartId::Glyph(0))});
+        let edit = LayoutEdit::Duplicate(PartEdit{rot: 1, pivot: Pos::new(0, 0), ..PartEdit::new(vec![PartId::Glyph(0)])});
         let copied = applied(&w, edit);
         assert_eq!((copied.glyphs[0].rot, copied.glyphs[1].rot), (0, 1));
+    }
+
+    #[test]
+    fn a_group_turns_together_about_the_pivot() {
+        let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(5, 5, 0, GlyphType::Calcification)],
+            vec![arm(2, 0, 1, ArmType::PlainArm)]);
+        let group = vec![PartId::Glyph(0), PartId::Arm(0)];
+        let edit = PartEdit{delta: Pos::new(0, 1), rot: 1, pivot: Pos::new(0, 1), ..PartEdit::new(group.clone())};
+        let turned = edited(&w, edit.clone());
+        assert_eq!((turned.glyphs[0].pos, turned.glyphs[0].rot), (Pos::new(0, 1), 1));
+        assert_eq!((turned.arms[0].pos, turned.arms[0].rot), (Pos::new(0, 1) + rotate(Pos::new(2, 0), 1), 1));
+        assert_eq!(turned.glyphs[1].pos, Pos::new(5, 5), "only the group moves");
+
+        let copied = applied(&w, LayoutEdit::Duplicate(edit));
+        assert_eq!((copied.glyphs.len(), copied.arms.len()), (3, 2));
+        assert_eq!((copied.glyphs[2].pos, copied.arms[1].pos), (turned.glyphs[0].pos, turned.arms[0].pos));
+        assert_eq!(tape(&copied, 1), tape(&w, 0));
+        assert_eq!((copied.glyphs[0].pos, copied.arms[0].pos), (Pos::new(0, 0), Pos::new(2, 0)), "the originals stay");
     }
 
     #[test]
@@ -403,8 +450,7 @@ mod tests {
         let arms = (0..3).map(|i| Arm::new(Pos::new(i*2, 0), 0, 1, ArmType::PlainArm,
             Tape::new(i as usize, vec![Instr::Grab]))).collect();
         let w = world(vec![], arms);
-        let edit = LayoutEdit::ReorderArm{from: 0, to: 2};
-        assert_eq!(edit.apply(&w).1, Some(PartId::Arm(2)));
+        let edit = LayoutEdit::Reorder{kind: PartKind::Arm, moved: vec![0], to: 2};
         let moved = round_trip(&applied(&w, edit));
         let order: Vec<(i32, usize)> = moved.arms.iter().map(|a| (a.pos.x, a.tape().first)).collect();
         assert_eq!(order, vec![(2, 1), (4, 2), (0, 0)]);
@@ -414,8 +460,7 @@ mod tests {
     fn reordered_glyphs_are_saved_in_their_new_order() {
         let w = world(vec![glyph(0, 0, 0, GlyphType::Bonding), glyph(0, 0, 0, GlyphType::Calcification),
             glyph(0, 0, 0, GlyphType::Disposal)], vec![]);
-        let edit = LayoutEdit::ReorderGlyph{from: 2, to: 0};
-        assert_eq!(edit.apply(&w).1, Some(PartId::Glyph(0)));
+        let edit = LayoutEdit::Reorder{kind: PartKind::Glyph, moved: vec![2], to: 0};
         let reordered = round_trip(&applied(&w, edit));
         let types: Vec<GlyphType> = reordered.glyphs.iter().map(|g| g.glyph_type.clone()).collect();
         assert_eq!(types, vec![GlyphType::Disposal, GlyphType::Bonding, GlyphType::Calcification]);
@@ -424,23 +469,27 @@ mod tests {
     #[test]
     fn renumbered_parts_are_where_the_edit_puts_them() {
         //Each part has its own position, to tell them apart
-        let glyphs = (0..4).map(|i| glyph(i * 3, 0, 0, GlyphType::Bonding)).collect();
-        let arms = (0..4).map(|i| arm(i * 3, 5, 1, ArmType::PlainArm)).collect();
+        let glyphs = (0..5).map(|i| glyph(i * 3, 0, 0, GlyphType::Bonding)).collect();
+        let arms = (0..5).map(|i| arm(i * 3, 5, 1, ArmType::PlainArm)).collect();
         let w = world(glyphs, arms);
         let pos = |layout: &InitialWorld, part| match part {
             PartId::Glyph(i) => layout.glyphs[i].pos,
             PartId::Arm(i) => layout.arms[i].pos,
         };
-        let parts: Vec<PartId> = (0..4).map(PartId::Glyph).chain((0..4).map(PartId::Arm)).collect();
+        let parts: Vec<PartId> = (0..5).map(PartId::Glyph).chain((0..5).map(PartId::Arm)).collect();
         use LayoutEdit::*;
-        for edit in [ReorderGlyph{from: 0, to: 2}, ReorderGlyph{from: 3, to: 1}, ReorderArm{from: 1, to: 3},
-            ReorderArm{from: 2, to: 0}, Delete(PartId::Glyph(1)), Delete(PartId::Arm(2))]
+        let reorder = |kind, moved: &[usize], to| Reorder{kind, moved: moved.to_vec(), to};
+        for edit in [reorder(PartKind::Glyph, &[0], 2), reorder(PartKind::Glyph, &[3], 1),
+            reorder(PartKind::Arm, &[1], 3), reorder(PartKind::Arm, &[2], 0), reorder(PartKind::Glyph, &[0, 2, 3], 1),
+            reorder(PartKind::Arm, &[1, 4], 0), reorder(PartKind::Arm, &[0, 1], 3),
+            Delete(vec![PartId::Glyph(1)]), Delete(vec![PartId::Arm(2)]),
+            Delete(vec![PartId::Glyph(3), PartId::Arm(0), PartId::Glyph(1), PartId::Arm(4)])]
         {
             let after = edit.apply(&w).0;
             for &part in &parts {
                 match edit.renumbered(part) {
                     Some(now) => assert_eq!(pos(&after, now), pos(&w.layout(), part), "{edit:?} moves {part:?}"),
-                    None => assert_eq!(edit, Delete(part), "only a deleted part is gone"),
+                    None => assert!(matches!(&edit, Delete(deleted) if deleted.contains(&part)), "only a deleted part is gone"),
                 }
             }
         }
@@ -454,29 +503,33 @@ mod tests {
         let w = world(vec![across, up], vec![]);
         let crossing = Pos::new(1, 0);
         assert_eq!(w.track_maps.plus.get(&crossing), Some(&Pos::new(1, 0)));
-        let reordered = applied(&w, LayoutEdit::ReorderGlyph{from: 1, to: 0});
+        let reordered = applied(&w, LayoutEdit::Reorder{kind: PartKind::Glyph, moved: vec![1], to: 0});
         assert_eq!(reordered.track_maps.plus.get(&crossing), Some(&Pos::new(0, 1)));
     }
 
     #[test]
-    fn reorder_beside_puts_the_part_next_to_the_anchor() {
-        //Parts 0..6; each case is where part `dragged` ends up, and the order that gives
-        let order = |dragged: usize, anchor: usize, after: bool| {
-            let to = reorder_beside(dragged, anchor, after)?;
-            let mut parts: Vec<usize> = (0..6).collect();
-            let part = parts.remove(dragged);
-            parts.insert(to, part);
-            Some(parts)
+    fn reorder_block_puts_the_parts_next_to_the_anchor() {
+        //Glyphs 0..6, told apart by x; each case is the order of the glyphs (by their old numbers) afterwards
+        let w = world((0..6).map(|i| glyph(i * 3, 0, 0, GlyphType::Bonding)).collect(), vec![]);
+        let order = |moved: &[usize], anchor: usize, after: bool| {
+            let to = reorder_block(moved, anchor, after)?;
+            let edit = LayoutEdit::Reorder{kind: PartKind::Glyph, moved: moved.to_vec(), to};
+            Some(edit.apply(&w).0.glyphs.iter().map(|g| (g.pos.x / 3) as usize).collect::<Vec<_>>())
         };
-        assert_eq!(order(1, 4, true), Some(vec![0, 2, 3, 4, 1, 5]));
-        assert_eq!(order(1, 4, false), Some(vec![0, 2, 3, 1, 4, 5]));
-        assert_eq!(order(4, 1, true), Some(vec![0, 1, 4, 2, 3, 5]));
-        assert_eq!(order(4, 1, false), Some(vec![0, 4, 1, 2, 3, 5]));
-        assert_eq!(order(5, 0, false), Some(vec![5, 0, 1, 2, 3, 4]));
-        assert_eq!(order(0, 5, true), Some(vec![1, 2, 3, 4, 5, 0]));
-        assert_eq!(order(2, 2, true), None, "beside itself");
-        assert_eq!(order(2, 3, false), None, "already just before it");
-        assert_eq!(order(2, 1, true), None, "already just after it");
+        assert_eq!(order(&[1], 4, true), Some(vec![0, 2, 3, 4, 1, 5]));
+        assert_eq!(order(&[1], 4, false), Some(vec![0, 2, 3, 1, 4, 5]));
+        assert_eq!(order(&[4], 1, true), Some(vec![0, 1, 4, 2, 3, 5]));
+        assert_eq!(order(&[4], 1, false), Some(vec![0, 4, 1, 2, 3, 5]));
+        assert_eq!(order(&[5], 0, false), Some(vec![5, 0, 1, 2, 3, 4]));
+        assert_eq!(order(&[0], 5, true), Some(vec![1, 2, 3, 4, 5, 0]));
+        assert_eq!(order(&[0, 3], 5, false), Some(vec![1, 2, 4, 0, 3, 5]), "a block keeps its order");
+        assert_eq!(order(&[1, 4], 2, true), Some(vec![0, 2, 1, 4, 3, 5]), "from either side of the anchor");
+        assert_eq!(order(&[2, 4], 3, true), Some(vec![0, 1, 3, 2, 4, 5]), "gathered after a part between them");
+        assert_eq!(order(&[2], 2, true), None, "beside itself");
+        assert_eq!(order(&[2, 4], 4, true), None, "beside one of the block");
+        assert_eq!(order(&[2], 3, false), None, "already just before it");
+        assert_eq!(order(&[2], 1, true), None, "already just after it");
+        assert_eq!(order(&[2, 3], 4, false), None, "a run already just before it");
     }
 
     #[test]
@@ -489,7 +542,7 @@ mod tests {
         assert_eq!(reshaped.track_maps.plus.get(&Pos::new(6, 6)), Some(&Pos::new(3, 3)));
 
         let edit = LayoutEdit::SetTrack{glyph: None, path: vec![Pos::new(-3, 0)]};
-        assert_eq!(edit.apply(&w).1, Some(PartId::Glyph(1)));
+        assert_eq!(edit.apply(&w).1, vec![PartId::Glyph(1)]);
         let added = round_trip(&applied(&w, edit));
         assert_eq!(track_path(&added, 1), vec![Pos::new(-3, 0)]);
         assert_eq!(added.cost, w.cost + 5);

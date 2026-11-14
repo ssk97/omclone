@@ -308,7 +308,7 @@ impl Layout{
         let (anchor, _) = self.cell_at(pos, arms, steps);
         //Lower rows have higher numbers, so the bottom half puts it after this arm
         let after = pos.y >= self.cell_rect(anchor, 0).center().y;
-        Some((anchor, after, reorder_beside(from, anchor, after)?))
+        Some((anchor, after, reorder_block(&[from], anchor, after)?))
     }
     //The cell at `pos`, clamped to the grid
     fn cell_at(&self, pos: Pos2, arms: usize, steps: usize) -> (usize, usize){
@@ -541,7 +541,7 @@ pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             loaded.tape_sel.drag_from = None;
             loaded.tape_sel.reorder_from = None;
             if let (Some(from), Some((_, _, to))) = (reorder_from, reorder){
-                if let Err(err) = loaded.apply_edit(&LayoutEdit::ReorderArm{from, to}){
+                if let Err(err) = loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Arm, moved: vec![from], to}){
                     loaded.message = Some(err);
                 }
             }
