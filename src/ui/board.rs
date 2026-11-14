@@ -1,8 +1,12 @@
 //Picking, dragging and previewing parts on the board, placing new ones, and reshaping track
 use super::*;
 
-//Moving the mouse this far (in pixels) with the button held starts a drag
-pub const DRAG_THRESHOLD_PX: f32 = 4.;
+//Moving the mouse further than this (in pixels) with the button held starts a drag
+const DRAG_THRESHOLD_PX: f32 = 4.;
+pub fn past_drag_threshold(from: (f32, f32), to: (f32, f32)) -> bool{
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    dx*dx + dy*dy > DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX
+}
 //How fast the view moves while a panning key is held, in pixels a second
 const KEY_PAN_PX_PER_SEC: f64 = 600.;
 //Which way a panning key moves the view, in screen pixels (y down)
@@ -133,7 +137,7 @@ pub struct TrackStroke{
 pub struct Preview{
     edit: LayoutEdit,
     //The parts it places or changes
-    parts: Vec<PartId>,
+    parts: BTreeSet<PartId>,
     layout: InitialWorld,
     pub world: std::result::Result<World, String>,
     float_world: FloatWorld,
@@ -149,7 +153,7 @@ pub struct Preview{
     overlaps: Vec<Pos>,
 }
 impl Preview{
-    fn arms_at(world: &std::result::Result<World, String>, parts: &[PartId], timestep: u64) -> Vec<(usize, Arm)>{
+    fn arms_at(world: &std::result::Result<World, String>, parts: &BTreeSet<PartId>, timestep: u64) -> Vec<(usize, Arm)>{
         let Ok(world) = world else {return Vec::new()};
         parts.iter().filter_map(|&part| match part {PartId::Arm(i) => Some(i), _ => None})
             .map(|i| (i, world.arm_after(i, timestep))).collect()
@@ -201,42 +205,40 @@ impl Loaded{
         }
     }
     //Why some of the parts can't be edited this way right now, if any can't
-    pub fn parts_lock(&self, parts: &[PartId], kind: EditKind) -> Option<&'static str>{
-        parts.iter().find_map(|&part| self.part_lock(part, kind))
+    pub fn parts_lock(&self, parts: impl IntoIterator<Item=PartId>, kind: EditKind) -> Option<&'static str>{
+        parts.into_iter().find_map(|part| self.part_lock(part, kind))
     }
     //The parts an edit of this kind can change, out of `parts`. Copying or deleting a group leaves out the puzzle's
     //own parts; if those are all there is, all of `parts` are kept, so the edit is refused with the reason.
-    pub fn editable_parts(&self, parts: Vec<PartId>, kind: EditKind) -> Vec<PartId>{
+    pub fn editable_parts(&self, parts: impl IntoIterator<Item=PartId>, kind: EditKind) -> Vec<PartId>{
+        let parts: Vec<PartId> = parts.into_iter().collect();
         let editable: Vec<PartId> = parts.iter().copied().filter(|&part| self.part_lock(part, kind).is_none()).collect();
         if editable.is_empty() {parts} else {editable}
     }
     fn layout_edit_lock(&self, edit: &LayoutEdit) -> Option<&'static str>{
-        match edit{
-            LayoutEdit::Part(e) => self.parts_lock(&e.parts, EditKind::Move),
-            LayoutEdit::Duplicate(e) => self.parts_lock(&e.parts, EditKind::Duplicate),
-            LayoutEdit::Delete(parts) => self.parts_lock(parts, EditKind::Delete),
-            LayoutEdit::Reorder{kind, moved, ..} => {
-                let parts: Vec<PartId> = moved.iter().map(|&i| kind.part(i)).collect();
-                self.parts_lock(&parts, EditKind::Reorder)
-            }
-            LayoutEdit::Add{..} | LayoutEdit::SetTrack{..} => self.edit_lock(),
-        }
+        //First, so an edit of no parts is locked too
+        self.edit_lock().or_else(|| match edit{
+            LayoutEdit::Part(e) => self.parts_lock(e.parts.iter().copied(), EditKind::Move),
+            LayoutEdit::Duplicate(e) => self.parts_lock(e.parts.iter().copied(), EditKind::Duplicate),
+            LayoutEdit::Delete(parts) => self.parts_lock(parts.iter().copied(), EditKind::Delete),
+            LayoutEdit::Reorder{kind, moved, ..} => self.parts_lock(moved.iter().map(|&i| kind.part(i)), EditKind::Reorder),
+            LayoutEdit::Add{..} | LayoutEdit::SetTrack{..} => None,
+        })
     }
     //Why the held parts can't be dragged, if they can't
     pub fn press_lock(&self) -> Option<&'static str>{
         let press = self.tool.press()?;
-        let parts = self.editable_parts(self.grabbed_parts(press), press.kind());
-        self.parts_lock(&parts, press.kind())
+        self.parts_lock(self.editable_parts(self.grabbed_parts(press), press.kind()), press.kind())
     }
     //The parts a press drags: the selection if the pressed part is in it, otherwise just that part
-    fn grabbed_parts(&self, press: &Press) -> Vec<PartId>{
-        if self.selection.contains(&press.part()) {self.selection.iter().copied().collect()} else {vec![press.part()]}
+    fn grabbed_parts(&self, press: &Press) -> BTreeSet<PartId>{
+        if self.selection.contains(&press.part()) {self.selection.clone()} else {BTreeSet::from([press.part()])}
     }
     //The parts to outline: the ones the press would drag while the mouse is held, otherwise the selection
-    pub fn highlighted_parts(&self) -> Vec<PartId>{
+    pub fn highlighted_parts(&self) -> BTreeSet<PartId>{
         match self.tool.press(){
             Some(press) => self.grabbed_parts(press),
-            None => self.selection.iter().copied().collect(),
+            None => self.selection.clone(),
         }
     }
     //The selected part, if there's just one
@@ -270,9 +272,7 @@ impl Loaded{
     }
     //Selects every part, and lists them all
     pub fn select_all(&mut self){
-        let world = self.timeline.base();
-        let all = (0..world.glyphs.len()).map(PartId::Glyph).chain((0..world.arms.len()).map(PartId::Arm)).collect();
-        self.set_selection(all);
+        self.set_selection(self.timeline.base().all_parts().collect());
         self.list = PartList::All;
     }
     //Lists the selection, after a pick that changed it
@@ -301,7 +301,7 @@ impl Loaded{
     }
     //Makes the edit if it's allowed. The parts it adds are selected, and copies are listed too.
     pub fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
-        if matches!(edit, LayoutEdit::Part(e) if e.is_noop()){
+        if edit.is_noop(){
             return Ok(());
         }
         if let Some(reason) = self.layout_edit_lock(edit){
@@ -487,8 +487,7 @@ impl Loaded{
     //The parts the box would add: those with any hex in it, where they are now
     fn parts_in_box(&self, selecting: &BoxSelect) -> Vec<PartId>{
         let world = self.timeline.curr();
-        let parts = (0..world.glyphs.len()).map(PartId::Glyph).chain((0..world.arms.len()).map(PartId::Arm));
-        parts.filter(|&part| world.part_footprint(part).iter()
+        world.all_parts().filter(|&part| world.part_footprint(part).iter()
             .any(|&hex| hex_meets_rect(hex, selecting.press_xy, selecting.cursor_xy))).collect()
     }
     fn finish_box(&mut self, selecting: BoxSelect){
@@ -572,8 +571,7 @@ impl Loaded{
     fn pointer_moved(&mut self, px: (f32, f32), screen_size: (f32, f32), over_ui: bool){
         //First, so the cursor's world position below is where it is after panning
         if let Some(mut pan) = self.pan.take(){
-            let (dx, dy) = (px.0 - pan.press_px.0, px.1 - pan.press_px.1);
-            if !pan.panning && dx*dx + dy*dy > DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX{
+            if !pan.panning && past_drag_threshold(pan.press_px, px){
                 pan.panning = true;
                 self.list = pan.list.clone();
                 self.cancel_press();
@@ -609,16 +607,14 @@ impl Loaded{
         }
         if let BoardTool::Select(Some(Held::Box(selecting))) = &mut self.tool{
             selecting.cursor_xy = cursor_xy;
-            let (dx, dy) = (px.0 - selecting.press_px.0, px.1 - selecting.press_px.1);
-            selecting.dragged |= dx*dx + dy*dy > DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX;
+            selecting.dragged |= past_drag_threshold(selecting.press_px, px);
         }
         let draggable = self.tool.press().is_some() && self.press_lock().is_none() && !self.left_drag_pans();
         let Some(press) = self.tool.press_mut() else {return};
         match &mut press.drag{
             Some(drag) => drag.cursor_xy = cursor_xy,
             None => {
-                let (dx, dy) = (px.0 - press.press_px.0, px.1 - press.press_px.1);
-                if draggable && dx*dx + dy*dy > DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX{
+                if draggable && past_drag_threshold(press.press_px, px){
                     press.drag = Some(Drag{cursor_xy, rot: 0, len: 0});
                 }
             }
@@ -670,9 +666,11 @@ impl Loaded{
             return;
         };
         let edit = self.press_edit(&press, drag);
-        //A group stays selected
+        //A group stays selected and listed. A lone part may have been reached from a group's press (see cycle), which
+        //didn't list the hex.
         if self.grabbed_parts(&press).len() == 1{
             self.select(Some(press.part()));
+            self.list = PartList::Hex(press.press_hex);
         }
         if let Err(err) = self.apply_edit(&edit){
             self.message = Some(err);
@@ -747,7 +745,8 @@ impl Loaded{
                     return false;
                 }
                 self.cancel_press();
-                if let Err(err) = self.apply_edit(&LayoutEdit::Delete(self.editable_parts(parts, EditKind::Delete))){
+                let parts = self.editable_parts(parts, EditKind::Delete).into_iter().collect();
+                if let Err(err) = self.apply_edit(&LayoutEdit::Delete(parts)){
                     self.message = Some(err);
                 }
             }
@@ -899,6 +898,7 @@ impl Loaded{
         let base = self.timeline.base();
         let (layout, parts) = edit.apply(base);
         assert!(!parts.is_empty(), "a pending edit places or changes parts");
+        let parts: BTreeSet<PartId> = parts.into_iter().collect();
         let timestep = self.timeline.curr().timestep;
         let world = self.set_up(&layout);
         let mut glyphs = Vec::new();
@@ -1007,7 +1007,7 @@ impl Loaded{
         let Some((preview, (_, extra))) = self.preview.as_ref().zip(self.pending_edit()) else {
             let world = self.timeline.curr();
             let scene = Scene{glyphs: &world.glyphs, tracks: &world.track_maps, polymers: &world.polymers,
-                walls: &world.chambers.walls, area: &world.area_touched, float_world: &self.float_world, hidden: &[],
+                walls: &world.chambers.walls, area: &world.area_touched, float_world: &self.float_world, hidden: &BTreeSet::new(),
                 faded_atoms: self.atoms_faded};
             render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
             render.draw_hex_fills(ctx, &self.camera, hover.as_slice(), HOVER_COLOR);
@@ -1461,7 +1461,7 @@ mod tests {
         let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].tape().first;
         assert_eq!(loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Arm, moved: vec![0], to: 3}), Ok(()));
         assert_eq!(caret_arm(&loaded), 2);
-        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(vec![PartId::Arm(0)])), Ok(()));
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete([PartId::Arm(0)].into())), Ok(()));
         assert_eq!(caret_arm(&loaded), 2);
     }
 
@@ -1725,7 +1725,7 @@ mod tests {
         let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(3, 0), bonder(6, 0)], vec![]);
         shift_click(&mut loaded, 3, 0);
         shift_click(&mut loaded, 6, 0);
-        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(vec![PartId::Glyph(0)])), Ok(()));
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete([PartId::Glyph(0)].into())), Ok(()));
         assert!(loaded.selection.is_empty(), "a deletion selects nothing");
         assert_eq!(loaded.list, PartList::Parts(vec![PartId::Glyph(0), PartId::Glyph(1)]), "the list keeps its parts");
         assert_eq!(glyph_positions(&loaded), vec![Pos::new(3, 0), Pos::new(6, 0)]);
@@ -1752,5 +1752,28 @@ mod tests {
         assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
         assert!(loaded.selection.is_empty());
         assert!(!loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+    }
+
+    //The list kept showing the group, though a click on the same part listed the hex
+    #[test]
+    fn a_lone_part_reached_from_a_groups_press_lists_its_hex_when_dropped() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(1, 0), bonder(5, 5)], vec![]);
+        shift_click(&mut loaded, 0, 0);
+        shift_click(&mut loaded, 5, 5);
+        //Both of the first two bonders cover (1,0). The press holds the selected one, with the group.
+        press(&mut loaded, 1, 0, KeyMods::default());
+        assert_eq!(loaded.tool.press().map(Press::part), Some(PartId::Glyph(0)));
+        loaded.handle_key(KeyCode::Tab, KeyMods::default());
+        move_to(&mut loaded, 1, 3);
+        loaded.release();
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]));
+        assert_eq!(loaded.list, PartList::Hex(Pos::new(1, 0)));
+    }
+
+    #[test]
+    fn an_edit_of_no_parts_isnt_a_step_of_undo() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete(BTreeSet::new())), Ok(()));
+        assert!(!loaded.history.can_undo());
     }
 }

@@ -364,7 +364,12 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
             }
         }
     }
-    let Some(step) = step else {return};
+    let Some(step) = step else {
+        //An arm's number also selects the tapes' selected arms on the board
+        let arms = sel.arms().map(PartId::Arm).collect();
+        loaded.set_selection(arms);
+        return;
+    };
     if shift{
         //Selecting timesteps by clicking covers the clicked one
         let anchor = *sel.anchor_step.get_or_insert(sel.caret);
@@ -935,6 +940,21 @@ mod editing_tests {
         drag_grid(&ctx, &mut loaded, number(&layout, 0), to, vec![]);
         assert_eq!(arm_order(&loaded), vec![1, 2, 0, 3]);
         assert_eq!(loaded.tape_sel.arms(), 2..3, "the caret is on its new row");
+        assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(2)]), "and it's selected on the board");
+    }
+
+    #[test]
+    fn arm_numbers_select_their_arms_on_the_board() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], numbered_arms(4));
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
+        assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(1)]));
+        let shift_click = egui::RawInput{events: quick_click(number(&layout, 3)), modifiers: Modifiers::SHIFT, ..Default::default()};
+        let _ = ctx.run_ui(shift_click, |ui| {tape_grid(ui, &mut loaded);});
+        assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)]), "Shift takes the rows between");
+        grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 2).center()));
+        assert_eq!(loaded.selection.len(), 3, "a cell leaves the board's selection alone");
     }
 
     #[test]
@@ -949,7 +969,7 @@ mod editing_tests {
 
         grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
         assert_eq!(arm_order(&loaded), vec![0, 1, 2, 3]);
-        assert_eq!(loaded.tape_sel.arms(), 1..2, "a click only selects the row");
+        assert_eq!(loaded.tape_sel.arms(), 1..2, "a click only selects the row and its arm");
     }
 
     #[test]

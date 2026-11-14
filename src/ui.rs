@@ -530,8 +530,7 @@ impl EventHandler for OmcloneApp {
             },
             _ => {
                 self.dragging = None;
-                let clicked = self.right_press.take().is_some_and(|(px, py)|
-                    (x-px)*(x-px) + (y-py)*(y-py) <= DRAG_THRESHOLD_PX*DRAG_THRESHOLD_PX);
+                let clicked = self.right_press.take().is_some_and(|press| !past_drag_threshold(press, (x, y)));
                 if let (MouseButton::Right, true, Loaded(loaded)) = (mb, clicked, &mut self.app_state){
                     loaded.right_click();
                 }
@@ -629,7 +628,9 @@ impl EventHandler for OmcloneApp {
             //fades the atoms from the tapes.
             let ctx = self.egui_mq.egui_ctx();
             let typing = ctx.text_edit_focused() || (tape_grid::has_focus(ctx) && keycode != KeyCode::Key1);
-            if !typing && loaded.handle_key(keycode, keymods){
+            //Esc closes an open menu or dropdown before the board lets go of anything
+            let closes_popup = keycode == KeyCode::Escape && egui::Popup::is_any_open(ctx);
+            if !typing && !closes_popup && loaded.handle_key(keycode, keymods){
                 return;
             }
         }

@@ -172,7 +172,7 @@ fn listed_parts(loaded: &Loaded) -> Vec<PartId>{
         //Arms are listed where they are now, as they're picked on the board
         PartList::Hex(hex) => loaded.timeline.curr().parts_at(*hex),
         PartList::Parts(parts) => parts.clone(),
-        PartList::All => (0..base.glyphs.len()).map(PartId::Glyph).chain((0..base.arms.len()).map(PartId::Arm)).collect(),
+        PartList::All => base.all_parts().collect(),
     };
     //PartId orders glyphs before arms, each by number
     parts.sort_by(|a, b| b.cmp(a));
@@ -318,7 +318,7 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
     let lock = loaded.part_lock(part, EditKind::Delete);
     let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
     if locked_hover(delete.on_hover_text("Delete or Backspace"), lock).clicked(){
-        edit = Some(LayoutEdit::Delete(vec![part]));
+        edit = Some(LayoutEdit::Delete([part].into()));
     }
     if let Some(edit) = edit{
         if let Err(err) = loaded.apply_edit(&edit) {
@@ -335,12 +335,12 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
 //With several parts selected there are no fields, only Delete
 fn group_section(ui: &mut egui::Ui, loaded: &mut Loaded, count: usize){
     ui.label(format!("{count} parts selected"));
-    let parts = loaded.editable_parts(loaded.selection.iter().copied().collect(), EditKind::Delete);
-    let lock = loaded.parts_lock(&parts, EditKind::Delete);
+    let parts = loaded.editable_parts(loaded.selection.iter().copied(), EditKind::Delete);
+    let lock = loaded.parts_lock(parts.iter().copied(), EditKind::Delete);
     let delete = ui.add_enabled(lock.is_none(), egui::Button::new("Delete"));
     let hover = "Delete or Backspace. Inputs, outputs and conduits stay.";
     if locked_hover(delete.on_hover_text(hover), lock).clicked(){
-        if let Err(err) = loaded.apply_edit(&LayoutEdit::Delete(parts)) {
+        if let Err(err) = loaded.apply_edit(&LayoutEdit::Delete(parts.into_iter().collect())) {
             loaded.message = Some(err);
         }
     }
@@ -617,7 +617,6 @@ mod tests {
         use GlyphType::*;
         let ctx = context();
         let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification)], vec![]);
-        loaded.list = PartList::Hex(Pos::new(0, 0));
         loaded.list = PartList::All;
         settle(&ctx, &mut loaded);
         let to = top_half(row(&ctx, "Calcification (glyph 2)"));

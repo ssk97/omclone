@@ -276,7 +276,8 @@ impl World {
             _ => a != b,
         }
     }
-    fn all_parts(&self) -> impl Iterator<Item=PartId> {
+    //Every glyph, then every arm
+    pub fn all_parts(&self) -> impl Iterator<Item=PartId> {
         (0..self.glyphs.len()).map(PartId::Glyph).chain((0..self.arms.len()).map(PartId::Arm))
     }
     //The parts covering a hex, in drawing order from the top: arms (later first), then glyphs (later first)

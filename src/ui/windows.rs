@@ -206,7 +206,8 @@ const PART_WINDOW_HELP: &[HelpEntry] = &[
 const TAPE_HELP: &[HelpEntry] = &[
     both("Click a cell", "Move the caret, and the timeline, there"),
     both("Click the ruler", "Go to that timestep"),
-    both("Click an arm number", "Select its row"),
+    both("Click an arm number", "Select its row, and the arm on the board"),
+    both("Shift+click an arm number", "Select the rows to it, and their arms on the board"),
     editor("Drag an arm number", "Reorder the arms"),
     both("Drag; Shift+click; Shift+arrows", "Select"),
     both("Arrows", "Move the caret"),

@@ -72,7 +72,7 @@ pub enum LayoutEdit{
     //Copies of the edited parts (an arm's copy has the same tape), with the edit applied to the copies. The copies
     //go last, in the order of `parts`.
     Duplicate(PartEdit),
-    Delete(Vec<PartId>),
+    Delete(BTreeSet<PartId>),
     //Takes the parts of this kind numbered `moved` (as indexes, in order) out, and puts them back in that order
     //starting at index `to` among the rest. Nothing changes position on the board.
     Reorder{kind: PartKind, moved: Vec<usize>, to: usize},
@@ -153,6 +153,15 @@ impl LayoutEdit{
         };
         (layout, parts)
     }
+    //Whether it changes nothing, so it isn't worth a step of undo
+    pub fn is_noop(&self) -> bool{
+        match self{
+            LayoutEdit::Part(edit) => edit.is_noop(),
+            LayoutEdit::Delete(parts) => parts.is_empty(),
+            LayoutEdit::Reorder{moved, ..} => moved.is_empty(),
+            LayoutEdit::Add{..} | LayoutEdit::Duplicate(_) | LayoutEdit::SetTrack{..} => false,
+        }
+    }
     //Whether it adds or removes parts, so the parts it returns are selected instead of the selection kept
     pub fn is_structural(&self) -> bool{
         !matches!(self, LayoutEdit::Part(_) | LayoutEdit::SetTrack{glyph: Some(_), ..} | LayoutEdit::Reorder{..})
@@ -187,11 +196,9 @@ impl LayoutEdit{
         }
     }
 }
-//Removes the items at these indexes
-fn remove_all<T>(items: &mut Vec<T>, mut indexes: Vec<usize>){
+//Removes the items at these indexes, which are in increasing order
+fn remove_all<T>(items: &mut Vec<T>, indexes: Vec<usize>){
     //From the back, so each removal leaves the indexes still to go where they were
-    indexes.sort_unstable();
-    indexes.dedup();
     for i in indexes.into_iter().rev(){
         items.remove(i);
     }
@@ -206,7 +213,7 @@ fn move_block<T>(items: &mut Vec<T>, moved: &[usize], to: usize){
 //The `to` of a Reorder that puts the parts numbered `moved` (indexes in increasing order) directly after `anchor`
 //(or before it, if not `after`), in their order, with the other parts keeping theirs. None if that changes nothing.
 pub fn reorder_block(moved: &[usize], anchor: usize, after: bool) -> Option<usize>{
-    if moved.contains(&anchor){
+    if moved.is_empty() || moved.contains(&anchor){
         return None;
     }
     //Taking out the parts before the anchor shifts it down
@@ -400,11 +407,11 @@ mod tests {
             Arm::new(Pos::new(0, 3), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Grab])),
             Arm::new(Pos::new(3, 3), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Drop])),
         ]);
-        assert_eq!(LayoutEdit::Delete(vec![PartId::Arm(0)]).apply(&w).1, vec![]);
-        let no_arm = round_trip(&applied(&w, LayoutEdit::Delete(vec![PartId::Arm(0)])));
+        assert_eq!(LayoutEdit::Delete([PartId::Arm(0)].into()).apply(&w).1, vec![]);
+        let no_arm = round_trip(&applied(&w, LayoutEdit::Delete([PartId::Arm(0)].into())));
         assert_eq!(no_arm.arms.len(), 1);
         assert_eq!((no_arm.arms[0].pos, tape(&no_arm, 0)), (Pos::new(3, 3), vec![Instr::Drop]));
-        let no_glyph = applied(&w, LayoutEdit::Delete(vec![PartId::Glyph(0)]));
+        let no_glyph = applied(&w, LayoutEdit::Delete([PartId::Glyph(0)].into()));
         assert_eq!(no_glyph.glyphs.len(), 1);
         assert_eq!(no_glyph.glyphs[0].glyph_type, GlyphType::Calcification);
     }
@@ -482,8 +489,8 @@ mod tests {
         for edit in [reorder(PartKind::Glyph, &[0], 2), reorder(PartKind::Glyph, &[3], 1),
             reorder(PartKind::Arm, &[1], 3), reorder(PartKind::Arm, &[2], 0), reorder(PartKind::Glyph, &[0, 2, 3], 1),
             reorder(PartKind::Arm, &[1, 4], 0), reorder(PartKind::Arm, &[0, 1], 3),
-            Delete(vec![PartId::Glyph(1)]), Delete(vec![PartId::Arm(2)]),
-            Delete(vec![PartId::Glyph(3), PartId::Arm(0), PartId::Glyph(1), PartId::Arm(4)])]
+            Delete([PartId::Glyph(1)].into()), Delete([PartId::Arm(2)].into()),
+            Delete([PartId::Glyph(3), PartId::Arm(0), PartId::Glyph(1), PartId::Arm(4)].into())]
         {
             let after = edit.apply(&w).0;
             for &part in &parts {
@@ -525,6 +532,7 @@ mod tests {
         assert_eq!(order(&[0, 3], 5, false), Some(vec![1, 2, 4, 0, 3, 5]), "a block keeps its order");
         assert_eq!(order(&[1, 4], 2, true), Some(vec![0, 2, 1, 4, 3, 5]), "from either side of the anchor");
         assert_eq!(order(&[2, 4], 3, true), Some(vec![0, 1, 3, 2, 4, 5]), "gathered after a part between them");
+        assert_eq!(order(&[], 2, true), None, "nothing to move");
         assert_eq!(order(&[2], 2, true), None, "beside itself");
         assert_eq!(order(&[2, 4], 4, true), None, "beside one of the block");
         assert_eq!(order(&[2], 3, false), None, "already just before it");

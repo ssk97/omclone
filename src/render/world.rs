@@ -4,7 +4,7 @@ use crate::sim::*;
 use super::{glyphs::*, library::*};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use std::f32::consts::PI;
+use std::{collections::BTreeSet, f32::consts::PI};
 
 //note: 1 hex has inner radius of 1 (width of 2), see sim/coords.rs
 //Appends the arm's triangles in world space: one from the base to each grabber's tip, and a grab marker at the tip
@@ -731,7 +731,7 @@ pub struct Scene<'a>{
     pub walls: &'a [Pos],
     pub area: &'a FxHashSet<Pos>,
     pub float_world: &'a FloatWorld,
-    pub hidden: &'a [PartId],
+    pub hidden: &'a BTreeSet<PartId>,
     //Draws the moving atoms faintly (not the ones shown on inputs and outputs)
     pub faded_atoms: bool,
 }
