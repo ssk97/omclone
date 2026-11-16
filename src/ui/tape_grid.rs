@@ -365,9 +365,10 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
         }
     }
     let Some(step) = step else {
-        //An arm's number also selects the tapes' selected arms on the board
+        //An arm's number also selects the tapes' selected arms on the board, and the Part window lists them
         let arms = sel.arms().map(PartId::Arm).collect();
         loaded.set_selection(arms);
+        loaded.list_selection();
         return;
     };
     if shift{
@@ -953,6 +954,7 @@ mod editing_tests {
         let shift_click = egui::RawInput{events: quick_click(number(&layout, 3)), modifiers: Modifiers::SHIFT, ..Default::default()};
         let _ = ctx.run_ui(shift_click, |ui| {tape_grid(ui, &mut loaded);});
         assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)]), "Shift takes the rows between");
+        assert_eq!(loaded.list, PartList::Parts(vec![PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)]), "and lists them");
         grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 2).center()));
         assert_eq!(loaded.selection.len(), 3, "a cell leaves the board's selection alone");
     }

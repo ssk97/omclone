@@ -280,7 +280,7 @@ impl Loaded{
         self.list = PartList::All;
     }
     //Lists the selection, after a pick that changed it
-    fn list_selection(&mut self){
+    pub fn list_selection(&mut self){
         self.list = PartList::Parts(self.selection.iter().copied().collect());
     }
     fn check_overlap(&self, overlaps: &[Pos]) -> std::result::Result<(), String>{
@@ -479,12 +479,14 @@ impl Loaded{
     fn press_edit(&self, press: &Press, drag: &Drag) -> std::result::Result<LayoutEdit, &'static str>{
         let landing = xy_to_pos(press.held_xy(drag));
         let delta = landing - press.press_hex;
-        let parts = self.editable_parts(self.grabbed_parts(press), press.kind())?;
-        //A lone arm turns in place (see PartEdit), and anything else turns around the held hex
-        let pivot = match parts[..]{
-            [PartId::Arm(i)] => self.timeline.base().arms[i].pos + delta,
+        let grabbed = self.grabbed_parts(press);
+        //A lone arm turns in place (see PartEdit), and anything else turns around the held hex. That's decided
+        //before puzzle parts are left out, so a group whose copy is one arm still turns around the held hex.
+        let pivot = match (grabbed.len(), press.part()){
+            (1, PartId::Arm(i)) => self.timeline.base().arms[i].pos + delta,
             _ => landing,
         };
+        let parts = self.editable_parts(grabbed, press.kind())?;
         let edit = PartEdit{parts, delta, rot: drag.rot, pivot, len: drag.len, arm_type: None};
         Ok(if press.duplicate {LayoutEdit::Duplicate(edit)} else {LayoutEdit::Part(edit)})
     }
@@ -769,7 +771,8 @@ impl Loaded{
                 }
             }
             KeyCode::Tab if self.tool.press().is_some() => self.cycle(if keymods.shift {-1} else {1}),
-            KeyCode::A | KeyCode::D | KeyCode::W | KeyCode::S => return self.turn_or_resize(keycode),
+            //With Ctrl or Cmd, they're left for egui's shortcuts
+            KeyCode::A | KeyCode::D | KeyCode::W | KeyCode::S if !command => return self.turn_or_resize(keycode),
             //Until 1 is released (see ui.rs)
             KeyCode::Key1 => self.atoms_faded = true,
             _ => return false,
@@ -1236,6 +1239,18 @@ mod tests {
         assert_eq!(px(&loaded, 0, 0), before);
         loaded.release();
         assert_eq!(loaded.timeline.base().glyphs[0].rot, 1);
+    }
+
+    #[test]
+    fn ctrl_with_a_turning_key_does_not_turn_a_dragged_part() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        press(&mut loaded, 0, 0, KeyMods::default());
+        move_to(&mut loaded, 3, 0);
+        for key in [KeyCode::A, KeyCode::D, KeyCode::D]{
+            loaded.handle_key(key, KeyMods{ctrl: true, ..KeyMods::default()});
+        }
+        loaded.release();
+        assert_eq!(loaded.timeline.base().glyphs[0].rot, 0);
     }
 
     fn small_chamber() -> Chambers {
@@ -1722,6 +1737,19 @@ mod tests {
         assert_eq!(base.arms[1].tape().instructions, base.arms[0].tape().instructions);
         assert_eq!(loaded.selection, selected(&[PartId::Arm(1)]), "the copies are selected");
         assert_eq!(loaded.list, PartList::Parts(vec![PartId::Arm(1)]), "and listed");
+    }
+
+    //Leaving the input out of the copy left a lone arm, which turned in place as a lone arm does
+    #[test]
+    fn a_copied_group_turns_around_the_held_hex_without_the_puzzles_parts() {
+        let mut loaded = Loaded::for_test(vec![input_at(0, 0)], vec![arm_at(1, 0)]);
+        loaded.select_all();
+        press(&mut loaded, 0, 0, CTRL);
+        move_to(&mut loaded, 0, 3);
+        assert!(loaded.handle_key(KeyCode::A, KeyMods::default()));
+        loaded.release();
+        let copy = &loaded.timeline.base().arms[1];
+        assert_eq!((copy.pos, copy.rot), (Pos::new(0, 3) + rotate(Pos::new(1, 0), 1), 1));
     }
 
     #[test]

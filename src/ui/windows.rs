@@ -475,7 +475,11 @@ pub fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
     let base = loaded.timeline.base();
     let (title, note) = if let Some(press) = loaded.tool.press() {
         let copy = if press.duplicate {", copying"} else {""};
-        let title = format!("{} ({}/{}){copy}", part_label(base, press.part()), press.cand+1, press.stack.len());
+        let others = match loaded.highlighted_parts().len() - 1{
+            0 => String::new(),
+            n => format!(" with {n} more selected"),
+        };
+        let title = format!("{} ({}/{}){others}{copy}", part_label(base, press.part()), press.cand+1, press.stack.len());
         //Why it isn't moving, unless nothing can be edited anyway
         let lock = loaded.press_lock().filter(|_| EDITOR_ENABLED && press.drag.is_none());
         (title, lock.map(str::to_owned))

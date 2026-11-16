@@ -90,8 +90,9 @@ pub struct OmcloneApp {
     pinching: bool,
     //When the last frame's update ran, in seconds
     last_update: Option<f64>,
-    //Paths dropped on the window. They replace unloaded_info only once they load, as Save writes to its solution
-    //path. They're kept while the Reload? window asks about unsaved changes, and after a failed load.
+    //Paths dropped on the window while a solution is loaded. They replace unloaded_info only once they load, as Save
+    //writes to its solution path. They're kept while the Reload? window asks about unsaved changes, and after a failed
+    //load. With nothing loaded, drops go into unloaded_info (the path fields) instead.
     #[cfg(not(target_arch = "wasm32"))]
     dropped: Option<PathInfo>,
 }
@@ -148,9 +149,13 @@ impl OmcloneApp {
     //Loads, returning a warning if there's something to check. Whatever loads replaces a drop that's waiting.
     #[cfg(not(target_arch = "wasm32"))]
     fn load_paths(&mut self, paths: &PathInfo) -> Result<Option<String>>{
-        let base_path = Path::new(&paths.base);
-        let f_puzzle = File::open(base_path.join(&paths.puzzle))?;
-        let f_sol = File::open(base_path.join(&paths.solution))?;
+        //The path goes in the message itself, as report_load shows only the outermost one
+        let open = |file: &str| {
+            let path = Path::new(&paths.base).join(file);
+            File::open(&path).map_err(|err| eyre::eyre!("Couldn't open {}: {err}", path.display()))
+        };
+        let f_puzzle = open(&paths.puzzle)?;
+        let f_sol = open(&paths.solution)?;
         self.load(f_puzzle, f_sol)?;
         self.dropped = None;
         Ok(self.puzzle_mismatch(&paths.puzzle))
@@ -351,8 +356,7 @@ impl EventHandler for OmcloneApp {
             match &mut self.app_state{
                 Loaded(loaded) if loaded.dirty => loaded.popup_reload = true,
                 #[cfg(not(target_arch = "wasm32"))]
-                _ => do_loading = AppStateUpdate::LoadDropped,
-                #[cfg(target_arch = "wasm32")]
+                Loaded(_) => do_loading = AppStateUpdate::LoadDropped,
                 _ => do_loading = AppStateUpdate::Load,
             }
         }
@@ -361,6 +365,7 @@ impl EventHandler for OmcloneApp {
             #[cfg(not(target_arch = "wasm32"))]
             AppStateUpdate::ResetHome => {
                 self.app_state = NotLoaded;
+                self.dropped = None;
                 recovery::clear();
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -408,7 +413,12 @@ impl EventHandler for OmcloneApp {
     //Dropped files go where uploads (on the web) or the path fields (natively) would put them, and load in draw
     fn files_dropped_event(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
-        let mut paths = self.dropped.clone().unwrap_or_else(|| self.unloaded_info.clone());
+        let loaded = matches!(self.app_state, Loaded(_));
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut paths = match &self.dropped{
+            Some(dropped) if loaded => dropped.clone(),
+            _ => self.unloaded_info.clone(),
+        };
         let mut given = false;
         for i in 0..window::dropped_file_count(){
             //On the web, only the file's name
@@ -440,8 +450,10 @@ impl EventHandler for OmcloneApp {
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        {
+        if loaded{
             self.dropped = Some(paths);
+        } else {
+            self.unloaded_info = paths;
         }
         UPLOADED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
