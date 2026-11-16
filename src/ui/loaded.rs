@@ -109,9 +109,9 @@ pub struct Loaded{
     //Board input waiting for egui to apply the text field being typed in (see board_input)
     pub waiting_input: Vec<BoardInput>,
     pub history: UndoHistory<Snapshot, StepKind>,
-    //Counts the changes that may renumber parts: edits that delete or reorder parts, and undoing or redoing a layout
-    //edit. Clicks and drags that pick parts by number record it at their press, and do nothing if it changes before
-    //they finish.
+    //Counts the changes that may renumber parts: edits that copy, delete or reorder parts, and undoing or redoing a
+    //layout edit. Clicks and drags that pick parts by number record it at their press, and do nothing if it changes
+    //before they finish.
     pub numbering_version: u64,
 }
 impl Loaded{

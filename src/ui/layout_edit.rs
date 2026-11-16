@@ -70,7 +70,8 @@ pub enum LayoutEdit{
     //A new part at `pos`; arms start with an empty tape
     Add{part: NewPart, pos: Pos, rot: Rot, len: i32},
     //Copies of the edited parts (an arm's copy has the same tape), with the edit applied to the copies. The copies
-    //go last, in the order of `parts`.
+    //of each kind go in one block right after the last original of that kind, in the originals' order. So a lone
+    //copy is listed next to its original and acts right after it.
     Duplicate(PartEdit),
     Delete(BTreeSet<PartId>),
     //Takes the parts of this kind numbered `moved` (as indexes, in order) out, and puts them back in that order
@@ -102,16 +103,9 @@ impl LayoutEdit{
                 }
             }],
             LayoutEdit::Duplicate(edit) => {
-                let copies: Vec<PartId> = edit.parts.iter().map(|&part| match part{
-                    PartId::Glyph(i) => {
-                        layout.glyphs.push(layout.glyphs[i].clone());
-                        PartId::Glyph(layout.glyphs.len()-1)
-                    }
-                    PartId::Arm(i) => {
-                        layout.arms.push(layout.arms[i].clone());
-                        PartId::Arm(layout.arms.len()-1)
-                    }
-                }).collect();
+                let glyphs = copy_after_last(&mut layout.glyphs, &copied(&edit.parts, PartKind::Glyph));
+                let arms = copy_after_last(&mut layout.arms, &copied(&edit.parts, PartKind::Arm));
+                let copies: Vec<PartId> = glyphs.map(PartId::Glyph).chain(arms.map(PartId::Arm)).collect();
                 for &copy in &copies{
                     edit_part(&mut layout, copy, edit);
                 }
@@ -169,7 +163,7 @@ impl LayoutEdit{
     }
     //Whether parts it keeps may have other numbers afterwards (see renumbered)
     pub fn renumbers(&self) -> bool{
-        matches!(self, LayoutEdit::Reorder{..} | LayoutEdit::Delete(_))
+        matches!(self, LayoutEdit::Reorder{..} | LayoutEdit::Delete(_) | LayoutEdit::Duplicate(_))
     }
     //The number that a part numbered `part` before the edit has after it, or None if the edit deletes it
     pub fn renumbered(&self, part: PartId) -> Option<PartId>{
@@ -193,6 +187,14 @@ impl LayoutEdit{
                 };
                 Some(kind.part(now))
             }
+            //As in apply: the copies go in after the last original of their kind
+            LayoutEdit::Duplicate(edit) => {
+                let originals = copied(&edit.parts, part.kind());
+                match originals.last(){
+                    Some(&last) if i > last => Some(part.kind().part(i + originals.len())),
+                    _ => Some(part),
+                }
+            }
             _ => Some(part),
         }
     }
@@ -203,6 +205,19 @@ fn remove_all<T>(items: &mut Vec<T>, indexes: Vec<usize>){
     for i in indexes.into_iter().rev(){
         items.remove(i);
     }
+}
+//The indexes of the parts of this kind among `parts`, in increasing order
+fn copied(parts: &[PartId], kind: PartKind) -> Vec<usize>{
+    let indexes: BTreeSet<usize> = parts.iter().filter(|p| p.kind() == kind).map(|p| p.index()).collect();
+    indexes.into_iter().collect()
+}
+//Puts copies of the items at `originals` (indexes in increasing order) right after the last of them, in order.
+//Returns where the copies are.
+fn copy_after_last<T: Clone>(items: &mut Vec<T>, originals: &[usize]) -> std::ops::Range<usize>{
+    let Some(&last) = originals.last() else {return 0..0};
+    let copies: Vec<T> = originals.iter().map(|&i| items[i].clone()).collect();
+    items.splice(last+1..last+1, copies);
+    last+1..last+1+originals.len()
 }
 //Takes the items at `moved` (indexes in increasing order) out and puts them back in order, starting at index `to`
 //among the rest
@@ -448,9 +463,22 @@ mod tests {
 
         let copied = applied(&w, LayoutEdit::Duplicate(edit));
         assert_eq!((copied.glyphs.len(), copied.arms.len()), (3, 2));
-        assert_eq!((copied.glyphs[2].pos, copied.arms[1].pos), (turned.glyphs[0].pos, turned.arms[0].pos));
+        assert_eq!((copied.glyphs[1].pos, copied.arms[1].pos), (turned.glyphs[0].pos, turned.arms[0].pos));
         assert_eq!(tape(&copied, 1), tape(&w, 0));
         assert_eq!((copied.glyphs[0].pos, copied.arms[0].pos), (Pos::new(0, 0), Pos::new(2, 0)), "the originals stay");
+    }
+
+    #[test]
+    fn copies_go_as_a_block_after_the_last_original() {
+        //Arms 0..6, told apart by x
+        let w = world(vec![], (0..6).map(|i| arm(i * 3, 0, 1, ArmType::PlainArm)).collect());
+        let parts = [4, 0, 3, 2].map(PartId::Arm).to_vec();
+        let edit = LayoutEdit::Duplicate(PartEdit{delta: Pos::new(0, 5), ..PartEdit::new(parts)});
+        let (layout, copies) = edit.apply(&w);
+        let order: Vec<(usize, bool)> = layout.arms.iter().map(|a| ((a.pos.x / 3) as usize, a.pos.y == 5)).collect();
+        assert_eq!(order, vec![(0, false), (1, false), (2, false), (3, false), (4, false),
+            (0, true), (2, true), (3, true), (4, true), (5, false)]);
+        assert_eq!(copies, (5..9).map(PartId::Arm).collect::<Vec<_>>());
     }
 
     #[test]
@@ -487,7 +515,10 @@ mod tests {
         let parts: Vec<PartId> = (0..5).map(PartId::Glyph).chain((0..5).map(PartId::Arm)).collect();
         use LayoutEdit::*;
         let reorder = |kind, moved: &[usize], to| Reorder{kind, moved: moved.to_vec(), to};
-        for edit in [reorder(PartKind::Glyph, &[0], 2), reorder(PartKind::Glyph, &[3], 1),
+        let copy = |parts: &[PartId]| Duplicate(PartEdit{delta: Pos::new(0, 10), ..PartEdit::new(parts.to_vec())});
+        for edit in [copy(&[PartId::Glyph(1)]), copy(&[PartId::Arm(3), PartId::Arm(0)]), copy(&[PartId::Arm(4)]),
+            copy(&[PartId::Glyph(2), PartId::Arm(1), PartId::Glyph(0)]),
+            reorder(PartKind::Glyph, &[0], 2), reorder(PartKind::Glyph, &[3], 1),
             reorder(PartKind::Arm, &[1], 3), reorder(PartKind::Arm, &[2], 0), reorder(PartKind::Glyph, &[0, 2, 3], 1),
             reorder(PartKind::Arm, &[1, 4], 0), reorder(PartKind::Arm, &[0, 1], 3),
             Delete([PartId::Glyph(1)].into()), Delete([PartId::Arm(2)].into()),

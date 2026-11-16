@@ -941,6 +941,17 @@ impl Loaded{
         };
         Preview{edit, parts, layout, world, float_world, glyphs, tracks, arms_now, timestep, landing, overlaps}
     }
+    //The world drawn under a drag preview, and the parts left out of it because they're drawn dragged. Before
+    //anything moves, that's the world as the edit would start. Otherwise it's the current step, which lacks the parts
+    //the edit adds, and their numbers may belong to other parts there, so only parts changed in place are left out.
+    fn preview_scene<'a>(&'a self, preview: &'a Preview) -> (&'a World, &'a FloatWorld, &'a BTreeSet<PartId>){
+        static NO_PARTS: BTreeSet<PartId> = BTreeSet::new();
+        match &preview.world{
+            Ok(world) if self.timeline.at_start() => (world, &preview.float_world, &preview.parts),
+            _ if preview.edit.is_structural() => (self.timeline.curr(), &self.float_world, &NO_PARTS),
+            _ => (self.timeline.curr(), &self.float_world, &preview.parts),
+        }
+    }
     pub fn drop_preview(&mut self){
         self.preview = None;
         self.scene_tracks = None;
@@ -1030,16 +1041,11 @@ impl Loaded{
             }
             return;
         };
-        //Before anything moves, show the world as it would start; otherwise keep showing the current step.
-        //New parts aren't in the current step, so hiding them there hides nothing.
-        let (world, float_world) = match &preview.world{
-            Ok(world) if self.timeline.at_start() => (world, &preview.float_world),
-            _ => (self.timeline.curr(), &self.float_world),
-        };
+        let (world, float_world, hidden) = self.preview_scene(preview);
         //Tracks are drawn as they are now, except the tracks being changed, which are drawn with the preview
         let tracks = self.scene_tracks.as_ref().map_or(&self.timeline.base().track_maps, |(_, t)| t);
         let scene = Scene{glyphs: &world.glyphs, tracks, polymers: &world.polymers, walls: &world.chambers.walls,
-            area: &world.area_touched, float_world, hidden: &preview.parts, faded_atoms: self.atoms_faded};
+            area: &world.area_touched, float_world, hidden, faded_atoms: self.atoms_faded};
         render.draw(ctx, &self.camera, self.area_mode == AreaMode::Shown, &scene);
         for (i, polymer) in &preview.glyphs{
             render.draw_dragged_glyph(ctx, &self.camera, &preview.layout.glyphs[*i], polymer.as_ref(), extra);
@@ -1464,6 +1470,9 @@ mod tests {
         (loaded.tape_sel.arm, loaded.tape_sel.anchor_arm) = (2, 2);
         //Each arm's tape starts at its original number
         let caret_arm = |loaded: &Loaded| loaded.timeline.base().arms[loaded.tape_sel.arm].tape().first;
+        let copy = PartEdit{delta: Pos::new(0, 3), ..PartEdit::new(vec![PartId::Arm(0)])};
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Duplicate(copy)), Ok(()));
+        assert_eq!(caret_arm(&loaded), 2);
         assert_eq!(loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Arm, moved: vec![0], to: 3}), Ok(()));
         assert_eq!(caret_arm(&loaded), 2);
         assert_eq!(loaded.apply_edit(&LayoutEdit::Delete([PartId::Arm(0)].into())), Ok(()));
@@ -1528,6 +1537,23 @@ mod tests {
         loaded.update(TEST_FRAME);
         assert_eq!(loaded.timeline.curr().timestep, 2, "it runs back to the step it was edited at");
         assert_eq!(Some(pose(&loaded.timeline.curr().arms[0])), previewed);
+    }
+
+    //At a later step the preview shows the current step, without the dragged parts. A copy is numbered like a part
+    //after its original there, and that part was left out.
+    #[test]
+    fn copying_at_a_later_step_leaves_no_part_out_of_the_step_shown() {
+        let arms = (0..2).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm,
+            Tape::new(0, vec![Instr::RotateClockwise]))).collect();
+        let mut loaded = Loaded::for_test(vec![], arms);
+        loaded.timeline.advance_to(1.).unwrap();
+        press(&mut loaded, 0, 0, KeyMods{ctrl: true, ..KeyMods::default()});
+        move_to(&mut loaded, 0, 3);
+        loaded.refresh_preview();
+        let preview = loaded.preview.as_ref().unwrap();
+        assert_eq!(preview.parts, BTreeSet::from([PartId::Arm(1)]), "the copy");
+        let (_, _, hidden) = loaded.preview_scene(preview);
+        assert_eq!(hidden, &BTreeSet::new());
     }
 
     //The tapes can be typed in while a part is held
