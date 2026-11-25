@@ -188,7 +188,9 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
         });
         return None;
     }
-    let row_height = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+    //show_rows needs all rows the same height. A selectable label is at least interact_size high, which a row's text
+    //is shorter than.
+    let row_height = ui.spacing().interact_size.y;
     let ctx = ui.ctx().clone();
     //A drag that the parts were renumbered during would move the wrong ones (see part_window), so it's abandoned
     let current = loaded.list_press_numbering == loaded.numbering_version;
@@ -210,15 +212,25 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
     ctx.data_mut(|d| d.insert_temp(shown_id, shown));
     let highlighted = loaded.highlighted_parts();
     let can_reorder = loaded.edit_lock().is_none();
-    egui::ScrollArea::vertical().id_salt("part_list").max_height(PART_LIST_ROWS * row_height).show(ui, |ui| {
+    let row_spacing = ui.spacing().item_spacing.y;
+    let scroll = egui::ScrollArea::vertical().id_salt("part_list").max_height(PART_LIST_ROWS * (row_height + row_spacing));
+    //Only the rows in view are laid out, as a solution can have thousands of parts. So a row can be dropped only on
+    //another in view, which drag_edge_scroll brings in.
+    scroll.show_rows(ui, row_height, parts.len(), |ui, in_view| {
+        //The selected row may be out of view, so it's scrolled to by where it would be. This ui's top is the first row
+        //in view's.
+        let selected_row = loaded.single_selection().filter(|_| scroll_to_selection)
+            .and_then(|selected| parts.iter().position(|&p| p == selected));
+        if let Some(i) = selected_row {
+            let top = ui.max_rect().top() + (i as f32 - in_view.start as f32) * (row_height + row_spacing);
+            let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), top..=top + row_height);
+            ui.scroll_to_rect(rect, None);
+        }
         let mut action = None;
-        for &part in &parts {
+        for &part in &parts[in_view] {
             //A dragged row's drop target is lit up under its label
             let backdrop = ui.painter().add(egui::Shape::Noop);
             let mut row = ui.selectable_label(highlighted.contains(&part), part_label(base, part));
-            if scroll_to_selection && loaded.single_selection() == Some(part) {
-                row.scroll_to_me(None);
-            }
             if row.clicked() {
                 let toggle = ui.input(|i| i.modifiers.shift);
                 action = Some(if toggle {ListAction::Toggle(part)} else {ListAction::Select(part)});
@@ -726,6 +738,32 @@ mod tests {
         shift_click(&ctx, &mut loaded);
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]));
         assert_eq!(loaded.list, PartList::All);
+    }
+
+    //Rows out of view aren't laid out, so the selected one is scrolled to by its place in the list
+    #[test]
+    fn a_selected_row_out_of_view_is_scrolled_to() {
+        let ctx = context();
+        let mut loaded = all_listed(&ctx, (0..40).map(|i| glyph(i * 3, 0, GlyphType::Bonding)).collect(), vec![]);
+        //Whether the row was drawn last frame, all in view. Rows are selectable buttons; the selected part's own label
+        //below has the same text.
+        let in_view = |ctx: &egui::Context, label: &str| ctx.viewport(|v| {
+            let widgets = &v.prev_pass.widgets;
+            widgets.layers().flat_map(|(_, rects)| rects)
+                .find(|w| widgets.info(w.id).is_some_and(|i|
+                    i.typ == WidgetType::Button && i.label.as_deref() == Some(label)))
+                .is_some_and(|w| w.interact_rect == w.rect)
+        });
+        assert!(in_view(&ctx, "Bonder (glyph 40)") && !in_view(&ctx, "Bonder (glyph 1)"), "the list starts at the top");
+        //The bottom row, then the top one, then one in the middle
+        for (glyph, label) in [(0, "Bonder (glyph 1)"), (39, "Bonder (glyph 40)"), (20, "Bonder (glyph 21)")] {
+            loaded.select(Some(PartId::Glyph(glyph)));
+            //Long enough for egui's scrolling animation
+            for _ in 0..60 {
+                frame(&ctx, &mut loaded, vec![]);
+            }
+            assert!(in_view(&ctx, label), "{label}");
+        }
     }
 
     //Taking a part out of the selection leaves it listed
