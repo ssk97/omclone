@@ -246,7 +246,8 @@ const LIST_HELP: &str = "Clicking the board, or an arm number in the tapes, list
     what was listed. Arms come first, then glyphs, each in number order. Shift+click or Shift+drag on the board adds parts to the list. Ctrl+A selects \
     and lists every part, and Esc then clears the selection, keeping them listed. A second Esc empties the list. The \
     selected parts are always listed. Click a row to select only it, or Shift+click it to add or remove it. Drag a \
-    row to reorder it, along with the other selected parts of its kind if it's selected. A glyph's number, counting \
+    row to reorder it, along with the other selected parts of its kind if it's selected; dropped on one of those, \
+    they're gathered around it. A glyph's number, counting \
     all the glyphs, is in brackets after its name.";
 const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
     overlap, the lower-numbered track wins.";
@@ -363,8 +364,11 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
                 let Some(to) = reorder_block(&moved, part.index(), after) else {continue};
                 let selection = ui.visuals().selection;
                 ui.painter().set(backdrop, egui::Shape::rect_filled(row.rect, 2., selection.bg_fill.gamma_multiply(0.4)));
-                let edge = drop_line_y(row.rect.y_range(), after);
-                ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
+                //A drop on one of the moved rows gathers them around it, which has no side to show
+                if !moved.contains(&part.index()) {
+                    let edge = drop_line_y(row.rect.y_range(), after);
+                    ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
+                }
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(&ctx);
                     let edit = LayoutEdit::Reorder{kind: part.kind(), moved: moved.clone(), to};
@@ -1030,6 +1034,21 @@ mod tests {
         assert_eq!(glyph_types(&loaded), vec![Calcification, Disposal, Bonding, Duplication]);
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(2), PartId::Glyph(3), PartId::Arm(0)]),
             "they stay selected");
+    }
+
+    //With only the selected parts listed, there was no row to drop them on
+    #[test]
+    fn a_selected_row_dropped_on_another_gathers_them_around_it() {
+        use GlyphType::*;
+        let ctx = context();
+        let mut loaded = Loaded::for_test(vec![glyph(0, 0, Bonding), glyph(3, 0, Calcification), glyph(6, 0, Disposal),
+            glyph(9, 0, Duplication)], vec![]);
+        loaded.set_selection(selected(&[PartId::Glyph(0), PartId::Glyph(2)]));
+        settle(&ctx, &mut loaded);
+        let to = top_half(row(&ctx, "Disposal (3)"));
+        drag(&ctx, &mut loaded, row(&ctx, "Bonder (1)").center(), to);
+        assert_eq!(glyph_types(&loaded), vec![Calcification, Bonding, Disposal, Duplication]);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1), PartId::Glyph(2)]), "they stay selected");
     }
 
     #[test]

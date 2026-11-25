@@ -200,7 +200,8 @@ const PART_WINDOW_HELP: &[HelpEntry] = &[
     both("Shift+click a part in the list", "Add it to the selection, or take it out"),
     both("Ctrl+A, then Esc", "List every part, with none selected"),
     both("Drag the line between the list and the fields", "Widen or narrow the list. Double-click it to reset it."),
-    editor("Drag a part in the list", "Reorder it among the arms or the glyphs, with the other selected ones if it's selected"),
+    editor("Drag a part in the list", "Reorder it among the arms or the glyphs, with the other selected ones if it's selected. \
+        Dropped on one of those, they're gathered around it."),
     editor("Shift+click", "Place a part from Add part, and keep placing more"),
     both("Pause at hex, then click a hex", "Moving forward pauses when an atom next lands there, which clears the hex. Cancel clears it too."),
     editor("Enter, or a click elsewhere", "Apply a typed value"),

@@ -227,14 +227,16 @@ fn move_block<T>(items: &mut Vec<T>, moved: &[usize], to: usize){
     items.splice(to..to, taken);
 }
 //The `to` of a Reorder that puts the parts numbered `moved` (indexes in increasing order) directly after `anchor`
-//(or before it, if not `after`), in their order, with the other parts keeping theirs. None if that changes nothing.
+//(or before it, if not `after`), in their order, with the other parts keeping theirs. If the anchor is one of them,
+//they're gathered around it, and it keeps its number. None if that changes nothing.
 pub fn reorder_block(moved: &[usize], anchor: usize, after: bool) -> Option<usize>{
-    if moved.is_empty() || moved.contains(&anchor){
+    if moved.is_empty(){
         return None;
     }
-    //Taking out the parts before the anchor shifts it down
+    //Taking out the parts before the anchor shifts it down. If it's taken out too, this is how many parts stay below
+    //it, so the block goes in after them.
     let anchor_among_rest = anchor - moved.iter().filter(|&&m| m < anchor).count();
-    let to = if after {anchor_among_rest + 1} else {anchor_among_rest};
+    let to = if after && !moved.contains(&anchor) {anchor_among_rest + 1} else {anchor_among_rest};
     //Only a run of consecutive numbers put back where it was stays the same
     let unchanged = moved.windows(2).all(|w| w[1] == w[0] + 1) && moved.first() == Some(&to);
     (!unchanged).then_some(to)
@@ -572,9 +574,13 @@ mod tests {
         assert_eq!(order(&[0, 3], 5, false), Some(vec![1, 2, 4, 0, 3, 5]), "a block keeps its order");
         assert_eq!(order(&[1, 4], 2, true), Some(vec![0, 2, 1, 4, 3, 5]), "from either side of the anchor");
         assert_eq!(order(&[2, 4], 3, true), Some(vec![0, 1, 3, 2, 4, 5]), "gathered after a part between them");
+        assert_eq!(order(&[1, 3, 5], 3, true), Some(vec![0, 2, 1, 3, 5, 4]), "gathered around one of the block");
+        assert_eq!(order(&[1, 3, 5], 3, false), Some(vec![0, 2, 1, 3, 5, 4]), "either half of it");
+        assert_eq!(order(&[0, 4], 0, true), Some(vec![0, 4, 1, 2, 3, 5]), "around the first of them");
+        assert_eq!(order(&[1, 5], 5, false), Some(vec![0, 2, 3, 4, 1, 5]), "around the last of them");
         assert_eq!(order(&[], 2, true), None, "nothing to move");
         assert_eq!(order(&[2], 2, true), None, "beside itself");
-        assert_eq!(order(&[2, 4], 4, true), None, "beside one of the block");
+        assert_eq!(order(&[2, 3], 3, true), None, "a run gathered on one of its own");
         assert_eq!(order(&[2], 3, false), None, "already just before it");
         assert_eq!(order(&[2], 1, true), None, "already just after it");
         assert_eq!(order(&[2, 3], 4, false), None, "a run already just before it");
