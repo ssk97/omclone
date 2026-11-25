@@ -282,15 +282,15 @@ impl Loaded{
         }
         self.finish_tape_edit(earliest);
     }
-    //Whether typing at `now` on `arms`, with the caret at `from`, continues the last tape edit: more typing on the
-    //same arms, starting where the caret was left, without a pause
-    pub fn continues_tape_group(&self, arms: &Range<usize>, from: usize, now: f64) -> bool{
-        self.tape_group.as_ref().is_some_and(|g| g.arms == *arms && g.caret == from && now - g.typed_at < TYPING_PAUSE)
+    //The last tape edit, if typing at `now` continues it. The tape grid ends the edit's group when the selection
+    //moves from where the edit left it, so a group that's left is at the caret, and only the pause is checked here.
+    pub fn continued_tape_group(&mut self, now: f64) -> Option<&mut TapeGroup>{
+        self.tape_group.as_mut().filter(|g| now - g.typed_at < TYPING_PAUSE)
     }
     //Keeps the starting world from before a tape edit, unless `joins` and the edit continues the last one.
-    //If `extends`, more typing can join this edit. `from` and `to` are the caret before and after the edit.
-    pub fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool, now: f64){
-        if !(joins && self.continues_tape_group(&arms, from, now)){
+    //If `extends`, more typing can join this edit. `to` is the caret after the edit.
+    pub fn record_tape_edit(&mut self, arms: Range<usize>, to: usize, joins: bool, extends: bool, now: f64){
+        if !(joins && self.continued_tape_group(now).is_some()){
             self.history.record(self.snapshot(), StepKind::Tapes);
         }
         self.tape_group = extends.then_some(TapeGroup{arms, caret: to, typed_at: now});
