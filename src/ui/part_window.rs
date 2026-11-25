@@ -165,7 +165,7 @@ fn part_window_id() -> egui::Id{
 }
 //The list's title and rows, returning what was done to them
 fn list_column(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
-    ui.label(list_title(&loaded.list)).on_hover_text(format!("{LIST_HELP} Arms run in number order. {GLYPH_ORDER_HELP}"));
+    ui.label(list_title(loaded)).on_hover_text(format!("{LIST_HELP} Arms run in number order. {GLYPH_ORDER_HELP}"));
     part_list(ui, loaded)
 }
 //The selected part's fields, or what can be done to the selected parts
@@ -174,7 +174,7 @@ fn selection_section(ui: &mut egui::Ui, loaded: &mut Loaded){
     match (loaded.single_selection(), loaded.selection.len()) {
         (Some(part), _) => {ui.push_id(part, |ui| part_section(ui, loaded, part));}
         (None, 0) => {ui.weak("No part selected");}
-        (None, count) => group_section(ui, loaded, count),
+        (None, _) => group_section(ui, loaded),
     }
 }
 //The widths of the Part window's two columns. They're fixed (except as the divider between them is dragged), so the
@@ -251,11 +251,11 @@ const LIST_HELP: &str = "Clicking the board, or an arm number in the tapes, list
     all the glyphs, is in brackets after its name.";
 const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
     overlap, the lower-numbered track wins.";
-fn list_title(list: &PartList) -> String{
-    match list {
+fn list_title(loaded: &Loaded) -> String{
+    match &loaded.list {
         PartList::Parts(parts) if parts.is_empty() => "Parts".to_owned(),
         PartList::Parts(parts) => format!("Parts ({})", parts.len()),
-        PartList::All => "All parts".to_owned(),
+        PartList::All => format!("All parts ({})", loaded.timeline.base().all_parts().count()),
     }
 }
 //What was done in the Part window's list of parts
@@ -369,6 +369,14 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
                     let edge = drop_line_y(row.rect.y_range(), after);
                     ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
                 }
+                //Between rows that aren't numbered one after the other, the targets either side of the gap put the
+                //parts in different places, and only the lit row tells them apart. This says where they go.
+                let result = match moved[..] {
+                    [from] => format!("{} {} to {}", kind_name(part.kind()), from + 1, to + 1),
+                    _ => format!("{} to {}–{}", count_of(part.kind(), moved.len()), to + 1, to + moved.len()),
+                };
+                egui::Tooltip::always_open(ctx.clone(), ui.layer_id(), egui::Id::new("part_list_drop"),
+                    egui::PopupAnchor::Pointer).show(|ui| ui.label(result));
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(&ctx);
                     let edit = LayoutEdit::Reorder{kind: part.kind(), moved: moved.clone(), to};
@@ -452,9 +460,20 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
         }
     }
 }
-//With several parts selected there are no fields, only Delete
-fn group_section(ui: &mut egui::Ui, loaded: &mut Loaded, count: usize){
-    ui.label(format!("{count} parts selected"));
+fn kind_name(kind: PartKind) -> &'static str{
+    match kind {PartKind::Glyph => "Glyph", PartKind::Arm => "Arm"}
+}
+//As in "1 glyph" or "3 arms"
+fn count_of(kind: PartKind, count: usize) -> String{
+    format!("{count} {}{}", kind_name(kind).to_lowercase(), if count == 1 {""} else {"s"})
+}
+//With several parts selected there are no fields, only Delete. The counts by kind say what dragging a row in the list
+//moves.
+fn group_section(ui: &mut egui::Ui, loaded: &mut Loaded){
+    let counts: Vec<String> = [PartKind::Arm, PartKind::Glyph].into_iter()
+        .map(|kind| (kind, loaded.selection.iter().filter(|p| p.kind() == kind).count()))
+        .filter(|&(_, count)| count > 0).map(|(kind, count)| count_of(kind, count)).collect();
+    ui.label(format!("{} selected", counts.join(", ")));
     let parts = loaded.editable_parts(loaded.selection.iter().copied(), EditKind::Delete);
     let delete = ui.add_enabled(parts.is_ok(), egui::Button::new("Delete"));
     let hover = "Delete or Backspace. Inputs, outputs and conduits stay.";
@@ -867,7 +886,7 @@ mod tests {
         let arm = Arm::new(Pos::new(9, 9), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
         let mut loaded = all_listed(&ctx, vec![glyph(0, 0, Bonding), glyph(5, 5, Calcification)], vec![arm]);
         assert_eq!(loaded.selection.len(), 3);
-        row(&ctx, "3 parts selected");
+        row(&ctx, "1 arm, 2 glyphs selected");
         frame(&ctx, &mut loaded, click(row(&ctx, "Bonder (1)").center()));
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]), "a click selects only that row's part");
         frame(&ctx, &mut loaded, vec![]);
