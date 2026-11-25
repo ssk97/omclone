@@ -138,10 +138,10 @@ fn select_step(loaded: &mut Loaded, step: usize, extend: bool){
     }
     move_caret(loaded, step);
 }
-//Applies an edit to the selected tapes, keeping it for undo, then moves the caret past it.
-//When `typing` (a typed instruction or an erase), more typing can join its undo step, and it joins the step
-//before unless it replaces a selection.
-fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
+//Applies an edit to the selected tapes at `now` (egui's input time), keeping it for undo, then moves the caret past it.
+//When `typing` (a typed instruction or an erase), more typing can join its undo step, and it can join the step
+//before unless it replaces a selection (see Loaded::continues_tape_group).
+fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool, now: f64){
     if !EDITOR_ENABLED{
         return;
     }
@@ -165,15 +165,16 @@ fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
     let earliest = arms.clone().zip(&tapes).filter_map(|(i, tape)| base.tape_change(i, tape)).min();
     match earliest{
         Some(earliest) => {
-            loaded.record_tape_edit(arms.clone(), from, caret, joins, typing);
+            loaded.record_tape_edit(arms.clone(), from, caret, joins, typing, now);
             for (i, tape) in arms.clone().zip(tapes){
                 loaded.timeline.base_mut().set_tape(i, tape);
             }
             loaded.finish_tape_edit(earliest);
         }
         //Nothing changed (like a blank typed past the end), but the caret still moves on
-        None => if joins && loaded.tape_group == Some((arms.clone(), from)){
-            loaded.tape_group = Some((arms.clone(), caret));
+        None => if joins && loaded.continues_tape_group(&arms, from, now){
+            let group = loaded.tape_group.as_mut().unwrap();
+            (group.caret, group.typed_at) = (caret, now);
         }
     }
     let sel = &mut loaded.tape_sel;
@@ -183,6 +184,18 @@ fn edit(loaded: &mut Loaded, op: TapeOp, typing: bool){
     sel.anchor_step = None;
     move_caret(loaded, caret);
 }
+//Typing joins the last tape edit's undo step only while the selection stays where that edit left it. Anything else
+//that moves it (keys, clicks, the timeline) ends the step, even if the selection then comes back. So this runs before
+//each event, to see moves by the frame's earlier input (pointer events come here too), and at the end of each frame,
+//to see the timeline sync in frames with no events.
+fn end_tape_group_if_moved(loaded: &mut Loaded){
+    let sel = &loaded.tape_sel;
+    let unmoved = loaded.tape_group.as_ref()
+        .is_some_and(|g| sel.anchor_step.is_none() && g.arms == sel.arms() && g.caret == sel.caret);
+    if !unmoved{
+        loaded.tape_group = None;
+    }
+}
 fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
     use egui::{Event, Key};
     //An undo among the frame's earlier events may have taken arms away
@@ -191,12 +204,14 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
         return;
     }
     loaded.tape_sel.fit(arm_count);
+    end_tape_group_if_moved(loaded);
+    let now = ui.input(|i| i.time);
     match event{
         //Typing gives a character at a time. egui-miniquad pastes as Text too (other backends send Paste), so a
         //one-character paste counts as typing.
         Event::Text(text) | Event::Paste(text) => {
             let typed = text.chars().count() == 1;
-            edit(loaded, TapeOp::Write(text_lines(text, !typed)), typed);
+            edit(loaded, TapeOp::Write(text_lines(text, !typed)), typed, now);
         }
         Event::Copy | Event::Cut => {
             let sel = &loaded.tape_sel;
@@ -206,7 +221,7 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
             let tapes = loaded.timeline.base().arms[sel.arms()].iter().map(|a| a.tape());
             ui.ctx().copy_text(block_text(tapes, sel.steps()));
             if matches!(event, Event::Cut){
-                edit(loaded, TapeOp::EraseForward, false);
+                edit(loaded, TapeOp::EraseForward, false, now);
             }
         }
         &Event::Key{key, pressed: true, modifiers, ..} => {
@@ -240,8 +255,8 @@ fn handle_event(ui: &egui::Ui, loaded: &mut Loaded, event: &egui::Event){
                 //Undo comes here, rather than to the part hotkeys, to happen after the keys typed before it
                 Key::Z if modifiers.command => if modifiers.shift {loaded.redo()} else {loaded.undo()},
                 Key::Y if modifiers.command => loaded.redo(),
-                Key::Backspace => edit(loaded, TapeOp::EraseBack, true),
-                Key::Delete => edit(loaded, TapeOp::EraseForward, true),
+                Key::Backspace => edit(loaded, TapeOp::EraseBack, true, now),
+                Key::Delete => edit(loaded, TapeOp::EraseForward, true, now),
                 Key::Insert => loaded.tape_mode = !loaded.tape_mode,
                 Key::Escape => {
                     if sel.anchor_step.is_some() || sel.anchor_arm != sel.arm{
@@ -564,6 +579,7 @@ pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
                 }
             }
         }
+        end_tape_group_if_moved(loaded);
 
         //Only along the way the caret moved, so running doesn't pull the view back to the caret's arm
         let sel = &mut loaded.tape_sel;
@@ -816,7 +832,11 @@ mod editing_tests {
     }
     //Handles keys that arrived together, as the grid does in one frame
     fn handle_frame(loaded: &mut Loaded, events: &[Event]) {
-        let _ = egui::Context::default().run_ui(Default::default(), |ui| {
+        handle_frame_at(loaded, 0., events);
+    }
+    //The same, at `time` in seconds, as egui's input gives it
+    fn handle_frame_at(loaded: &mut Loaded, time: f64, events: &[Event]) {
+        let _ = egui::Context::default().run_ui(egui::RawInput{time: Some(time), ..Default::default()}, |ui| {
             for event in events {
                 handle_event(ui, loaded, event);
             }
@@ -1079,5 +1099,107 @@ mod editing_tests {
         handle_frame(&mut loaded, &[key(Key::Z, Modifiers::COMMAND), key(Key::ArrowDown, Modifiers::NONE),
             key(Key::End, Modifiers::NONE), Event::Text("f".into())]);
         assert!(loaded.timeline.base().arms.is_empty());
+    }
+
+    fn first_tape(loaded: &Loaded) -> Vec<Instr> {
+        loaded.timeline.base().arms[0].tape().instructions.clone()
+    }
+    //Clicks the cell to give the grid focus, as typing into it needs
+    fn focused_grid(ctx: &egui::Context, loaded: &mut Loaded, arm: usize, step: usize) -> Layout {
+        let layout = grid_frame(ctx, loaded, vec![]);
+        grid_frame(ctx, loaded, quick_click(layout.cell_rect(arm, step).center()));
+        layout
+    }
+
+    //A whole tape typed in one go was one undo step
+    #[test]
+    fn typing_after_a_pause_is_a_new_undo_step() {
+        use Instr::*;
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![])]);
+        handle_frame_at(&mut loaded, 0., &typed("fr"));
+        handle_frame_at(&mut loaded, 0.5, &typed("w"));
+        handle_frame_at(&mut loaded, 2., &typed("s"));
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), [Grab, Drop, Extend]);
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), []);
+    }
+
+    //Typing joined the step whenever it was at the caret the last typing left, however the caret got back there
+    #[test]
+    fn moving_away_and_back_starts_a_new_undo_step() {
+        use Instr::*;
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![])]);
+        let mut events = typed("fr");
+        events.extend([key(Key::ArrowLeft, Modifiers::NONE), key(Key::ArrowRight, Modifiers::NONE)]);
+        events.extend(typed("ws"));
+        handle_frame(&mut loaded, &events);
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), [Grab, Drop]);
+    }
+
+    #[test]
+    fn clicking_away_and_back_starts_a_new_undo_step() {
+        use Instr::*;
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![])]);
+        let layout = focused_grid(&ctx, &mut loaded, 0, 0);
+        grid_frame(&ctx, &mut loaded, typed("fr"));
+        grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 5).center()));
+        grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 2).center()));
+        grid_frame(&ctx, &mut loaded, typed("ws"));
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), [Grab, Drop]);
+    }
+
+    //Like the slider or a run, in frames with nothing typed
+    #[test]
+    fn the_timeline_moving_the_caret_away_and_back_starts_a_new_undo_step() {
+        use Instr::*;
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], vec![arm_with(0, vec![])]);
+        focused_grid(&ctx, &mut loaded, 0, 0);
+        grid_frame(&ctx, &mut loaded, typed("fr"));
+        for step in [5, 2] {
+            loaded.try_set_target_time(step);
+            grid_frame(&ctx, &mut loaded, vec![]);
+        }
+        grid_frame(&ctx, &mut loaded, typed("ws"));
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), [Grab, Drop]);
+    }
+
+    //The typed step playing out doesn't move the caret, so it doesn't end the undo step
+    #[test]
+    fn typing_while_the_typed_step_plays_is_one_undo_step() {
+        let ctx = egui::Context::default();
+        let mut loaded = swinging_at_step_2();
+        let original = first_tape(&loaded);
+        focused_grid(&ctx, &mut loaded, 0, 2);
+        grid_frame(&ctx, &mut loaded, typed("a"));
+        loaded.update(TEST_FRAME);
+        assert!(loaded.timeline.time() > 2. && loaded.timeline.time() < 3., "the typed step is partway through");
+        grid_frame(&ctx, &mut loaded, typed("d"));
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), original);
+    }
+
+    //The timeline stops at a crash, short of the caret, which stays where the typing left it
+    #[test]
+    fn typing_past_a_crash_is_one_undo_step() {
+        let ctx = egui::Context::default();
+        //Riding the track forward twice runs the first arm into the second, which sits at its end
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track((0..3).map(|x| Pos::new(x, 0)).collect())};
+        let sitter = arm_with(2, vec![]);
+        let mut loaded = Loaded::for_test(vec![track], vec![arm_with(0, vec![]), sitter]);
+        focused_grid(&ctx, &mut loaded, 0, 0);
+        grid_frame(&ctx, &mut loaded, typed("gg"));
+        for _ in 0..100 {
+            loaded.update(TEST_FRAME);
+        }
+        assert!(matches!(loaded.run_state, RunState::Crashed{step: 1, ..}));
+        grid_frame(&ctx, &mut loaded, typed("o"));
+        loaded.undo();
+        assert_eq!(first_tape(&loaded), []);
     }
 }

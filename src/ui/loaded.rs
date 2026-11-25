@@ -12,6 +12,15 @@ pub enum RunState{
 pub enum StepKind{
     Layout, Tapes
 }
+//Typing after a pause this long, in seconds, starts a new undo step
+const TYPING_PAUSE: f64 = 1.;
+//The last tape edit typed: its arms, the caret timestep after it, and when it was typed (egui's input time)
+#[derive(Clone, PartialEq, Debug)]
+pub struct TapeGroup{
+    pub arms: Range<usize>,
+    pub caret: usize,
+    pub typed_at: f64,
+}
 //A starting world kept for undo, with what was selected and listed then. Their numbers are the world's, so undoing a
 //layout edit can put them back as they were.
 pub struct Snapshot{
@@ -67,8 +76,8 @@ pub struct Loaded{
 
     pub tape_mode: bool,
     pub tape_sel: TapeSelection,
-    //The arms and caret timestep after the last tape edit, while more typing there joins its undo step
-    pub tape_group: Option<(Range<usize>, usize)>,
+    //The last tape edit, while more typing can join its undo step
+    pub tape_group: Option<TapeGroup>,
     pub run_state: RunState,
     //The timeline's time as last shown. An edit can move the timeline back to re-simulate from before its change, and
     //it comes straight back here (or to the target, if that's earlier) instead of replaying the steps on the way.
@@ -273,14 +282,18 @@ impl Loaded{
         }
         self.finish_tape_edit(earliest);
     }
-    //Keeps the starting world from before a tape edit, unless `joins` and the edit continues the last one: more
-    //typing on the same arms, starting where the caret was left. If `extends`, more typing can join this edit.
-    //`from` and `to` are the caret before and after the edit.
-    pub fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool){
-        if !(joins && self.tape_group.as_ref().is_some_and(|(a, step)| *a == arms && *step == from)){
+    //Whether typing at `now` on `arms`, with the caret at `from`, continues the last tape edit: more typing on the
+    //same arms, starting where the caret was left, without a pause
+    pub fn continues_tape_group(&self, arms: &Range<usize>, from: usize, now: f64) -> bool{
+        self.tape_group.as_ref().is_some_and(|g| g.arms == *arms && g.caret == from && now - g.typed_at < TYPING_PAUSE)
+    }
+    //Keeps the starting world from before a tape edit, unless `joins` and the edit continues the last one.
+    //If `extends`, more typing can join this edit. `from` and `to` are the caret before and after the edit.
+    pub fn record_tape_edit(&mut self, arms: Range<usize>, from: usize, to: usize, joins: bool, extends: bool, now: f64){
+        if !(joins && self.continues_tape_group(&arms, from, now)){
             self.history.record(self.snapshot(), StepKind::Tapes);
         }
-        self.tape_group = extends.then_some((arms, to));
+        self.tape_group = extends.then_some(TapeGroup{arms, caret: to, typed_at: now});
     }
     //Updates everything that depends on the tapes after they changed, starting from timestep `earliest`
     pub fn finish_tape_edit(&mut self, mut earliest: usize){
