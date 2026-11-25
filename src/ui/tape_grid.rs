@@ -710,7 +710,7 @@ fn paint(ui: &egui::Ui, loaded: &Loaded, layout: &Layout, step_count: usize, fon
     painter.rect_filled(Rect::from_min_max(pos2(view.min.x, view.max.y - layout.ruler_below), pos2(gutter.max.x, view.max.y)), 0., fill);
     //Where the dragged arm number would go: the edge of the lit-up row, unless that's under a ruler
     if let Some((anchor, after)) = drop_beside{
-        let edge = layout.y(if after {anchor + 1} else {anchor});
+        let edge = windows::drop_line_y(egui::Rangef::new(layout.y(anchor), layout.y(anchor + 1)), after);
         if layout.rows_view().y_range().contains(edge){
             painter.hline(view.x_range(), edge, Stroke::new(2., visuals.selection.stroke.color));
         }

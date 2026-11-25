@@ -1,6 +1,6 @@
 //The Part window: undo, adding parts, the list of parts, and the selected part's fields
 use super::*;
-use windows::{drag_edge_scroll, locked_hover};
+use windows::{drag_edge_scroll, drop_line_y, locked_hover};
 
 //A number that's typed in rather than dragged, applied once on Enter or when the field loses focus
 //(each change is a layout edit). Only typed values are clamped to `range`, not the value shown.
@@ -363,7 +363,7 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
                 let Some(to) = reorder_block(&moved, part.index(), after) else {continue};
                 let selection = ui.visuals().selection;
                 ui.painter().set(backdrop, egui::Shape::rect_filled(row.rect, 2., selection.bg_fill.gamma_multiply(0.4)));
-                let edge = if after {row.rect.top()} else {row.rect.bottom()};
+                let edge = drop_line_y(row.rect.y_range(), after);
                 ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(&ctx);
@@ -696,6 +696,40 @@ mod tests {
         assert_eq!(loaded.single_selection(), Some(PartId::Glyph(1)));
         frame(&ctx, &mut loaded, vec![]);
         row(&ctx, "Bonder (2)");
+    }
+
+    //The y of each 2-pixel horizontal line drawn, which only a drop target draws
+    fn drop_lines(output: &egui::FullOutput) -> Vec<f32> {
+        fn walk(shape: &egui::Shape, ys: &mut Vec<f32>) {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, ys)),
+                egui::Shape::LineSegment{points, stroke} if stroke.width == 2. && points[0].y == points[1].y =>
+                    ys.push(points[0].y),
+                _ => {}
+            }
+        }
+        let mut ys = Vec::new();
+        output.shapes.iter().for_each(|clipped| walk(&clipped.shape, &mut ys));
+        ys
+    }
+
+    //Once the list went up in number, the line was still drawn on the side the row went before then
+    #[test]
+    fn the_drop_line_is_on_the_side_the_row_goes() {
+        use GlyphType::*;
+        for (half, edge) in [(top_half as fn(egui::Rect) -> Pos2, egui::Rect::top as fn(&egui::Rect) -> f32),
+            (bottom_half, egui::Rect::bottom)]
+        {
+            let ctx = context();
+            let mut loaded = listing_origin(&ctx, vec![glyph(0, 0, Bonding), glyph(0, 0, Calcification),
+                glyph(0, 0, Duplication)], vec![]);
+            let target = row(&ctx, "Duplication (3)");
+            let to = half(target);
+            press_and_move(&ctx, &mut loaded, row(&ctx, "Bonder (1)").center(), to);
+            let output = ctx.run_ui(RawInput{events: vec![Event::PointerMoved(to)], ..Default::default()},
+                |ui| part_window(ui.ctx(), &mut loaded));
+            assert_eq!(drop_lines(&output), vec![edge(&target)]);
+        }
     }
 
     #[test]

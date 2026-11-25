@@ -453,6 +453,11 @@ pub fn locked_hover(response: egui::Response, lock: Option<&str>) -> egui::Respo
         None => response,
     }
 }
+//The y of the line showing where rows dragged onto `row` go: its bottom edge if after it, as numbers go up down the
+//Part window's list and the tape grid, and its top if before it
+pub fn drop_line_y(row: egui::Rangef, after: bool) -> f32{
+    if after {row.max} else {row.min}
+}
 //While something is dragged, scrolls the scroll area `ui` is in when the pointer is near or past the top or bottom of
 //`rect` (its visible part), faster the further in it goes. egui doesn't scroll while dragging.
 pub fn drag_edge_scroll(ui: &egui::Ui, rect: egui::Rect){
