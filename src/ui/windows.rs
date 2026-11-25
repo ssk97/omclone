@@ -198,7 +198,8 @@ const BOARD_HELP: &[HelpEntry] = &[
 const PART_WINDOW_HELP: &[HelpEntry] = &[
     both("Click a part in the list", "Select only it. The list keeps its parts."),
     both("Shift+click a part in the list", "Add it to the selection, or take it out"),
-    both("List all", "List every part, keeping the selection"),
+    both("Ctrl+A, then Esc", "List every part, with none selected"),
+    both("Drag the line between the list and the fields", "Widen or narrow the list. Double-click it to reset it."),
     editor("Drag a part in the list", "Reorder it among the arms or the glyphs, with the other selected ones if it's selected"),
     editor("Shift+click", "Place a part from Add part, and keep placing more"),
     both("Pause at hex, then click a hex", "Moving forward pauses when an atom next lands there, which clears the hex. Cancel clears it too."),

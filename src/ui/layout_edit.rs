@@ -298,6 +298,14 @@ pub fn part_label(world: &World, part: PartId) -> String{
         PartId::Glyph(i) => format!("{} (glyph {})", glyph_name(&world.glyphs[i].glyph_type), i+1),
     }
 }
+//part_label as the Part window's list shows it, where a glyph's number goes without "glyph" to fit its narrow column.
+//The selected part's full label is beside it, which says what the number is.
+pub fn list_label(world: &World, part: PartId) -> String{
+    match part{
+        PartId::Arm(_) => part_label(world, part),
+        PartId::Glyph(i) => format!("{} ({})", glyph_name(&world.glyphs[i].glyph_type), i+1),
+    }
+}
 
 #[cfg(test)]
 mod tests {
