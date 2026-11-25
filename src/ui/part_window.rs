@@ -369,14 +369,6 @@ fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
                     let edge = drop_line_y(row.rect.y_range(), after);
                     ui.painter().hline(row.rect.x_range(), edge, egui::Stroke::new(2., selection.stroke.color));
                 }
-                //Between rows that aren't numbered one after the other, the targets either side of the gap put the
-                //parts in different places, and only the lit row tells them apart. This says where they go.
-                let result = match moved[..] {
-                    [from] => format!("{} {} to {}", kind_name(part.kind()), from + 1, to + 1),
-                    _ => format!("{} to {}–{}", count_of(part.kind(), moved.len()), to + 1, to + moved.len()),
-                };
-                egui::Tooltip::always_open(ctx.clone(), ui.layer_id(), egui::Id::new("part_list_drop"),
-                    egui::PopupAnchor::Pointer).show(|ui| ui.label(result));
                 if ui.input(|i| i.pointer.any_released()) {
                     egui::DragAndDrop::clear_payload(&ctx);
                     let edit = LayoutEdit::Reorder{kind: part.kind(), moved: moved.clone(), to};
@@ -460,12 +452,10 @@ fn part_section(ui: &mut egui::Ui, loaded: &mut Loaded, part: PartId){
         }
     }
 }
-fn kind_name(kind: PartKind) -> &'static str{
-    match kind {PartKind::Glyph => "Glyph", PartKind::Arm => "Arm"}
-}
 //As in "1 glyph" or "3 arms"
 fn count_of(kind: PartKind, count: usize) -> String{
-    format!("{count} {}{}", kind_name(kind).to_lowercase(), if count == 1 {""} else {"s"})
+    let name = match kind {PartKind::Glyph => "glyph", PartKind::Arm => "arm"};
+    format!("{count} {name}{}", if count == 1 {""} else {"s"})
 }
 //With several parts selected there are no fields, only Delete. The counts by kind say what dragging a row in the list
 //moves.
