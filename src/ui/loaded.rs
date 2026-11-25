@@ -264,10 +264,13 @@ impl Loaded{
         }
     }
     //Parts may be numbered differently afterwards, so the selection and list go back to the ones numbered for this
-    //world, and the tapes' selection shrinks back to the caret
+    //world, and the tapes' selection shrinks back to the caret. The track tool and Path text hold the old world's
+    //numbers, so they end; otherwise a restored selection could match a number that is now another glyph's.
     fn restore_base(&mut self, snapshot: Snapshot){
         self.replace_base(snapshot.world);
         self.numbering_version += 1;
+        self.end_track_mode();
+        self.path_text = None;
         self.set_selection(snapshot.selection);
         self.list = snapshot.list;
         self.tape_sel.collapse();

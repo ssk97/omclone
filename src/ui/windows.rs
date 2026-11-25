@@ -174,7 +174,7 @@ const BOARD_HELP: &[HelpEntry] = &[
     both("Click", "Select only a part: the topmost on the hex, or a selected one if it's there. The Part window lists the hex's parts."),
     both("Shift+click", "Add the part to the selection, or take it out"),
     both("Shift+drag", "Add the parts the box touches to the selection"),
-    both("Ctrl+A", "Select every part"),
+    both("Ctrl+A", "Select every part, and list them in the Part window"),
     both("Tab / Shift+Tab, or wheel", "While the button is held: pick another part on that hex"),
     editor("Drag", "Move a part, or all the selected parts if it's one of them, or pan with \"Left drag pans\" (Camera controls)"),
     display("Drag", "Pan"),
@@ -196,7 +196,7 @@ const BOARD_HELP: &[HelpEntry] = &[
 const PART_WINDOW_HELP: &[HelpEntry] = &[
     both("Click a part in the list", "Select only it. The list keeps its parts."),
     both("Shift+click a part in the list", "Add it to the selection, or take it out"),
-    both("Select all", "Select every part, and list them"),
+    both("List all", "List every part, keeping the selection"),
     editor("Drag a part in the list", "Reorder it among the arms or the glyphs, with the other selected ones if it's selected"),
     editor("Shift+click", "Place a part from Add part, and keep placing more"),
     both("Pause at hex, then click a hex", "Moving forward pauses when an atom next lands there, which clears the hex. Cancel clears it too."),
@@ -475,7 +475,9 @@ pub fn cursor_tooltip(egui_ctx: &egui::Context, loaded: &Loaded){
     let base = loaded.timeline.base();
     let (title, note) = if let Some(press) = loaded.tool.press() {
         let copy = if press.duplicate {", copying"} else {""};
-        let others = match loaded.highlighted_parts().len() - 1{
+        //A copy leaves the puzzle's parts out, which may include the held one
+        let moving = loaded.highlighted_parts();
+        let others = match moving.len() - usize::from(moving.contains(&press.part())){
             0 => String::new(),
             n => format!(" with {n} more selected"),
         };

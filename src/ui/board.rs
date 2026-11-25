@@ -238,11 +238,14 @@ impl Loaded{
     fn grabbed_parts(&self, press: &Press) -> BTreeSet<PartId>{
         if self.selection.contains(&press.part()) {self.selection.clone()} else {BTreeSet::from([press.part()])}
     }
-    //The parts to outline: the ones the press would drag while the mouse is held, otherwise the selection
+    //The parts to outline: while the mouse is held, the ones the press would move or copy (all it grabbed, if it can
+    //change none of them), otherwise the selection
     pub fn highlighted_parts(&self) -> BTreeSet<PartId>{
-        match self.tool.press(){
-            Some(press) => self.grabbed_parts(press),
-            None => self.selection.clone(),
+        let Some(press) = self.tool.press() else {return self.selection.clone()};
+        let grabbed = self.grabbed_parts(press);
+        match self.editable_parts(grabbed.iter().copied(), press.kind()){
+            Ok(parts) => parts.into_iter().collect(),
+            Err(_) => grabbed,
         }
     }
     //The selected part, if there's just one
@@ -1477,6 +1480,23 @@ mod tests {
         assert_eq!(track_path(loaded.timeline.base(), 1), vec![Pos::new(0, 2), Pos::new(1, 2), Pos::new(2, 2)]);
     }
 
+    //Undo put back a selection with the track tool's number, which there was the bonder's, so the tool stayed on and
+    //the next stroke turned the bonder into a track
+    #[test]
+    fn undoing_a_renumbering_ends_the_track_tool() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), track_at(0, 2)], vec![]);
+        loaded.select(Some(PartId::Glyph(0)));
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Glyph, moved: vec![0], to: 1}), Ok(()));
+        loaded.select(Some(PartId::Glyph(0)));
+        loaded.set_track_tool(0, Some(TrackTool::AddBack));
+        loaded.undo();
+        assert_eq!(loaded.single_selection(), Some(PartId::Glyph(0)), "the bonder, as before the reorder");
+        //Next to the end of the bonder
+        press(&mut loaded, 2, 0, KeyMods::default());
+        loaded.release();
+        assert_eq!(tracks(&loaded), vec![false, true]);
+    }
+
     #[test]
     fn the_tapes_caret_stays_on_its_arm_when_arms_are_renumbered() {
         let arms = (0..4).map(|i| Arm::new(Pos::new(i * 3, 0), 0, 1, ArmType::PlainArm,
@@ -1750,6 +1770,17 @@ mod tests {
         loaded.release();
         let copy = &loaded.timeline.base().arms[1];
         assert_eq!((copy.pos, copy.rot), (Pos::new(0, 3) + rotate(Pos::new(1, 0), 1), 1));
+    }
+
+    #[test]
+    fn a_copy_press_outlines_only_the_parts_it_copies() {
+        let mut loaded = Loaded::for_test(vec![input_at(0, 0)], vec![arm_at(1, 0), arm_at(3, 0)]);
+        loaded.select_all();
+        press(&mut loaded, 1, 0, CTRL);
+        assert_eq!(loaded.highlighted_parts(), selected(&[PartId::Arm(0), PartId::Arm(1)]));
+        loaded.release();
+        press(&mut loaded, 0, 0, CTRL);
+        assert_eq!(loaded.highlighted_parts(), selected(&[PartId::Glyph(0)]), "an input alone can't be copied, but is held");
     }
 
     #[test]

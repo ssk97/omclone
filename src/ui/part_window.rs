@@ -108,10 +108,12 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
         //Kept, blank, while nothing is selected, so selecting a part doesn't move what's below
         readout_label(ui, loaded, offset_readout(loaded).unwrap_or_default());
         ui.separator();
-        let mut select_all = false;
+        let mut list_all = false;
         ui.horizontal(|ui| {
             ui.label(list_title(&loaded.list)).on_hover_text(format!("{LIST_HELP} Arms run in number order. {GLYPH_ORDER_HELP}"));
-            select_all = ui.button("Select all").on_hover_text("Ctrl+A. Lists every part too.").clicked();
+            //Listing without selecting lets one row at a time be dragged, as a drag takes the selected rows along
+            list_all = ui.button("List all").on_hover_text("List every part, keeping the selection. Ctrl+A selects \
+                and lists every part.").clicked();
         });
         let action = part_list(ui, loaded);
         ui.separator();
@@ -134,14 +136,14 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
             },
             None => {}
         }
-        if select_all {
-            loaded.select_all();
+        if list_all {
+            loaded.list = PartList::All;
         }
     });
 }
 const LIST_HELP: &str = "Clicking the board lists the parts on that hex, topmost first. Shift+click or Shift+drag \
-    on the board lists the selection, and Select all lists every part. Click a row to select only it, or Shift+click \
-    it to add or remove it. Drag a row to reorder it, along with the other selected parts of its kind if it's \
+    on the board lists the parts then selected, and List all or Ctrl+A lists every part. The list keeps its parts \
+    until the next pick, whatever is selected. Click a row to select only it, or Shift+click it to add or remove it. Drag a row to reorder it, along with the other selected parts of its kind if it's \
     selected.";
 const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
     overlap, the lower-numbered track wins.";
@@ -149,7 +151,7 @@ fn list_title(list: &PartList) -> String{
     match list {
         PartList::Nothing => "Parts".to_owned(),
         PartList::Hex(hex) => format!("Parts at ({}, {})", hex.x, hex.y),
-        PartList::Parts(parts) => format!("Selected parts ({})", parts.len()),
+        PartList::Parts(parts) => format!("Picked parts ({})", parts.len()),
         PartList::All => "All parts".to_owned(),
     }
 }
