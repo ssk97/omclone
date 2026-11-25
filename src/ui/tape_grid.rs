@@ -379,10 +379,12 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
         }
     }
     let Some(step) = step else {
-        //An arm's number also selects the tapes' selected arms on the board, and the Part window lists them
-        let arms = sel.arms().map(PartId::Arm).collect();
-        loaded.set_selection(arms);
-        loaded.list_selection();
+        //An arm's number also selects the tapes' selected arms on the board. As a click there would, the Part window
+        //lists the parts where they are, such as the track under an arm.
+        let arms = sel.arms();
+        let hexes: Vec<Pos> = arms.clone().map(|i| loaded.timeline.curr().arms[i].pos).collect();
+        loaded.list_stacks(hexes);
+        loaded.set_selection(arms.map(PartId::Arm).collect());
         return;
     };
     if shift{
@@ -970,14 +972,17 @@ mod editing_tests {
     #[test]
     fn arm_numbers_select_their_arms_on_the_board() {
         let ctx = egui::Context::default();
-        let mut loaded = Loaded::for_test(vec![], numbered_arms(4));
+        //Under the third arm, at (6,0)
+        let track = Glyph{pos: Pos::new(6, 0), rot: 0, glyph_type: GlyphType::Track(vec![Pos::new(0, 0), Pos::new(1, 0)])};
+        let mut loaded = Loaded::for_test(vec![track], numbered_arms(4));
         let layout = grid_frame(&ctx, &mut loaded, vec![]);
         grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
         assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(1)]));
         let shift_click = egui::RawInput{events: quick_click(number(&layout, 3)), modifiers: Modifiers::SHIFT, ..Default::default()};
         let _ = ctx.run_ui(shift_click, |ui| {tape_grid(ui, &mut loaded);});
         assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)]), "Shift takes the rows between");
-        assert_eq!(loaded.list, PartList::Parts(vec![PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)]), "and lists them");
+        assert_eq!(loaded.list, PartList::Parts(BTreeSet::from([PartId::Glyph(0), PartId::Arm(1), PartId::Arm(2), PartId::Arm(3)])),
+            "and lists them, with the track under one");
         grid_frame(&ctx, &mut loaded, quick_click(layout.cell_rect(0, 2).center()));
         assert_eq!(loaded.selection.len(), 3, "a cell leaves the board's selection alone");
     }

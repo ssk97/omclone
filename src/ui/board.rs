@@ -77,11 +77,9 @@ pub struct PanPress{
     press_px: (f32, f32),
     last_px: (f32, f32),
     panning: bool,
-    //What the Part window listed before the press, which a pan puts back
-    list: PartList,
 }
-//Shift is held with the left button on the board. A click adds or removes the part there, and a drag draws a box
-//that adds the parts it touches.
+//Shift is held with the left button on the board. A click selects every part on the hex, or deselects them all if
+//they're all selected, and a drag draws a box that adds the parts it touches.
 pub struct BoxSelect{
     press_px: (f32, f32),
     press_hex: Pos,
@@ -257,9 +255,13 @@ impl Loaded{
     pub fn select(&mut self, part: Option<PartId>){
         self.set_selection(part.into_iter().collect());
     }
+    //The selected parts are added to the list, which always holds them (see PartList).
     //A track tool ends when anything but its track is selected (a new track has none yet, so it keeps on
     //when nothing is selected). So does Path text, which would otherwise be shown again unapplied.
     pub fn set_selection(&mut self, parts: BTreeSet<PartId>){
+        if let PartList::Parts(listed) = &mut self.list{
+            listed.extend(&parts);
+        }
         self.selection = parts;
         let single = self.single_selection();
         if self.tool.track_mode().is_some_and(|m| m.glyph.map(PartId::Glyph) != single){
@@ -282,9 +284,10 @@ impl Loaded{
         self.set_selection(self.timeline.base().all_parts().collect());
         self.list = PartList::All;
     }
-    //Lists the selection, after a pick that changed it
-    pub fn list_selection(&mut self){
-        self.list = PartList::Parts(self.selection.iter().copied().collect());
+    //Lists every part on these hexes, as they are now, in place of what was listed
+    pub fn list_stacks(&mut self, hexes: impl IntoIterator<Item=Pos>){
+        let world = self.timeline.curr();
+        self.list = PartList::Parts(hexes.into_iter().flat_map(|hex| world.parts_at(hex)).collect());
     }
     fn check_overlap(&self, overlaps: &[Pos]) -> std::result::Result<(), String>{
         match overlaps.first(){
@@ -306,7 +309,7 @@ impl Loaded{
         }
         Ok(())
     }
-    //Makes the edit if it's allowed. The parts it adds are selected, and copies are listed too.
+    //Makes the edit if it's allowed. The parts it adds are selected (and so listed).
     pub fn apply_edit(&mut self, edit: &LayoutEdit) -> std::result::Result<(), String>{
         if edit.is_noop(){
             return Ok(());
@@ -324,9 +327,6 @@ impl Loaded{
         self.follow_renumbering(edit);
         if edit.is_structural(){
             self.set_selection(parts.into_iter().collect());
-        }
-        if matches!(edit, LayoutEdit::Duplicate(_)){
-            self.list_selection();
         }
         Ok(())
     }
@@ -452,7 +452,7 @@ impl Loaded{
             return;
         }
         if picking || self.left_drag_pans(){
-            self.pan = Some(PanPress{press_px: px, last_px: px, panning: false, list: self.list.clone()});
+            self.pan = Some(PanPress{press_px: px, last_px: px, panning: false});
         }
         if picking{
             self.tool = BoardTool::PickHex(Some(press_hex));
@@ -463,19 +463,15 @@ impl Loaded{
         if stack.is_empty(){
             //A press that may become a pan waits to see if it's a click (see release)
             if self.pan.is_none(){
+                self.list = PartList::NOTHING;
                 self.select(None);
-                self.list = PartList::Nothing;
             }
             return;
         }
         let cand = stack.iter().position(|p| self.selection.contains(p)).unwrap_or(0);
         let press = Press{press_px: px, press_xy, press_hex, stack, cand, wheel_accum: 0.,
             duplicate: keymods.ctrl || keymods.logo, drag: None};
-        //Pressing a group lists its hex only if it turns out to be a click (see release), so moving the group keeps
-        //it listed
-        if self.grabbed_parts(&press).len() == 1{
-            self.list = PartList::Hex(press_hex);
-        }
+        //The hex is listed on release (see there), as a press can still be cancelled or become a pan
         self.tool = BoardTool::Select(Some(Held::Part(press)));
     }
     //The edit that dropping the press's parts here would make (snapped to the nearest hex), or why it can't be made
@@ -499,16 +495,27 @@ impl Loaded{
         world.all_parts().filter(|&part| world.part_footprint(part).iter()
             .any(|&hex| hex_meets_rect(hex, selecting.press_xy, selecting.cursor_xy))).collect()
     }
+    //A box adds the parts it touches. A click toggles the hex's parts as a whole: if they're all selected, they're
+    //taken out, and otherwise they're all added. Either way, they're listed.
     fn finish_box(&mut self, selecting: BoxSelect){
+        let mut parts = self.selection.clone();
         if selecting.dragged{
-            let mut parts = self.selection.clone();
             parts.extend(self.parts_in_box(&selecting));
-            self.set_selection(parts);
         } else {
-            let Some(&top) = self.timeline.curr().parts_at(selecting.press_hex).first() else {return};
-            self.toggle_selected(top);
+            let stack = self.timeline.curr().parts_at(selecting.press_hex);
+            if stack.is_empty(){
+                return;
+            }
+            if let PartList::Parts(listed) = &mut self.list{
+                listed.extend(&stack);
+            }
+            if stack.iter().all(|part| parts.contains(part)){
+                parts.retain(|part| !stack.contains(part));
+            } else {
+                parts.extend(stack);
+            }
         }
-        self.list_selection();
+        self.set_selection(parts);
     }
     //Puts the part on the cursor down; with `keep`, another stays on the cursor
     fn place(&mut self, hex: Pos, keep: bool){
@@ -582,7 +589,6 @@ impl Loaded{
         if let Some(mut pan) = self.pan.take(){
             if !pan.panning && past_drag_threshold(pan.press_px, px){
                 pan.panning = true;
-                self.list = pan.list.clone();
                 self.cancel_press();
             }
             if pan.panning{
@@ -663,23 +669,22 @@ impl Loaded{
             None => {
                 //A click on an empty hex, which the press left for now. A pan or a cancel took the pan out.
                 if pan.is_some_and(|p| !p.panning){
+                    self.list = PartList::NOTHING;
                     self.select(None);
-                    self.list = PartList::Nothing;
                 }
                 return;
             }
         };
         let Some(drag) = &press.drag else {
+            self.list = PartList::Parts(press.stack.iter().copied().collect());
             self.select(Some(press.part()));
-            self.list = PartList::Hex(press.press_hex);
             return;
         };
         let edit = self.press_edit(&press, drag);
-        //A group stays selected and listed. A lone part may have been reached from a group's press (see cycle), which
-        //didn't list the hex.
+        //A lone part is selected and its hex listed, as for a click. A group stays selected and listed.
         if self.grabbed_parts(&press).len() == 1{
+            self.list = PartList::Parts(press.stack.iter().copied().collect());
             self.select(Some(press.part()));
-            self.list = PartList::Hex(press.press_hex);
         }
         if let Err(err) = edit.map_err(str::to_owned).and_then(|edit| self.apply_edit(&edit)){
             self.message = Some(err);
@@ -761,13 +766,15 @@ impl Loaded{
                 }
             }
             //Lets go of one thing at a time: the press, stroke or pan, then the part being placed, the track mode or
-            //hex picking, then the selection
+            //hex picking, then the selection, then the list
             KeyCode::Escape => {
                 if !self.cancel_press(){
                     if !matches!(self.tool, BoardTool::Select(None)){
                         self.end_tool();
                     } else if !self.selection.is_empty(){
                         self.select(None);
+                    } else if self.list != PartList::NOTHING{
+                        self.list = PartList::NOTHING;
                     } else {
                         return false;
                     }
@@ -1012,6 +1019,8 @@ impl Loaded{
     }
     fn draw_board(&self, render: &mut RenderDataBase, ctx: &mut Context){
         const SELECT_COLOR: Color = [0., 0.8, 1., 1.];
+        //A faint SELECT_COLOR, as the selection is always among the listed parts
+        const LISTED_COLOR: Color = [SELECT_COLOR[0], SELECT_COLOR[1], SELECT_COLOR[2], 0.35];
         const OVERLAP_COLOR: Color = [1., 0.1, 0.1, 1.];
         const TRACK_TOOL_COLOR: Color = [1., 0.75, 0., 1.];
         const TRACK_REACH_COLOR: Color = [0.55, 0.4, 0., 1.];
@@ -1036,6 +1045,11 @@ impl Loaded{
             let mut outlined = self.highlighted_parts();
             if let Some(selecting) = self.tool.box_select().filter(|s| s.dragged){
                 outlined.extend(self.parts_in_box(selecting));
+            }
+            //Listing every part would ring the whole board, so only a list of some is shown
+            if let PartList::Parts(listed) = &self.list{
+                let listed: Vec<Pos> = listed.difference(&outlined).flat_map(|&part| world.part_footprint(part)).collect();
+                render.draw_hex_rings(ctx, &self.camera, &listed, LISTED_COLOR);
             }
             let outlined: Vec<Pos> = outlined.into_iter().flat_map(|part| world.part_footprint(part)).collect();
             render.draw_hex_rings(ctx, &self.camera, &outlined, SELECT_COLOR);
@@ -1100,6 +1114,9 @@ mod tests {
         Glyph{pos: Pos::new(x, y), rot: 0, glyph_type: GlyphType::Bonding}
     }
     const SHIFT: KeyMods = KeyMods{shift: true, ctrl: false, alt: false, logo: false};
+    fn listed(parts: &[PartId]) -> PartList{
+        PartList::Parts(parts.iter().copied().collect())
+    }
 
     #[test]
     fn dragging_a_glyph_moves_it() {
@@ -1135,7 +1152,7 @@ mod tests {
         assert!((loaded.camera.screen_to_world(to, SCREEN) - grabbed).norm() < 1e-3, "the board follows the cursor");
         assert_eq!(loaded.timeline.base().glyphs[0].pos, Pos::new(0, 0));
         assert_eq!(loaded.single_selection(), None, "a pan selects nothing");
-        assert_eq!(loaded.list, PartList::Nothing);
+        assert_eq!(loaded.list, PartList::NOTHING);
         assert!(!loaded.dirty);
     }
 
@@ -1144,7 +1161,7 @@ mod tests {
         let mut loaded = panning(vec![bonder(0, 0)]);
         click(&mut loaded, 0, 0);
         assert_eq!(loaded.single_selection(), Some(PartId::Glyph(0)));
-        assert_eq!(loaded.list, PartList::Hex(Pos::new(0, 0)));
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0)]));
         //A drag from an empty hex, or from another part, keeps both
         let glyph_px = px(&loaded, 0, 0);
         for from in [(5, 5), (0, 0)]{
@@ -1153,12 +1170,12 @@ mod tests {
             loaded.pointer_moved((at.0 + 50., at.1), SCREEN, false);
             loaded.release();
             assert_eq!(loaded.single_selection(), Some(PartId::Glyph(0)), "dragged from {from:?}");
-            assert_eq!(loaded.list, PartList::Hex(Pos::new(0, 0)), "dragged from {from:?}");
+            assert_eq!(loaded.list, listed(&[PartId::Glyph(0)]), "dragged from {from:?}");
         }
         assert_ne!(px(&loaded, 0, 0), glyph_px, "it panned");
         click(&mut loaded, 5, 5);
         assert_eq!(loaded.single_selection(), None);
-        assert_eq!(loaded.list, PartList::Nothing);
+        assert_eq!(loaded.list, PartList::NOTHING);
     }
 
     #[test]
@@ -1657,19 +1674,25 @@ mod tests {
     }
 
     #[test]
-    fn shift_click_adds_or_removes_a_part_and_lists_the_selection() {
-        let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(5, 0)], vec![]);
+    fn shift_click_toggles_the_whole_stack_and_keeps_it_listed() {
+        //The arm is on the bonder's first hex, (0,0), and the bonder alone covers (1,0)
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0), bonder(5, 0)], vec![arm_at(0, 0)]);
+        let stack = [PartId::Glyph(0), PartId::Arm(0)];
         shift_click(&mut loaded, 0, 0);
+        assert_eq!(loaded.selection, selected(&stack), "both parts on the hex");
         shift_click(&mut loaded, 5, 0);
-        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0), PartId::Glyph(1)]));
+        shift_click(&mut loaded, 0, 0);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]), "a stack that's all selected is taken out");
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1), PartId::Arm(0)]), "but stays listed");
         shift_click(&mut loaded, 1, 0);
-        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]), "a second Shift+click takes it out");
-        assert_eq!(loaded.list, PartList::Parts(vec![PartId::Glyph(1)]));
+        shift_click(&mut loaded, 0, 0);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0), PartId::Glyph(1), PartId::Arm(0)]),
+            "a stack that's partly selected is all added");
         shift_click(&mut loaded, 9, 9);
-        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]), "an empty hex changes nothing");
-        click(&mut loaded, 0, 0);
+        assert_eq!(loaded.selection.len(), 3, "an empty hex changes nothing");
+        click(&mut loaded, 1, 0);
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]), "a click selects only that part");
-        assert_eq!(loaded.list, PartList::Hex(Pos::new(0, 0)));
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0)]), "and lists only its hex");
     }
 
     #[test]
@@ -1749,14 +1772,15 @@ mod tests {
     #[test]
     fn ctrl_dragging_a_group_copies_all_but_the_puzzles_parts() {
         let mut loaded = Loaded::for_test(vec![input_at(0, 0)], vec![arm_at(1, 0)]);
-        loaded.select_all();
+        shift_click(&mut loaded, 0, 0);
+        shift_click(&mut loaded, 1, 0);
         drag(&mut loaded, (1, 0), (1, 3), CTRL);
         let base = loaded.timeline.base();
         assert_eq!(glyph_positions(&loaded), vec![Pos::new(0, 0)], "the input stays, uncopied");
         assert_eq!(base.arms.iter().map(|a| a.pos).collect::<Vec<_>>(), vec![Pos::new(1, 0), Pos::new(1, 3)]);
         assert_eq!(base.arms[1].tape().instructions, base.arms[0].tape().instructions);
         assert_eq!(loaded.selection, selected(&[PartId::Arm(1)]), "the copies are selected");
-        assert_eq!(loaded.list, PartList::Parts(vec![PartId::Arm(1)]), "and listed");
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Arm(0), PartId::Arm(1)]), "and listed with the originals");
     }
 
     //Leaving the input out of the copy left a lone arm, which turned in place as a lone arm does
@@ -1817,8 +1841,10 @@ mod tests {
         shift_click(&mut loaded, 6, 0);
         assert_eq!(loaded.apply_edit(&LayoutEdit::Delete([PartId::Glyph(0)].into())), Ok(()));
         assert!(loaded.selection.is_empty(), "a deletion selects nothing");
-        assert_eq!(loaded.list, PartList::Parts(vec![PartId::Glyph(0), PartId::Glyph(1)]), "the list keeps its parts");
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1)]), "the list keeps its parts");
         assert_eq!(glyph_positions(&loaded), vec![Pos::new(3, 0), Pos::new(6, 0)]);
+        assert_eq!(loaded.apply_edit(&LayoutEdit::Delete([PartId::Glyph(0)].into())), Ok(()));
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0)]), "a deleted part leaves the list");
     }
 
     #[test]
@@ -1833,7 +1859,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_clears_the_selection_last() {
+    fn esc_clears_the_selection_then_the_list() {
         let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
         loaded.select_all();
         loaded.start_placing(NewPart::Glyph(GlyphType::Calcification));
@@ -1841,6 +1867,9 @@ mod tests {
         assert_eq!(loaded.selection.len(), 1, "the part being placed goes first");
         assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
         assert!(loaded.selection.is_empty());
+        assert_eq!(loaded.list, PartList::All, "the list stays a while longer");
+        assert!(loaded.handle_key(KeyCode::Escape, KeyMods::default()));
+        assert_eq!(loaded.list, PartList::NOTHING);
         assert!(!loaded.handle_key(KeyCode::Escape, KeyMods::default()));
     }
 
@@ -1857,7 +1886,36 @@ mod tests {
         move_to(&mut loaded, 1, 3);
         loaded.release();
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]));
-        assert_eq!(loaded.list, PartList::Hex(Pos::new(1, 0)));
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1)]), "the stack it was pressed in");
+    }
+
+    #[test]
+    fn selected_parts_are_always_listed() {
+        let mut loaded = Loaded::for_test(vec![bonder(0, 0)], vec![]);
+        click(&mut loaded, 0, 0);
+        loaded.start_placing(NewPart::Glyph(GlyphType::Calcification));
+        click(&mut loaded, 4, 0);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(1)]), "a placed part is selected");
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1)]), "and added to the list");
+        //A press that's let go of without a click or drop leaves both as they were
+        press(&mut loaded, 0, 0, KeyMods::default());
+        loaded.board_input(BoardInput::Cancel, false);
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1)]));
+    }
+
+    #[test]
+    fn listed_parts_stay_listed_as_they_move() {
+        let track = Glyph{pos: Pos::new(0, 0), rot: 0, glyph_type: GlyphType::Track((0..4).map(|x| Pos::new(x, 0)).collect())};
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![Instr::Forward, Instr::Forward]));
+        let mut loaded = Loaded::for_test(vec![track, bonder(0, 3)], vec![arm]);
+        click(&mut loaded, 0, 0);
+        let start = listed(&[PartId::Glyph(0), PartId::Arm(0)]);
+        assert_eq!(loaded.list, start, "the arm and the track under it");
+        //The arm rides off its hex, and then the group with it moves
+        loaded.timeline.advance_to(2.).unwrap();
+        shift_click(&mut loaded, 0, 3);
+        drag(&mut loaded, (0, 3), (0, 5), KeyMods::default());
+        assert_eq!(loaded.list, listed(&[PartId::Glyph(0), PartId::Glyph(1), PartId::Arm(0)]), "both stay listed");
     }
 
     #[test]

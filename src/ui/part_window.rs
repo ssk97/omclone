@@ -141,17 +141,17 @@ pub fn part_window(egui_ctx: &egui::Context, loaded: &mut Loaded){
         }
     });
 }
-const LIST_HELP: &str = "Clicking the board lists the parts on that hex, topmost first. Shift+click or Shift+drag \
-    on the board lists the parts then selected, and List all or Ctrl+A lists every part. The list keeps its parts \
-    until the next pick, whatever is selected. Click a row to select only it, or Shift+click it to add or remove it. Drag a row to reorder it, along with the other selected parts of its kind if it's \
-    selected.";
+const LIST_HELP: &str = "Clicking the board, or an arm number in the tapes, lists the parts on that hex, topmost \
+    first, in place of what was listed. Shift+click or Shift+drag on the board adds parts to the list. List all or \
+    Ctrl+A lists every part, and Esc, once nothing is selected, empties the list. The selected parts are always \
+    listed. Click a row to select only it, or Shift+click it to add or remove it. Drag a row to reorder it, along \
+    with the other selected parts of its kind if it's selected.";
 const GLYPH_ORDER_HELP: &str = "Glyphs with higher numbers are drawn on top and act after lower ones. Where tracks \
     overlap, the lower-numbered track wins.";
 fn list_title(list: &PartList) -> String{
     match list {
-        PartList::Nothing => "Parts".to_owned(),
-        PartList::Hex(hex) => format!("Parts at ({}, {})", hex.x, hex.y),
-        PartList::Parts(parts) => format!("Picked parts ({})", parts.len()),
+        PartList::Parts(parts) if parts.is_empty() => "Parts".to_owned(),
+        PartList::Parts(parts) => format!("Parts ({})", parts.len()),
         PartList::All => "All parts".to_owned(),
     }
 }
@@ -168,28 +168,23 @@ struct DraggedRow(PartId);
 const PART_LIST_ROWS: f32 = 12.;
 //The parts the Part window lists (see PartList), topmost first: arms, then glyphs, higher numbers first
 fn listed_parts(loaded: &Loaded) -> Vec<PartId>{
-    let base = loaded.timeline.base();
-    let mut parts = match &loaded.list {
-        PartList::Nothing => Vec::new(),
-        //Arms are listed where they are now, as they're picked on the board
-        PartList::Hex(hex) => loaded.timeline.curr().parts_at(*hex),
-        PartList::Parts(parts) => parts.clone(),
-        PartList::All => base.all_parts().collect(),
+    //PartId and all_parts both order glyphs before arms, each by number, so reversing them puts the topmost first
+    let mut parts: Vec<PartId> = match &loaded.list {
+        PartList::Parts(parts) => parts.iter().copied().collect(),
+        PartList::All => loaded.timeline.base().all_parts().collect(),
     };
-    //PartId orders glyphs before arms, each by number
-    parts.sort_by(|a, b| b.cmp(a));
+    parts.reverse();
     parts
 }
-//The parts the last pick on the board found. Clicking one selects it, and a part can be dragged above or below another
+//The parts that picks on the board found. Clicking one selects it, and a part can be dragged above or below another
 //of its kind to reorder them, unless the parts are renumbered in between (see part_window).
 fn part_list(ui: &mut egui::Ui, loaded: &Loaded) -> Option<ListAction>{
     let base = loaded.timeline.base();
     let parts = listed_parts(loaded);
     if parts.is_empty() {
         ui.weak(match loaded.list {
-            PartList::Nothing => "(click the board)",
-            PartList::Hex(_) => "(nothing here now)",
-            PartList::Parts(_) | PartList::All => "(none)",
+            PartList::Parts(_) => "(click the board)",
+            PartList::All => "(none)",
         });
         return None;
     }
@@ -564,7 +559,7 @@ mod tests {
     //A solution with these glyphs, its Part window listing the parts at (0,0)
     fn listing_origin(ctx: &egui::Context, glyphs: Vec<Glyph>, arms: Vec<Arm>) -> Loaded {
         let mut loaded = Loaded::for_test(glyphs, arms);
-        loaded.list = PartList::Hex(Pos::new(0, 0));
+        loaded.list_stacks([Pos::new(0, 0)]);
         settle(ctx, &mut loaded);
         loaded
     }
@@ -731,6 +726,26 @@ mod tests {
         shift_click(&ctx, &mut loaded);
         assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]));
         assert_eq!(loaded.list, PartList::All);
+    }
+
+    //Taking a part out of the selection leaves it listed
+    #[test]
+    fn a_deselected_part_can_be_selected_again_from_the_list() {
+        let ctx = context();
+        let arm = Arm::new(Pos::new(0, 0), 0, 1, ArmType::PlainArm, Tape::new(0, vec![]));
+        let mut loaded = listing_origin(&ctx, vec![glyph(0, 0, GlyphType::Bonding)], vec![arm]);
+        loaded.set_selection(selected(&[PartId::Glyph(0), PartId::Arm(0)]));
+        frame(&ctx, &mut loaded, vec![]);
+        let shift_click = |ctx: &egui::Context, loaded: &mut Loaded| {
+            let input = RawInput{events: click(row(ctx, "Arm 1 (Arm)").center()), modifiers: egui::Modifiers::SHIFT,
+                ..Default::default()};
+            let _ = ctx.run_ui(input, |ui| part_window(ui.ctx(), loaded));
+        };
+        shift_click(&ctx, &mut loaded);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0)]));
+        frame(&ctx, &mut loaded, vec![]);
+        shift_click(&ctx, &mut loaded);
+        assert_eq!(loaded.selection, selected(&[PartId::Glyph(0), PartId::Arm(0)]));
     }
 
     #[test]

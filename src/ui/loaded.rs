@@ -28,16 +28,18 @@ pub struct Snapshot{
     selection: BTreeSet<PartId>,
     list: PartList,
 }
-//What the Part window lists: the parts that the last pick on the board found. Clicks in the list change the selection,
-//not this.
+//What the Part window lists: the parts that picks on the board (or the tape grid's arm numbers) found. Clicks in the
+//list change the selection, not this. The selection is always listed (see Loaded::set_selection), so the list shows
+//every part that an edit of the selection changes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PartList{
-    Nothing,
-    //The parts on this hex, as they are now
-    Hex(Pos),
-    //The selection made by a Shift+click, a box or a copy
-    Parts(Vec<PartId>),
+    //Kept by number, not by where the parts are, so they stay listed as arms move and through edits that renumber
+    //them (see follow_renumbering)
+    Parts(BTreeSet<PartId>),
     All,
+}
+impl PartList{
+    pub const NOTHING: PartList = PartList::Parts(BTreeSet::new());
 }
 //Hidden still checks collisions and counts area, so showing it again doesn't re-simulate
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -158,7 +160,7 @@ impl Loaded{
             popup_reload: false,
 
             selection: BTreeSet::new(),
-            list: PartList::Nothing,
+            list: PartList::NOTHING,
             list_press_numbering: 0,
             allow_overlap,
             left_drag_pans: false,
@@ -271,8 +273,8 @@ impl Loaded{
         self.numbering_version += 1;
         self.end_track_mode();
         self.path_text = None;
-        self.set_selection(snapshot.selection);
         self.list = snapshot.list;
+        self.set_selection(snapshot.selection);
         self.tape_sel.collapse();
     }
     //Puts back the tapes and loop length from a step that only changed those. The parts are the same, so the

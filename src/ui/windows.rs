@@ -171,9 +171,10 @@ const fn display(keys: &'static str, does: &'static str) -> HelpEntry{
 }
 //These are the only list of the keys: the README points here
 const BOARD_HELP: &[HelpEntry] = &[
-    both("Click", "Select only a part: the topmost on the hex, or a selected one if it's there. The Part window lists the hex's parts."),
-    both("Shift+click", "Add the part to the selection, or take it out"),
-    both("Shift+drag", "Add the parts the box touches to the selection"),
+    both("Click", "Select only a part: a selected one on the hex if there is one, otherwise the topmost. The Part window lists the hex's parts, \
+        which are ringed faintly."),
+    both("Shift+click", "Select every part on the hex and list them, or take them all out of the selection if they're all selected"),
+    both("Shift+drag", "Select and list the parts the box touches, adding to what's there"),
     both("Ctrl+A", "Select every part, and list them in the Part window"),
     both("Tab / Shift+Tab, or wheel", "While the button is held: pick another part on that hex"),
     editor("Drag", "Move a part, or all the selected parts if it's one of them, or pan with \"Left drag pans\" (Camera controls)"),
@@ -182,9 +183,10 @@ const BOARD_HELP: &[HelpEntry] = &[
     editor("A / D", "While dragging or placing: turn counterclockwise / clockwise. Several parts turn around the hex held."),
     editor("W / S", "While dragging or placing arms: lengthen / shorten them"),
     editor("Delete or Backspace", "Delete the selected parts (but not inputs, outputs or conduits)"),
-    editor("Esc", "Let go of the held part, then stop placing parts, drawing track or picking a hex, then clear the selection"),
+    editor("Esc", "Let go of the held part, then stop placing parts, drawing track or picking a hex, then clear the selection, \
+        then the Part window's list"),
     editor("Right-click", "Stop placing parts, drawing track or picking a hex"),
-    display("Esc", "Stop picking a hex for Pause at hex, then clear the selection"),
+    display("Esc", "Stop picking a hex for Pause at hex, then clear the selection, then the Part window's list"),
     display("Right-click", "Stop picking a hex for Pause at hex"),
     both("Right or middle drag", "Pan"),
     both("Wheel", "Zoom"),
@@ -206,8 +208,8 @@ const PART_WINDOW_HELP: &[HelpEntry] = &[
 const TAPE_HELP: &[HelpEntry] = &[
     both("Click a cell", "Move the caret, and the timeline, there"),
     both("Click the ruler", "Go to that timestep"),
-    both("Click an arm number", "Select its row, and the arm on the board"),
-    both("Shift+click an arm number", "Select the rows to it, and their arms on the board"),
+    both("Click an arm number", "Select its row, and the arm on the board. The Part window lists the parts on its hex."),
+    both("Shift+click an arm number", "Select the rows to it, and their arms on the board, listing the parts on their hexes"),
     editor("Drag an arm number", "Reorder the arms"),
     both("Drag; Shift+click; Shift+arrows", "Select"),
     both("Arrows", "Move the caret"),
