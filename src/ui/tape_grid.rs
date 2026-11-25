@@ -23,8 +23,9 @@ pub struct TapeSelection{
     pub caret: usize,
     //The cell a drag started on
     drag_from: Option<(usize, usize)>,
-    //The arm whose number a drag started on, which dragging reorders, and the numbering_version then
-    reorder_from: Option<(usize, u64)>,
+    //The arm whose number is pressed, and the numbering_version then. Dragging it reorders the selected arms, which
+    //include it.
+    number_press: Option<(usize, u64)>,
     //The caret's arm and timestep when it was last scrolled into view
     shown: (usize, usize),
 }
@@ -313,16 +314,16 @@ impl Layout{
     fn rows_view(&self) -> Rect{
         Rect::from_x_y_ranges(self.view.x_range(), self.view.min.y + self.ruler..=self.view.max.y - self.ruler_below)
     }
-    //Where dropping the arm numbered `from` (as an index) at `pos` would put it: the arm it goes beside, whether after
-    //it, and its new index. Only a drop on the rows counts.
-    fn reorder_target(&self, pos: Pos2, from: usize, arms: usize, steps: usize) -> Option<(usize, bool, usize)>{
+    //Where dropping the arms numbered `moved` (as indexes, a run) at `pos` would put them: the arm they go beside,
+    //whether after it, and the Reorder's `to`. Only a drop on the rows counts.
+    fn reorder_target(&self, pos: Pos2, moved: &[usize], arms: usize, steps: usize) -> Option<(usize, bool, usize)>{
         if !self.rows_view().contains(pos){
             return None;
         }
         let (anchor, _) = self.cell_at(pos, arms, steps);
-        //Lower rows have higher numbers, so the bottom half puts it after this arm
+        //Lower rows have higher numbers, so the bottom half puts them after this arm
         let after = pos.y >= self.cell_rect(anchor, 0).center().y;
-        Some((anchor, after, reorder_block(&[from], anchor, after)?))
+        Some((anchor, after, reorder_block(moved, anchor, after)?))
     }
     //The cell at `pos`, clamped to the grid
     fn cell_at(&self, pos: Pos2, arms: usize, steps: usize) -> (usize, usize){
@@ -349,9 +350,11 @@ impl Layout{
     }
 }
 fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
-    let can_reorder = loaded.edit_lock().is_none();
     let numbering = loaded.numbering_version;
     let sel = &mut loaded.tape_sel;
+    //A press on the number of one of several selected arms keeps them, so they can be dragged together. If it's a
+    //click, only that arm is selected on release.
+    let keep_arms = matches!(hit, Hit::Gutter(arm) if !shift && sel.arms().len() > 1 && sel.arms().contains(&arm));
     let step = match hit{
         Hit::Cell(arm, step) => {
             sel.arm = arm;
@@ -359,7 +362,9 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
         }
         Hit::Ruler(step) => Some(step),
         Hit::Gutter(arm) => {
-            sel.arm = arm;
+            if !keep_arms{
+                sel.arm = arm;
+            }
             None
         }
     };
@@ -372,19 +377,15 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
                 sel.drag_from = Some((arm, step));
             }
             Hit::Gutter(arm) => {
-                sel.collapse();
-                //Clicking only selects its row; dragging reorders it
-                sel.reorder_from = can_reorder.then_some((arm, numbering));
+                if !keep_arms{
+                    sel.collapse();
+                }
+                sel.number_press = Some((arm, numbering));
             }
         }
     }
     let Some(step) = step else {
-        //An arm's number also selects the tapes' selected arms on the board. As a click there would, the Part window
-        //lists the parts where they are, such as the track under an arm.
-        let arms = sel.arms();
-        let hexes: Vec<Pos> = arms.clone().map(|i| loaded.timeline.curr().arms[i].pos).collect();
-        loaded.list_stacks(hexes);
-        loaded.set_selection(arms.map(PartId::Arm).collect());
+        select_tape_arms(loaded);
         return;
     };
     if shift{
@@ -394,6 +395,14 @@ fn press(loaded: &mut Loaded, hit: Hit, shift: bool){
     } else {
         move_caret(loaded, step);
     }
+}
+//Selects the tapes' selected arms on the board too. As a click there would, the Part window lists the parts where
+//they are, such as the track under an arm.
+fn select_tape_arms(loaded: &mut Loaded){
+    let arms = loaded.tape_sel.arms();
+    let hexes: Vec<Pos> = arms.clone().map(|i| loaded.timeline.curr().arms[i].pos).collect();
+    loaded.list_stacks(hexes);
+    loaded.set_selection(arms.map(PartId::Arm).collect());
 }
 //Dragging across timesteps selects the cells passed over, and dragging straight down or up puts the caret on each arm
 fn drag(loaded: &mut Loaded, arm: usize, step: usize){
@@ -542,13 +551,15 @@ pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
             let (arm, step) = layout.cell_at(pos, arm_count, step_count);
             drag(loaded, arm, step);
         }
-        //Where an arm number being dragged would go. A press that egui doesn't take as a drag only selected its row,
-        //and a drag the arms were renumbered during (by an undo, say) would take the wrong arm, so it does nothing.
-        let reorder_from = loaded.tape_sel.reorder_from.filter(|&(_, numbering)| numbering == loaded.numbering_version)
-            .map(|(from, _)| from);
-        let reordering = reorder_from.is_some() && (response.dragged() || response.drag_stopped());
-        let reorder = reorder_from.filter(|_| reordering).zip(pointer)
-            .and_then(|(from, pos)| layout.reorder_target(pos, from, arm_count, step_count));
+        //Where the selected arms would go, dragged by a number. A press that egui doesn't take as a drag is a click,
+        //and a press the arms were renumbered during (by an undo, say) would take the wrong arms, so it does nothing.
+        let number_press = loaded.tape_sel.number_press.filter(|&(_, numbering)| numbering == loaded.numbering_version)
+            .map(|(arm, _)| arm);
+        let reordering = number_press.is_some() && loaded.edit_lock().is_none()
+            && (response.dragged() || response.drag_stopped());
+        let moved: Vec<usize> = loaded.tape_sel.arms().collect();
+        let reorder = pointer.filter(|_| reordering)
+            .and_then(|pos| layout.reorder_target(pos, &moved, arm_count, step_count));
         let over_numbers = matches!(response.hover_pos().and_then(|p| layout.hit(p, arm_count, step_count)),
             Some(Hit::Gutter(_)));
         if reordering || (over_numbers && loaded.edit_lock().is_none()){
@@ -561,11 +572,17 @@ pub fn tape_grid(ui: &mut egui::Ui, loaded: &mut Loaded) -> f32{
         let drop_beside = reorder.filter(|_| down).map(|(anchor, after, _)| (anchor, after));
         if !down{
             loaded.tape_sel.drag_from = None;
-            loaded.tape_sel.reorder_from = None;
-            if let (Some(from), Some((_, _, to))) = (reorder_from, reorder){
-                if let Err(err) = loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Arm, moved: vec![from], to}){
+            loaded.tape_sel.number_press = None;
+            if let Some((_, _, to)) = reorder{
+                if let Err(err) = loaded.apply_edit(&LayoutEdit::Reorder{kind: PartKind::Arm, moved, to}){
                     loaded.message = Some(err);
                 }
+            } else if let Some(arm) = number_press.filter(|_| response.clicked()){
+                //One of several selected numbers, which the press kept. A drag that was dropped or let go off the rows
+                //keeps them.
+                loaded.tape_sel.arm = arm;
+                loaded.tape_sel.collapse();
+                select_tape_arms(loaded);
             }
         }
         if response.has_focus(){
@@ -967,6 +984,25 @@ mod editing_tests {
         assert_eq!(arm_order(&loaded), vec![1, 2, 0, 3]);
         assert_eq!(loaded.tape_sel.arms(), 2..3, "the caret is on its new row");
         assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(2)]), "and it's selected on the board");
+    }
+
+    #[test]
+    fn dragging_one_of_several_selected_numbers_moves_them_all() {
+        let ctx = egui::Context::default();
+        let mut loaded = Loaded::for_test(vec![], numbered_arms(5));
+        let layout = grid_frame(&ctx, &mut loaded, vec![]);
+        grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 1)));
+        let shift_click = egui::RawInput{events: quick_click(number(&layout, 2)), modifiers: Modifiers::SHIFT, ..Default::default()};
+        let _ = ctx.run_ui(shift_click, |ui| {tape_grid(ui, &mut loaded);});
+        //Below arm 4, by arm 2's number
+        let to = number(&layout, 3) + vec2(0., layout.cell.y / 4.);
+        drag_grid(&ctx, &mut loaded, number(&layout, 2), to, vec![]);
+        assert_eq!(arm_order(&loaded), vec![0, 3, 1, 2, 4]);
+        assert_eq!(loaded.tape_sel.arms(), 2..4, "they stay selected");
+        assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(2), PartId::Arm(3)]), "on the board too");
+        grid_frame(&ctx, &mut loaded, quick_click(number(&layout, 3)));
+        assert_eq!(loaded.tape_sel.arms(), 3..4, "a click on one selects only it");
+        assert_eq!(loaded.selection, BTreeSet::from([PartId::Arm(3)]));
     }
 
     #[test]

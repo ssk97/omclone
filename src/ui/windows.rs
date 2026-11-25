@@ -212,7 +212,7 @@ const TAPE_HELP: &[HelpEntry] = &[
     both("Click the ruler", "Go to that timestep"),
     both("Click an arm number", "Select its row, and the arm on the board. The Part window lists the parts on its hex."),
     both("Shift+click an arm number", "Select the rows to it, and their arms on the board, listing the parts on their hexes"),
-    editor("Drag an arm number", "Reorder the arms"),
+    editor("Drag an arm number", "Reorder its arm, or all the selected rows if it's one of them"),
     both("Drag; Shift+click; Shift+arrows", "Select"),
     both("Arrows", "Move the caret"),
     both("Home / End", "Go to step 0 / the end of the selected tapes. With Shift, select to there."),
