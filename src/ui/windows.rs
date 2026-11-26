@@ -1,15 +1,25 @@
 //The egui windows, except the Part window (see part_window.rs)
 use super::*;
 
-//A closable message, cleared when closed
-pub fn message_window(egui_ctx: &egui::Context, id: &str, message: &mut Option<String>){
-    if let Some(msg) = message{
-        let mut opened = true;
-        egui::Window::new("Message").id(egui::Id::new(id))
-            .open(&mut opened).show(egui_ctx, |ui| {
-            ui.label(msg.as_str());
-        });
-        if !opened {*message = None;}
+//The messages that are set, in one closable window that clears them all when closed. It's one window because egui
+//reopens a window where it was last, so a window for each could open exactly over the other.
+pub fn message_window(egui_ctx: &egui::Context, messages: &mut [&mut Option<String>]){
+    if messages.iter().all(|m| m.is_none()){
+        return;
+    }
+    let mut opened = true;
+    egui::Window::new("Message").open(&mut opened).show(egui_ctx, |ui| {
+        for (i, msg) in messages.iter().filter_map(|m| m.as_deref()).enumerate(){
+            if i > 0{
+                ui.separator();
+            }
+            ui.label(msg);
+        }
+    });
+    if !opened{
+        for message in messages{
+            **message = None;
+        }
     }
 }
 //The largest max timestep or loop length that can be entered. It's far beyond real solutions, and keeps

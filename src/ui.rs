@@ -314,12 +314,14 @@ impl EventHandler for OmcloneApp {
         #[cfg(target_arch = "wasm32")]
         let dropped = false;
         self.egui_mq.run(ctx, |_mq_ctx, egui_ctx|{
-            windows::message_window(egui_ctx, "app_message", &mut self.extra_message);
+            match &mut self.app_state{
+                Loaded(loaded) => windows::message_window(egui_ctx, &mut [&mut self.extra_message, &mut loaded.message]),
+                NotLoaded => windows::message_window(egui_ctx, &mut [&mut self.extra_message]),
+            }
             match &mut self.app_state{
                 Loaded(loaded) => {
                     loaded.draw_box_select(egui_ctx, screen_size);
                     windows::timeline_window(egui_ctx, loaded);
-                    windows::message_window(egui_ctx, "world_message", &mut loaded.message);
                     windows::crash_window(egui_ctx, loaded);
                     windows::camera_window(egui_ctx, loaded, screen_size);
                     windows::help_window(egui_ctx, loaded);
